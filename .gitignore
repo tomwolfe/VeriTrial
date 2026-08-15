@@ -1,0 +1,9 @@
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Output files
+output/
+
+# Test cache
+tests/__pycache__/
