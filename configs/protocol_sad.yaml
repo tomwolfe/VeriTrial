@@ -1,0 +1,64 @@
+protocol:
+  name: "SAD_Warfarin"
+  phase: "Phase I"
+  design: "SAD"
+  n_cohorts: 4
+  cohort_size: 10
+  dose_levels: [2.0, 5.0, 10.0, 20.0]  # mg (single ascending dose)
+  dose_unit: mg
+  dosing_route: "oral"
+  dose_escalation:
+    rule: "modified_accrual"
+    max_dlt_per_cohort: 1
+    min_dlt_free_days: 7
+    next_dose_multiplier: 2.0
+    starting_dose: 2.0
+  dosing_interval_days: 1
+  observation_period_days: 7
+  visit_schedule:
+    - day: 0
+      time: 0.0
+      description: "Pre-dose"
+    - day: 0
+      time: 0.5
+      description: "30 min post-dose"
+    - day: 0
+      time: 1.0
+      description: "1h post-dose"
+    - day: 0
+      time: 2.0
+      description: "2h post-dose"
+    - day: 0
+      time: 4.0
+      description: "4h post-dose"
+    - day: 0
+      time: 8.0
+      description: "8h post-dose"
+    - day: 1
+      time: 24.0
+      description: "24h (trough)"
+    - day: 2
+      time: 48.0
+      description: "48h"
+    - day: 4
+      time: 96.0
+      description: "96h"
+    - day: 7
+      time: 168.0
+      description: "168h (end of period)"
+  dropout:
+    rate_per_day: 0.001
+    cause: "protocol"
+  adherence:
+    distribution: "uniform"
+    min: 0.85
+    max: 1.0
+  measurement_noise:
+    type: "lognormal"
+    cv_percent: 15.0
+  safety:
+    qt_threshold: 500.0    # absolute QTc (ms)
+    qt_delta: 60.0         # delta QTc from baseline (ms)
+    alt_threshold: 3.0     # x ULN (Hy's Law)
+    bilirubin_threshold: 2.0  # x ULN
+    ctcae_version: 5.0

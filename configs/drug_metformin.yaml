@@ -1,0 +1,19 @@
+drug:
+  name: metformin
+  mol_weight: 129.16
+  log_p: -2.4
+  pka: [12.4]  # basic
+  fup: 0.0  # essentially unbound but ~0 because ion trapping
+  bp_ratio: 1.0
+  dose_unit: mg
+  typical_cl_f: 0.35  # L/h (renal clearance dominant)
+  typical_v_f: 0.29   # L/kg
+  ka: 1.0
+  bioavailability: 0.55  # ~50-60% oral
+  target: oct1_transporter
+  ec50: 10.0
+  emax: 1.0
+  hill_coeff: 1.0
+  qtcd_baseline: 400.0
+  qtcd_slope: 0.0
+  dili_risk: 0.02

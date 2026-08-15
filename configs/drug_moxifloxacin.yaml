@@ -1,0 +1,20 @@
+drug:
+  name: moxifloxacin
+  mol_weight: 383.8  # g/mol
+  log_p: -1.0
+  pka: [6.1, 8.7]  # zwitterionic
+  fup: 0.67  # fraction unbound plasma
+  bp_ratio: 1.0
+  dose_unit: mg
+  typical_cl_f: 0.45  # L/h/L body water ~ 12 L/h typical dose 400 mg
+  typical_v_f: 1.8   # L/L
+  ka: 1.2
+  bioavailability: 0.89
+  target: bacterial_parp
+  ec50: 0.5  # mg/L minimal effect conc
+  emax: 0.95
+  hill_coeff: 1.5
+  qtcd_baseline: 420.0  # ms baseline QTc
+  qtcd_emax: 25.0       # max QTc prolongation (ms) — moxifloxacin known effect
+  qtcd_ec50: 1.5        # mg/L plasma conc for half-max QTc effect
+  dili_risk: 0.05

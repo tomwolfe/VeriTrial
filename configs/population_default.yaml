@@ -1,0 +1,51 @@
+population:
+  n_subjects: 1000
+  seed: 42
+  # NHANES-based priors (simplified)
+  age:
+    dist: truncated_normal
+    mean: 40.0
+    std: 12.0
+    min: 18.0
+    max: 75.0
+  weight:
+    dist: lognormal
+    mean_log: 4.42  # ~85 kg geometric mean
+    std_log: 0.18
+  height:
+    dist: truncated_normal
+    mean: 170.0  # cm
+    std: 10.0
+    min: 150.0
+    max: 200.0
+liver_volume:
+    dist: lognormal
+    mean_log: 7.31  # median ~1500 mL for typical patient
+    std_log: 0.20
+  egfr:
+    dist: lognormal
+    mean_log: 5.05  # ~140 mL/min/1.73m2 geometric mean
+    std_log: 0.35   # wide enough to include CKD
+  genotypes:
+    cyp2c9:
+      alleles: [CYP2C9*1, CYP2C9*2, CYP2C9*3]
+      frequencies: [0.88, 0.09, 0.03]
+      activity_scores: [1.0, 0.5, 0.0]
+    cyp2c19:
+      alleles: [CYP2C19*1, CYP2C19*2, CYP2C19*3, CYP2C19*17]
+      frequencies: [0.62, 0.17, 0.04, 0.17]
+      activity_scores: [1.0, 0.0, 0.0, 1.5]
+    cyp2d6:
+      alleles: [CYP2D6*1, CYP2D6*10, CYP2D6*4, CYP2D6*5]
+      frequencies: [0.71, 0.12, 0.08, 0.09]
+      activity_scores: [1.0, 0.5, 0.0, 0.0]
+    cyp3a4:
+      alleles: [CYP3A4*1B, CYP3A4*22]
+      frequencies: [0.07, 0.13]
+      activity_scores: [1.0, 0.6]
+  correlation_matrix:
+    age_egfr: -0.35
+    weight_height: 0.72
+    weight_liver_volume: 0.68
+    age_liver_volume: -0.15
+    weight_egfr: 0.25

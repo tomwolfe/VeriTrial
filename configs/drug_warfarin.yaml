@@ -1,0 +1,24 @@
+drug:
+  name: warfarin
+  mol_weight: 308.33  # g/mol
+  log_p: 2.56
+  pka: [5.0]  # acidic, mostly unionized at pH 7.4
+  fup: 0.008  # fraction unbound plasma
+  bp_ratio: 0.8  # blood:plasma ratio
+  dose_unit: mg
+  # Pharmacokinetic parameters (literature: Gabriel et al., Clin Pharmacokinet 1994)
+  # These are population-typical values; individual variation comes from population generator
+  # and genotype scaling
+  typical_cl_f: 0.042  # L/h/kg (bioavailability-adjusted clearance)
+  typical_v_f: 0.12    # L/kg (bioavailability-adjusted volume)
+  ka: 1.0              # 1/h absorption rate constant
+  bioavailability: 0.95  # fraction absorbed
+  # Dose-response
+  target: vkorc1
+  ec50: 3.0  # ng/mL nominal INR response
+  emax: 5.0
+  hill_coeff: 2.0
+  # Safety
+  qtcd_baseline: 400.0  # ms
+  qtcd_slope: 0.0  # no significant QT prolongation expected
+  dili_risk: 0.01  # low baseline risk

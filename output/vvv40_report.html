@@ -1,0 +1,78 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>VeriTrial V&V Report</title>
+        <style>
+            body {font-family: Arial, sans-serif; margin: 40px;}
+            h1 {color: #2c3e50}
+            h2 {color: #34495e}
+            table {border-collapse: collapse; width: 100%;}
+            th, td {border: 1px solid #ccc; padding: 8px; text-align: left}
+            th {background-color: #f2f2f2}
+            .pass {color: green}
+            .fail {color: red}
+        </style>
+    </head>
+    <body>
+        <h1>VeriTrial InSilico Clinical Trial Simulator</h1>
+        <h2>ASME V&V 40 Validation Report</h2>
+        <p><strong>Version:</strong> 0.1.0</p>
+        <p><strong>Date:</strong> 2026-08-15T17:16:07.234933+00:00</p>
+        <p><strong>Run Hash:</strong> a2e79236722d</p>
+
+        <h3>Warfarin PGx Validation</h3>
+        <table>
+            <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+            <tr><td>Clearance (L/h/kg)</td>
+                <td>0.042</td>
+                <td>0.042</td>
+                <td class="pass">
+                    PASS
+                </td></tr>
+            <tr><td>Volume (L/kg)</td>
+                <td>0.12</td>
+                <td>0.12</td>
+                <td class="pass">
+                    PASS
+                </td></tr>
+        </table>
+
+        <h3>Moxifloxacin QTc Validation</h3>
+        <table>
+            <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+            <tr><td>Baseline QTc (ms)</td>
+                <td>420.0</td>
+                <td>N/A (simulation)</td>
+                <td>—</td></tr>
+            <tr><td>Mean QTc Δ 400mg (ms)</td>
+                <td>15.0</td>
+                <td>15.0</td>
+                <td class="pass">
+                    PASS
+                </td></tr>
+            <tr><td>Mean QTc Δ 800mg (ms)</td>
+                <td>25.0</td>
+                <td>25.0</td>
+                <td class="pass">
+                    PASS
+                </td></tr>
+        </table>
+
+        <h3>Summary</h3>
+        <ul>
+            <li>Warfarin PGx Validation: PASS</li>
+            <li>Moxifloxacin QTc Validation: PASS</li>
+        </ul>
+
+        <h3>Provenance</h3>
+        <ul>
+            <li>Software: insilico-trial</li>
+            <li>Version: 0.1.0</li>
+            <li>Generated: 2026-08-15T17:16:07.234967+00:00</li>
+            <li>Run Hash: a2e79236722d</li>
+        </ul>
+    </body>
+    </html>
+    

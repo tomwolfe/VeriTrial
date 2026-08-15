@@ -1,0 +1,130 @@
+[project]
+name = "insilico-trial"
+version = "0.1.0"
+description = "Regulatory-grade InSilico Clinical Trial Simulator MVP"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [{name = "VeriTrial Team"}]
+keywords = ["pharmacokinetics", "PBPK", "clinical-trial-simulation", "JAX", "copula"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bioengineering",
+    "Operating System :: MacOS",
+]
+
+dependencies = [
+    "pydantic>=2.5,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "polars>=0.20,<2.0",
+    "duckdb>=1.0,<2.0",
+    "numpy>=1.26,<3.0",
+    "scipy>=1.12,<2.0",
+    "typer>=0.12,<1.0",
+    "tqdm>=4.66,<5.0",
+    "matplotlib>=3.8,<4.0",
+    "seaborn>=0.13,<1.0",
+    "jinja2>=3.1,<4.0",
+    "pandas>=2.2,<3.0",
+    "pyarrow>=15.0,<20.0",
+    "jax>=0.4.20,<1.0",
+    "jaxlib>=0.4.20,<1.0",
+    "diffrax>=0.11,<1.0",
+    "numpyro>=0.13,<1.0",
+    "tomli>=2.0,<3.0; python<3.11",
+    "rich>=13.7,<14.0",
+    "click>=8.1,<9.0",
+]
+
+[project.optional-dependencies]
+metal = [
+    "jax-metal>=0.1.0; platform_machine == 'arm64'",
+]
+dev = [
+    "ruff>=0.3,<0.8",
+    "mypy>=1.8,<2.0",
+    "pytest>=8.0,<9.0",
+    "pytest-cov>=4.1,<6.0",
+    "pytest-xdist>=3.6,<5.0",
+    "hypothesis>=6.92,<7.0",
+    "pre-commit>=3.6,<4.0",
+    "types-pyyaml>=6.0,<7.0",
+    "types-tqdm>=0.2,<1.0",
+    "types-click>=8.1,<9.0",
+]
+
+[project.scripts]
+insilico-trial = "insilico_trial.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/opencode/VeriTrial"
+Documentation = "https://github.com/opencode/VeriTrial"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/insilico_trial"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+indent-width = 4
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "PT", "RUF"]
+ignore = ["E501", "B008", "B904", "C901"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S301"]
+
+[tool.ruff.isort]
+known-first-party = ["insilico_trial"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+show_error_codes = true
+files = ["src/insilico_trial"]
+
+[[tool.mypy.overrides]]
+module = ["diffrax.*", "jax.*", "jaxlib.*", "numpyro.*", "scipy.*", "sklearn.*", "statsmodels.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["src/insilico_trial/tests"]
+addopts = "-x --tb=short -q"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "benchmark: marks tests as benchmark tests",
+]
+
+[tool.coverage.run]
+source = ["insilico_trial"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@overload",
+]
