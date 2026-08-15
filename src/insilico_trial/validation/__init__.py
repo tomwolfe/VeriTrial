@@ -18,6 +18,7 @@ from typing import Any
 import numpy as onp
 from scipy import stats
 
+from insilico_trial.pbpk.model import run_pbpk
 from insilico_trial.population.generator import generate_population
 from insilico_trial.schemas import (
     ActivityScore,
@@ -29,6 +30,7 @@ from insilico_trial.schemas import (
     Protocol,
     SexEnum,
     TrialResult,
+    load_drug_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -38,10 +40,21 @@ from insilico_trial.schemas import (
 # Warfarin reference data from Gabriel et al., Clin Pharmacokinet 1994
 # and FDA label data
 WARFARIN_REFERENCE = {
-    "typical_Cl_h": 0.042,  # L/h/kg
-    "typical_Vh_L": 0.12,   # L/kg
+    "typical_Cl_h": 0.042,  # L/h/kg (bioavailability-adjusted typical clearance)
+    "typical_Vh_L": 0.12,   # L/kg (bioavailability-adjusted typical volume)
     "typical_half_life_h": 38.0,  # hours
 }
+
+
+def _compute_warfarin_cl_f(patient_weight_kg: float, activity_score: float,
+                           typical_cl: float = WARFARIN_REFERENCE["typical_Cl_h"]) -> float:
+    """Compute patient-specific CL/F for warfarin.
+
+    CL/F = typical_CL/F * activity_score * weight_scaling
+    weight_scaling = patient_weight_kg / 70.0 (linear with weight)
+    """
+    weight_scaling = patient_weight_kg / 70.0
+    return typical_cl * activity_score * weight_scaling
 
 
 def validate_warfarin_pgx(
@@ -50,8 +63,8 @@ def validate_warfarin_pgx(
 ) -> dict[str, Any]:
     """Validate Warfarin PGx simulation against reference data.
 
-    Generates a population with CYP2C9 genotype distribution and checks
-    that population PK metrics are within ±20% of reference values.
+    Generates a population with CYP2C9 genotype distribution and computes
+    population PK metrics from simulation, then compares to reference values.
 
     Parameters
     ----------
@@ -65,7 +78,7 @@ def validate_warfarin_pgx(
     dict[str, Any]
         Validation results with pass/fail for each metric
     """
-    # Generate population with warfarin-like genetics
+    # Generate population with CYP2C9 genotype distribution
     df, _spec = generate_population({
         'name': 'warfarin_pgx',
         'n_subjects': n_patients,
@@ -91,77 +104,78 @@ def validate_warfarin_pgx(
         }
     })
 
-    # Create a single patient from the population
-    row = df.head(1).iloc[0]
-    sex_val = row.get("sex", 0)
-    sex_enum = "male" if sex_val else "female"
-
-    biometric = Biometric(
-        age=float(row.get("age", 40.0)),
-        sex=SexEnum(sex_enum),
-        weight=float(row.get("weight", 70.0)),
-        height=float(row.get("height", 170.0)),
-        egfr=float(row.get("egfr", 90.0)),
-    )
-
-    genotype_score = ActivityScore(
-        gene="cyp2c9", allele="CYP2C9*1", activity_score=1.0,
-        metabolizer_status="extensive",
-    )
-
-    patient_dict = {
-        "id": str(row.get("subject_id", "patient_1")),
-        "biometrics": biometric,
-        "genotypes": {"cyp2c9": genotype_score},
+    # Build activity score lookup from generated population
+    # Each patient has two CYP2C9 alleles; compute weighted activity score
+    allele_to_score = {
+        'CYP2C9*1': 1.0,
+        'CYP2C9*2': 0.5,
+        'CYP2C9*3': 0.0,
     }
-    patient = Patient.model_validate(patient_dict)
-    # Compute observed PK metrics from population characteristics
-    # Warfarin clearance is primarily dependent on CYP2C9 genotype
-    # Poor metabolizers have ~25% of extensive metabolizer clearance
-    # We compute a population-weighted average clearance
 
-    # Simplified: use activity scores to weight clearance
-    # CYP2C9*1: activity 1.0 (extensive metabolizer)
-    # CYP2C9*2: activity 0.5 (intermediate metabolizer)
-    # CYP2C9*3: activity 0.0 (poor metabolizer)
+    # Assign genotype and activity score to each patient
+    cohort_cl_f: dict[str, list[float]] = {"EM": [], "IM": [], "PM": []}
 
-    # Population-weighted clearance factor
-    # Rough estimation based on allele frequencies
-    activity_factor = 1.0  # baseline for extensive metabolizer population
+    for _, row in df.iterrows():
+        # Determine genotype pair and activity score
+        allele1 = row.get("cyp2c9_allele1", "CYP2C9*1")
+        allele2 = row.get("cyp2c9_allele2", "CYP2C9*1")
+        score1 = allele_to_score.get(allele1, 1.0)
+        score2 = allele_to_score.get(allele2, 1.0)
+        activity_score = (score1 + score2) / 2  # average of two alleles
 
-    # Observed clearance adjusted for population genetics
-    cl_obs = WARFARIN_REFERENCE["typical_Cl_h"] * activity_factor
+        weight = float(row.get("weight", 70.0))
+        cl_f = _compute_warfarin_cl_f(weight, activity_score)
+
+        # Classify metabolizer status
+        if activity_score == 1.0:
+            cohort = "EM"
+        elif activity_score >= 0.25:
+            cohort = "IM"
+        else:
+            cohort = "PM"
+
+        cohort_cl_f[cohort].append(cl_f)
+
+    # Compute population-weighted mean CL/F per cohort
+    cohort_means: dict[str, float] = {}
+    cohort_weights: dict[str, float] = {}
+    for cohort, cl_values in cohort_cl_f.items():
+        if cl_values:
+            cohort_means[cohort] = float(onp.mean(cl_values))
+            cohort_weights[cohort] = len(cl_values) / n_patients
+
+    # Compute overall population-weighted mean CL/F
+    population_mean_cl_f = sum(
+        cohort_means[c] * cohort_weights[c] for c in cohort_means
+    )
 
     # Reference values with 20% tolerance
     cl_ref = WARFARIN_REFERENCE["typical_Cl_h"]
-    v_ref = WARFARIN_REFERENCE["typical_Vh_L"]
-
-    # Calculate tolerance bounds
     cl_lo = cl_ref * 0.8
     cl_hi = cl_ref * 1.2
-    v_lo = v_ref * 0.8
-    v_hi = v_ref * 1.2
 
-    # Volume from population mean weight and allometric scaling
-    v_obs = 0.12 * (float(row.get("weight", 70.0)) / 70.0)  # allometric scaling
+    clearance_within_20pct = cl_lo <= population_mean_cl_f <= cl_hi
 
     results = {
         "benchmark": "warfarin_pgx",
         "n_patients": n_patients,
         "seed": seed,
         "reference_clearance_L_h_kg": cl_ref,
-        "observed_clearance_L_h_kg": float(cl_obs),
-        "clearance_within_20pct": cl_lo <= cl_obs <= cl_hi,
-        "reference_volume_L_kg": v_ref,
-        "observed_volume_L_kg": float(v_obs),
-        "volume_within_20pct": v_lo <= v_obs <= v_hi,
+        "observed_clearance_L_h_kg": population_mean_cl_f,
+        "clearance_within_20pct": clearance_within_20pct,
+        "reference_volume_L_kg": WARFARIN_REFERENCE["typical_Vh_L"],
         "details": {
-            "population_mean_age": float(row.get("age", 40.0)),
-            "population_n_male": 1,
-            "population_n_female": 0,
-            "population_mean_weight": float(row.get("weight", 70.0)),
-            "activity_factor": activity_factor,
-            "cyp2c9_alleles": str(row.get("cyp2c9_alleles", ["CYP2C9*1", "CYP2C9*1"])),
+            "population_mean_age": float(df["age"].mean()),
+            "population_n_male": int((df["sex"] == "male").sum()),
+            "population_n_female": int((df["sex"] == "female").sum()),
+            "population_mean_weight": float(df["weight_kg"].mean()),
+            "cohort_means": {
+                cohort: {"CL_F": mean_cl_f}
+                for cohort, mean_cl_f in cohort_means.items()
+            },
+            "cohort_weights": {
+                cohort: weight for cohort, weight in cohort_weights.items()
+            },
         },
     }
 
@@ -189,13 +203,13 @@ def validate_moxifloxacin_qtc(
 ) -> dict[str, Any]:
     """Validate Moxifloxacin QTc simulation against reference data.
 
-    Generates a population and computes expected QTc prolongation
-    based on the moxifloxacin Emax model.
+    Runs PBPK simulation at 400mg and 800mg for a virtual patient,
+    applies Emax QTc model, and compares to reference values.
 
     Parameters
     ----------
     n_patients : int
-        Number of virtual patients to generate
+        Number of virtual patients (only 1 used for deterministic comparison)
     seed : int
         Random seed for reproducibility
 
@@ -204,95 +218,81 @@ def validate_moxifloxacin_qtc(
     dict[str, Any]
         Validation results with pass/fail for each metric
     """
-    # Generate population
-    df, _spec = generate_population({
-        'name': 'moxifloxacin_qtc',
-        'n_subjects': n_patients,
-        'seed': seed,
-        'age': {'dist': 'truncated_normal', 'mean': 40.0, 'std': 12.0, 'min': 18.0, 'max': 75.0},
-        'weight': {'dist': 'lognormal', 'mean_log': 4.42, 'std_log': 0.18},
-        'height': {'dist': 'truncated_normal', 'mean': 170.0, 'std': 10.0, 'min': 150.0, 'max': 200.0},
-        'egfr': {'dist': 'lognormal', 'mean_log': 5.05, 'std_log': 0.35},
-        'liver_volume': {'dist': 'lognormal', 'mean_log': 7.31, 'std_log': 0.20},
-        'genotypes': {
-            'cyp2d6': {
-                'alleles': ['CYP2D6*1', 'CYP2D6*10', 'CYP2D6*4', 'CYP2D6*5'],
-                'frequencies': [0.71, 0.12, 0.08, 0.09],
-                'activity_scores': [1.0, 0.5, 0.0, 0.0],
-            },
-        },
-        'correlation_matrix': {
-            'age_egfr': -0.35,
-            'weight_height': 0.72,
-            'weight_liver_volume': 0.68,
-            'age_liver_volume': -0.15,
-            'weight_egfr': 0.25,
-        }
-    })
+    # Load moxifloxacin drug config
+    drug = load_drug_config("configs/drug_moxifloxacin.yaml")
 
-    # Create a single patient from the population
-    row = df.head(1).iloc[0]
-    sex_val = row.get("sex", 0)
-    sex_enum = "male" if sex_val else "female"
+    # Typical 70kg patient parameters
+    weight_kg = 70.0
+    age = 40.0
 
-    biometric = Biometric(
-        age=float(row.get("age", 40.0)),
-        sex=SexEnum(sex_enum),
-        weight=float(row.get("weight", 70.0)),
-        height=float(row.get("height", 170.0)),
-        egfr=float(row.get("egfr", 90.0)),
+    # Run PBPK at 400mg
+    result_400 = run_pbpk(
+        dose_mg=400.0,
+        weight_kg=weight_kg,
+        age=age,
+        log_p=drug.log_p,
+        pka=drug.pka if drug.pka else [],
+        fu_plasma=drug.fup,
+        bp_ratio=drug.bp_ratio,
+        cl=drug.typical_cl_f,
+        ka=drug.ka,
+        n_timepoints=24 * 7,
+        t_max_days=7.0,
     )
 
-    genotype_score = ActivityScore(
-        gene="cyp2d6", allele="CYP2D6*1", activity_score=1.0,
-        metabolizer_status="extensive",
+    # Get C_max from 400mg simulation
+    cmax_400 = float(onp.max(result_400["C_plasma"]))
+
+    # Run PBPK at 800mg
+    result_800 = run_pbpk(
+        dose_mg=800.0,
+        weight_kg=weight_kg,
+        age=age,
+        log_p=drug.log_p,
+        pka=drug.pka if drug.pka else [],
+        fu_plasma=drug.fup,
+        bp_ratio=drug.bp_ratio,
+        cl=drug.typical_cl_f,
+        ka=drug.ka,
+        n_timepoints=24 * 7,
+        t_max_days=7.0,
     )
 
-    patient_dict = {
-        "id": str(row.get("subject_id", "patient_1")),
-        "biometrics": biometric,
-        "genotypes": {"cyp2d6": genotype_score},
-    }
-    patient = Patient.model_validate(patient_dict)
-    # Compute expected QTc prolongation using Emax model
-    # Emax model: ΔQtc = Emax * C / (EC50 + C)
-    # For moxifloxacin typical dose of 400mg, expected mean ΔQtc ≈ 15ms
-    # For 800mg, expected mean ΔQtc ≈ 25ms
-    # We use the population weight to adjust exposure proportionally
+    # Get C_max from 800mg simulation
+    cmax_800 = float(onp.max(result_800["C_plasma"]))
 
-    weight_factor = float(row.get("weight", 70.0)) / 70.0  # normalize to typical 70kg
+    # Apply Emax model: deltaQTc = Emax * C / (EC50 + C)
+    delta_qtc_400 = drug.qtcd_emax * cmax_400 / (drug.qtcd_ec50 + cmax_400)
+    delta_qtc_800 = drug.qtcd_emax * cmax_800 / (drug.qtcd_ec50 + cmax_800)
 
-    # Expected QTc delta at 400mg
-    mean_qtc_400 = MOXIFAXACIN_REFERENCE["dose_400mg_QTc_delta_mean_ms"] * weight_factor
-    # Expected QTc delta at 800mg
-    mean_qtc_800 = MOXIFAXACIN_REFERENCE["dose_800mg_QTc_delta_mean_ms"] * weight_factor
+    # Baseline QTc from drug config
+    baseline_qtc = drug.qtcd_baseline
 
-    # Standard deviation scales with mean (rough approximation)
-    sd_qtc = 10.0 * weight_factor  # reference SD at 70kg
+    # Compare to reference values within ±5ms
+    reference_400 = MOXIFAXACIN_REFERENCE["dose_400mg_QTc_delta_mean_ms"]
+    reference_800 = MOXIFAXACIN_REFERENCE["dose_800mg_QTc_delta_mean_ms"]
 
-    # Probability of exceeding 500ms QTc
-    # Baseline 420ms + delta > 500ms means delta > 80ms
-    p_500ms_400 = onp.mean(stats.norm.sf(80.0, mean_qtc_400, sd_qtc)) / 1.0  # normalize
-    p_500ms_800 = onp.mean(stats.norm.sf(80.0, mean_qtc_800, sd_qtc)) / 1.0
+    qtc_400_within_5ms = abs(delta_qtc_400 - reference_400) < 5
+    qtc_800_within_5ms = abs(delta_qtc_800 - reference_800) < 5
 
     results = {
         "benchmark": "moxifloxacin_qtc",
         "n_patients": n_patients,
         "seed": seed,
         "reference_baseline_Qtc_ms": MOXIFAXACIN_REFERENCE["baseline_Qtc_ms"],
-        "observed_mean_QTc_delta_400ms": float(mean_qtc_400),
-        "observed_mean_QTc_delta_800ms": float(mean_qtc_800),
-        "observed_sd_QTc_delta_ms": float(sd_qtc),
-        "observed_p_500ms_exceedance_400mg": float(p_500ms_400),
-        "observed_p_500ms_exceedance_800mg": float(p_500ms_800),
-        "reference_400mg_mean_ms": MOXIFAXACIN_REFERENCE["dose_400mg_QTc_delta_mean_ms"],
-        "reference_800mg_mean_ms": MOXIFAXACIN_REFERENCE["dose_800mg_QTc_delta_mean_ms"],
+        "observed_mean_QTc_delta_400ms": float(delta_qtc_400),
+        "observed_mean_QTc_delta_800ms": float(delta_qtc_800),
+        "observed_sd_QTc_delta_ms": 0.0,  # single patient, no SD
+        "reference_400mg_mean_ms": reference_400,
+        "reference_800mg_mean_ms": reference_800,
         "reference_400mg_p_500ms": MOXIFAXACIN_REFERENCE["qtc_flag_500ms_prob_400mg"],
         "reference_800mg_p_500ms": MOXIFAXACIN_REFERENCE["qtc_flag_500ms_prob_800mg"],
         "details": {
-            "population_mean_age": float(row.get("age", 40.0)),
-            "population_weight_kg": float(row.get("weight", 70.0)),
-            "weight_factor": weight_factor,
+            "population_weight_kg": weight_kg,
+            "cmax_400mg": cmax_400,
+            "cmax_800mg": cmax_800,
+            "delta_qtc_400ms": float(delta_qtc_400),
+            "delta_qtc_800ms": float(delta_qtc_800),
         },
     }
 
@@ -353,84 +353,82 @@ def generate_vvv40_report(
     }
 
     # Write HTML report
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>VeriTrial V&V Report</title>
-        <style>
-            body {{font-family: Arial, sans-serif; margin: 40px;}}
-            h1 {{color: #2c3e50}}
-            h2 {{color: #34495e}}
-            table {{border-collapse: collapse; width: 100%;}}
-            th, td {{border: 1px solid #ccc; padding: 8px; text-align: left}}
-            th {{background-color: #f2f2f2}}
-            .pass {{color: green}}
-            .fail {{color: red}}
-        </style>
-    </head>
-    <body>
-        <h1>VeriTrial InSilico Clinical Trial Simulator</h1>
-        <h2>ASME V&V 40 Validation Report</h2>
-        <p><strong>Version:</strong> {report['version']}</p>
-        <p><strong>Date:</strong> {report['date']}</p>
-        <p><strong>Run Hash:</strong> {report['provenance']['run_hash']}</p>
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>VeriTrial V&V Report</title>
+    <style>
+        body {{font-family: Arial, sans-serif; margin: 40px;}}
+        h1 {{color: #2c3e50}}
+        h2 {{color: #34495e}}
+        table {{border-collapse: collapse; width: 100%;}}
+        th, td {{border: 1px solid #ccc; padding: 8px; text-align: left}}
+        th {{background-color: #f2f2f2}}
+        .pass {{color: green}}
+        .fail {{color: red}}
+    </style>
+</head>
+<body>
+    <h1>VeriTrial InSilico Clinical Trial Simulator</h1>
+    <h2>ASME V&V 40 Validation Report</h2>
+    <p><strong>Version:</strong> {report['version']}</p>
+    <p><strong>Date:</strong> {report['date']}</p>
+    <p><strong>Run Hash:</strong> {report['provenance']['run_hash']}</p>
 
-        <h3>Warfarin PGx Validation</h3>
-        <table>
-            <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
-            <tr><td>Clearance (L/h/kg)</td>
-                <td>{WARFARIN_REFERENCE['typical_Cl_h']}</td>
-                <td>{validation_results.get('warfarin_pgx', {}).get('observed_clearance_L_h_kg', 'N/A')}</td>
-                <td class="{'pass' if validation_results.get('warfarin_pgx', {}).get('clearance_within_20pct') else 'fail'}">
-                    {'PASS' if validation_results.get('warfarin_pgx', {}).get('clearance_within_20pct') else 'FAIL'}
-                </td></tr>
-            <tr><td>Volume (L/kg)</td>
-                <td>{WARFARIN_REFERENCE['typical_Vh_L']}</td>
-                <td>{validation_results.get('warfarin_pgx', {}).get('observed_volume_L_kg', 'N/A')}</td>
-                <td class="{'pass' if validation_results.get('warfarin_pgx', {}).get('volume_within_20pct') else 'fail'}">
-                    {'PASS' if validation_results.get('warfarin_pgx', {}).get('volume_within_20pct') else 'FAIL'}
-                </td></tr>
-        </table>
+    <h3>Warfarin PGx Validation</h3>
+    <table>
+        <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+        <tr><td>Clearance (L/h/kg)</td>
+            <td>{WARFARIN_REFERENCE['typical_Cl_h']}</td>
+            <td>{validation_results.get('warfarin_pgx', {}).get('observed_clearance_L_h_kg', 'N/A')}</td>
+            <td class="{'pass' if validation_results.get('warfarin_pgx', {}).get('clearance_within_20pct') else 'fail'}">
+                {'PASS' if validation_results.get('warfarin_pgx', {}).get('clearance_within_20pct') else 'FAIL'}
+            </td></tr>
+        <tr><td>Volume (L/kg)</td>
+            <td>{WARFARIN_REFERENCE['typical_Vh_L']}</td>
+            <td>{validation_results.get('warfarin_pgx', {}).get('observed_volume_L_kg', 'N/A')}</td>
+            <td class="{'pass' if validation_results.get('warfarin_pgx', {}).get('volume_within_20pct') else 'fail'}">
+                {'PASS' if validation_results.get('warfarin_pgx', {}).get('volume_within_20pct') else 'FAIL'}
+            </td></tr>
+    </table>
 
-        <h3>Moxifloxacin QTc Validation</h3>
-        <table>
-            <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
-            <tr><td>Baseline QTc (ms)</td>
-                <td>{MOXIFAXACIN_REFERENCE['baseline_Qtc_ms']}</td>
-                <td>N/A (simulation)</td>
-                <td>—</td></tr>
-            <tr><td>Mean QTc Δ 400mg (ms)</td>
-                <td>{MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']}</td>
-                <td>{validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 'N/A')}</td>
-                <td class="{'pass' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 0) - MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']) < 5 else 'fail'}">
-                    {'PASS' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 0) - MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']) < 5 else 'FAIL'}
-                </td></tr>
-            <tr><td>Mean QTc Δ 800mg (ms)</td>
-                <td>{MOXIFAXACIN_REFERENCE['dose_800mg_QTc_delta_mean_ms']}</td>
-                <td>{validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_800ms', 'N/A')}</td>
-                <td class="{'pass' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_800ms', 0) - MOXIFAXACIN_REFERENCE['dose_800mg_QTc_delta_mean_ms']) < 5 else 'fail'}">
-                    {'PASS' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_800ms', 0) - MOXIFAXACIN_REFERENCE['dose_800mg_QTc_delta_mean_ms']) < 5 else 'FAIL'}
-                </td></tr>
-        </table>
+    <h3>Moxifloxacin QTc Validation</h3>
+    <table>
+        <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+        <tr><td>Baseline QTc (ms)</td>
+            <td>{MOXIFAXACIN_REFERENCE['baseline_Qtc_ms']}</td>
+            <td>N/A (simulation)</td>
+            <td>—</td></tr>
+        <tr><td>Mean QTc Δ 400mg (ms)</td>
+            <td>{MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']}</td>
+            <td>{validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 'N/A')}</td>
+            <td class="{'pass' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 0) - MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']) < 5 else 'fail'}">
+                {'PASS' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 0) - MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']) < 5 else 'FAIL'}
+            </td></tr>
+        <tr><td>Mean QTc Δ 800mg (ms)</td>
+            <td>{MOXIFAXACIN_REFERENCE['dose_800mg_QTc_delta_mean_ms']}</td>
+            <td>{validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_800ms', 'N/A')}</td>
+            <td class="{'pass' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_800ms', 0) - MOXIFAXACIN_REFERENCE['dose_800mg_QTc_delta_mean_ms']) < 5 else 'fail'}">
+                {'PASS' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_800ms', 0) - MOXIFAXACIN_REFERENCE['dose_800mg_QTc_delta_mean_ms']) < 5 else 'FAIL'}
+            </td></tr>
+    </table>
 
-        <h3>Summary</h3>
-        <ul>
-            <li>Warfarin PGx Validation: {'PASS' if validation_results.get('warfarin_pgx', {}).get('clearance_within_20pct') else 'FAIL'}</li>
-            <li>Moxifloxacin QTc Validation: {'PASS' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 0) - MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']) < 5 else 'FAIL'}</li>
-        </ul>
+    <h3>Summary</h3>
+    <ul>
+        <li>Warfarin PGx Validation: {'PASS' if validation_results.get('warfarin_pgx', {}).get('clearance_within_20pct') else 'FAIL'}</li>
+        <li>Moxifloxacin QTc Validation: {'PASS' if abs(validation_results.get('moxifloxacin_qtc', {}).get('observed_mean_QTc_delta_400ms', 0) - MOXIFAXACIN_REFERENCE['dose_400mg_QTc_delta_mean_ms']) < 5 else 'FAIL'}</li>
+    </ul>
 
-        <h3>Provenance</h3>
-        <ul>
-            <li>Software: insilico-trial</li>
-            <li>Version: 0.1.0</li>
-            <li>Generated: {datetime.now(UTC).isoformat()}</li>
-            <li>Run Hash: {report['provenance']['run_hash']}</li>
-        </ul>
-    </body>
-    </html>
-    """
+    <h3>Provenance</h3>
+    <ul>
+        <li>Software: insilico-trial</li>
+        <li>Version: 0.1.0</li>
+        <li>Generated: {datetime.now(UTC).isoformat()}</li>
+        <li>Run Hash: {report['provenance']['run_hash']}</li>
+    </ul>
+</body>
+</html>"""
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)

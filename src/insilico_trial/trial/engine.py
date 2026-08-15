@@ -215,11 +215,16 @@ class TrialEngine:
         # Compute PK summary (NCA-like)
         pk_summary = self._compute_patient_pk(observations, effective_dose)
 
-        # Check for DLT
+        # Check for DLT using safety thresholds from protocol
         has_dlt = False
-        if "cmax" in pk_summary and pk_summary["cmax"] is not None:
-            cmax_threshold = 500.0
-            if pk_summary["cmax"] > cmax_threshold:
+        # Get latest QTc observation from patient observations
+        patient_obs = [o for o in observations if o.patient_id == patient.id and o.qt_interval is not None]
+        if patient_obs:
+            latest_qtc = max(o.qt_interval for o in patient_obs if o.qt_interval is not None)
+            qt_threshold = self.protocol.safety.qt_threshold
+            qt_delta_threshold = self.protocol.safety.qt_delta
+            # DLT if absolute QTc > threshold or delta QTc > delta threshold
+            if latest_qtc > qt_threshold or latest_qtc - self.drug.qtcd_baseline > qt_delta_threshold:
                 has_dlt = True
 
         return {
@@ -323,11 +328,11 @@ class TrialEngine:
 
             if noise_type == "lognormal":
                 sigma = cv_percent / 100.0 / onp.sqrt(2)
-                epsilon = onp.random.randn()
+                epsilon = rng.standard_normal()
                 observed_c = concentration * onp.exp(sigma * epsilon) if concentration is not None else None
             elif noise_type == "normal":
                 sd_rel = cv_percent / 100.0
-                epsilon = onp.random.randn()
+                epsilon = rng.standard_normal()
                 observed_c = concentration * (1 + sd_rel * epsilon) if concentration is not None else None
             else:
                 observed_c = concentration
@@ -358,7 +363,7 @@ class TrialEngine:
                 time=time,
                 compartment="plasma",
                 concentration=observed_c,
-                qt_interval=400.0 + qt_delta if observed_c is not None else None,
+                qt_interval=self.drug.qtcd_baseline + qt_delta if observed_c is not None else None,
                 alt=None,
                 bilirubin=None,
                 notes=f"Visit day {day}, {time}h post-dose",
@@ -427,7 +432,7 @@ class TrialEngine:
     def _compute_population_summary(
         self, all_observations: list, all_pk: dict[str, dict[str, float | None]]
     ) -> PopulationSummary:
-        """Compute population-level summary statistics."""
+        """Compute population-level summary statistics from actual patient data."""
         n = len(all_pk)
 
         if n == 0:
@@ -447,22 +452,29 @@ class TrialEngine:
                 std_v=0.0,
             )
 
-        mean_age = 40.0
-        std_age = 12.0
-        n_male = n // 2
+        ages = [p.biometrics.age for p in self.population.patients[:n]]
+        weights = [p.biometrics.weight for p in self.population.patients[:n]]
+        heights = [p.biometrics.height for p in self.population.patients[:n]]
+
+        mean_age = float(onp.mean(ages)) if ages else 0.0
+        std_age = float(onp.std(ages)) if len(ages) > 1 else 0.0
+
+        n_male = sum(1 for p in self.population.patients[:n] if p.biometrics.sex.value == "male")
         n_female = n - n_male
+
+        mean_weight = float(onp.mean(weights)) if weights else 0.0
+        std_weight = float(onp.std(weights)) if len(weights) > 1 else 0.0
+
+        mean_height = float(onp.mean(heights)) if heights else 68.0
+        bmi = mean_weight / ((mean_height / 100.0) ** 2) if mean_height > 0 else 0.0
 
         cmax_values = [pk.get("cmax") for pk in all_pk.values() if pk.get("cmax") is not None]
         cl_values = [pk.get("cl_f") for pk in all_pk.values() if pk.get("cl_f") is not None]
 
-        mean_cmax = onp.mean(cmax_values) if cmax_values else 0.0
-        std_cmax = onp.std(cmax_values) if cmax_values else 0.0
-        mean_cl = onp.mean(cl_values) if cl_values else 0.0
-        std_cl = onp.std(cl_values) if cl_values else 0.0
-
-        mean_weight = 70.0
-        std_weight = 15.0
-        bmi = mean_weight / ((68.0 / 100.0) ** 2)
+        mean_cmax = float(onp.mean(cmax_values)) if cmax_values else 0.0
+        std_cmax = float(onp.std(cmax_values)) if len(cmax_values) > 1 else 0.0
+        mean_cl = float(onp.mean(cl_values)) if cl_values else 0.0
+        std_cl = float(onp.std(cl_values)) if len(cl_values) > 1 else 0.0
 
         return PopulationSummary(
             n=n,
@@ -476,8 +488,8 @@ class TrialEngine:
             median_egfr=140.0,
             mean_cl=mean_cl,
             std_cl=std_cl,
-            mean_v=70.0,
-            std_v=15.0,
+            mean_v=mean_weight,
+            std_v=std_weight,
         )
 
     def _assess_safety(self, observations: list) -> dict[str, Any]:
@@ -553,12 +565,13 @@ class TrialEngine:
 
     def _apply_escalation_rules(self, prev_dlt_count: int, prev_decision: str) -> None:
         """Apply dose escalation/de-escalation rules between cohorts."""
-        if prev_dlt_count >= 1:
-            pass  # de-escalate or stay
-        elif prev_dlt_count == 0 and prev_decision == "escalate":
-            pass  # can escalate further
-        else:
-            pass  # stay at same dose
+        if prev_dlt_count >= self.protocol.dose_escalation.max_dlt_per_cohort:
+            self.current_dose_level_index = max(0, self.current_dose_level_index - 1)
+        elif prev_dlt_count == 0:
+            self.current_dose_level_index = min(
+                self.current_dose_level_index + 1,
+                len(self.protocol.dose_levels) - 1
+            )
 
     def _determine_escalation(self, dlt_count: int, current_dose: float) -> str:
         """Determine escalation decision for next cohort.

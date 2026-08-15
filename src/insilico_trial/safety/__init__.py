@@ -7,7 +7,7 @@ All thresholds are configurable via YAML config files.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
@@ -67,23 +67,23 @@ def assess_qtc(
         patient_obs[obs.patient_id].append(obs)
 
     for patient_id, obs_list in patient_obs.items():
-        # Find baseline QTc (pre-dose) and max QTc
-        baseline_qtc = 400.0  # default baseline
-        max_qtc = baseline_qtc
+        # Baseline QTc from drug configuration, not from observations
+        baseline_qtc = drug.qtcd_baseline
 
+        # Find max delta QTc from exposure-response model
+        max_delta_qtc = 0.0
         for obs in obs_list:
-            if obs.time == 0 and obs.qt_interval is not None:
-                baseline_qtc = obs.qt_interval
-            if obs.qt_interval is not None and obs.qt_interval > max_qtc:
-                max_qtc = obs.qt_interval
+            if obs.concentration is not None and drug.qtcd_ec50 > 0:
+                delta_qtc = drug.qtcd_emax * obs.concentration / (drug.qtcd_ec50 + obs.concentration)
+                if delta_qtc > max_delta_qtc:
+                    max_delta_qtc = delta_qtc
 
+        max_qtc = baseline_qtc + max_delta_qtc
         qtc_delta = max_qtc - baseline_qtc
         qtc_absolute = max_qtc
 
-        # Exposure-response: moxifloxacin-like model
-        # For moxifloxacin: Emax = 25 ms, EC50 = 1.5 mg/L plasma
-        # General model: ΔQTc = Emax * C^gamma / (EC50^gamma + C^gamma)
-        # For MVP, use a simplified exposure-response
+        # Exposure-response: Emax model using drug parameters
+        # delta_QTc = Emax * C / (EC50 + C)
 
         # Check flags
         flag_60ms_delta = qtc_delta > qt_threshold_delta
@@ -111,6 +111,10 @@ def assess_qtc(
 # ---------------------------------------------------------------------------
 # DILI Hazard Module
 # ---------------------------------------------------------------------------
+
+# Standard ULN values (CTCAE v5.0 reference)
+ALT_ULN_UL = 40.0  # U/L, upper limit of normal for ALT
+BILI_ULN_MGDL = 1.2  # mg/dL, upper limit of normal for total bilirubin
 
 @dataclass
 class DiliResult:
@@ -178,8 +182,8 @@ def assess_dili(
         # For MVP, use a simple proxy based on max liver-related observations
         # In a full PBPK model, this would use the simulated liver exposure
 
-        alt_3x_uln = max_alt > alt_uln  # ALT > 3x ULN (typically ULN ~ 40 U/L)
-        bili_2x_uln = max_bilirubin > bili_uln  # Bilirubin > 2x ULN (typically ULN ~ 1.2 mg/dL)
+        alt_3x_uln = max_alt > alt_uln * ALT_ULN_UL  # ALT > 3x ULN (using standard ULN = 40 U/L)
+        bili_2x_uln = max_bilirubin > bili_uln * BILI_ULN_MGDL  # Bilirubin > 2x ULN (using standard ULN = 1.2 mg/dL)
 
         hy_law = alt_3x_uln and bili_2x_uln  # Hy's Law criteria
 
@@ -251,28 +255,44 @@ def ctcae_dlt_grade(
     """
     grade = 0
 
-    # Hepatotoxicity grading
+    # Hepatotoxicity grading per CTCAE v5.0
     if max_alt is not None:
-        if max_alt > 5 * 3:  # > 5x ULN (ULN ~ 5x typical)
+        uln = ALT_ULN_UL  # 40 U/L
+        if max_alt > uln and max_alt <= 3 * uln:  # >ULN to 3xULN
+            grade = max(grade, 1)
+        if max_alt > 3 * uln and max_alt <= 5 * uln:  # >3xULN to 5xULN
+            grade = max(grade, 2)
+        if max_alt > 5 * uln and max_alt <= 20 * uln:  # >5xULN to 20xULN
             grade = max(grade, 3)
-        if max_alt > 8 * 3:  # > 8x ULN
+        if max_alt > 20 * uln:  # >20xULN
             grade = max(grade, 4)
-        if max_alt > 20 * 3:  # > 20x ULN (often fatal)
-            grade = max(grade, 5)
 
     if max_bili is not None:
-        if max_bili > 3 * 2:  # > 3x ULN bilirubin (ULN ~ 2x)
+        uln = BILI_ULN_MGDL  # 1.2 mg/dL
+        if max_bili > 2 * uln and max_bili <= 3 * uln:
+            grade = max(grade, 1)
+        if max_bili > 3 * uln and max_bili <= 5 * uln:
+            grade = max(grade, 2)
+        if max_bili > 5 * uln and max_bili <= 10 * uln:
             grade = max(grade, 3)
-        if max_bili > 8 * 2:  # > 8x ULN bilirubin
+        if max_bili > 10 * uln:
             grade = max(grade, 4)
 
-    # QTc prolongation grading
-    if qtc_delta is not None:
-        if qtc_delta > 60:
+    # QTc prolongation grading per CTCAE v5.0
+    if baseline_qtc is not None:
+        if baseline_qtc >= 460 and baseline_qtc <= 480:
             grade = max(grade, 2)
-        if qtc_delta > 120:
+        if baseline_qtc >= 481 and baseline_qtc <= 500:
             grade = max(grade, 3)
-        if qtc_delta > 200:
+        if baseline_qtc > 500:
+            grade = max(grade, 4)
+    if qtc_delta is not None:
+        qtc_absolute = baseline_qtc + qtc_delta if baseline_qtc is not None else qtc_delta
+        if qtc_absolute >= 460 and qtc_absolute <= 480:
+            grade = max(grade, 2)
+        if qtc_absolute >= 481 and qtc_absolute <= 500:
+            grade = max(grade, 3)
+        if qtc_absolute > 500:
             grade = max(grade, 4)
 
     if baseline_qtc is not None and baseline_qtc > 500:

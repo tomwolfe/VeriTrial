@@ -295,6 +295,7 @@ class PopulationSummary(BaseModel):
     std_cl: float
     mean_v: float
     std_v: float
+    mean_cmax: float | None = None
 
 
 class PKSummary(BaseModel):

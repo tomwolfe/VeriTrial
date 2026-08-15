@@ -335,7 +335,7 @@ class GaussianCopulaSampler:
         3. Project to nearest positive-definite matrix.
         """
         n = self.n_continuous
-        # Start from reference (5x5 for our 5 marginals)
+        # Start from reference (5x5 for our 5 marginals: age, weight, height, egfr, liver_volume)
         corr = REFERENCE_CONTINUOUS_CORR.copy()
 
         # Apply any user-specified overrides from config
@@ -346,7 +346,7 @@ class GaussianCopulaSampler:
             v1, v2 = parts
             # Map variable names to matrix indices
             name_to_idx = {
-                "age": 0, "weight": 1, "height": 2, "egfr": 3, "sex_male": 4,
+                "age": 0, "weight": 1, "height": 2, "egfr": 3, "liver_volume": 4,
             }
             if v1 in name_to_idx and v2 in name_to_idx:
                 i, j = name_to_idx[v1], name_to_idx[v2]
@@ -516,9 +516,6 @@ class PopulationGenerator:
             organs_estimated["lung_volume_ml"], 200, 1000
         )
 
-        # Genotypes
-        genotype_results = self._sample_genotypes(n, ages, weights, egfr_ml_min=egfrs)
-
         # Build dataframe
         df = pd.DataFrame({
             "subject_id": [f"VP_{i:05d}" for i in range(n)],
@@ -627,7 +624,7 @@ class PopulationGenerator:
         corr = df[continuous_cols].corr().values
         return corr
 
-    def validate_correlations(self, df: pd.DataFrame, tolerance: float = 0.05) -> dict[str, float]:
+    def validate_correlations(self, df: pd.DataFrame, tolerance: float = 0.05) -> dict[str, dict[str, float]]:
         """Validate that generated correlations match the reference within tolerance.
 
         Returns a dict mapping pair -> |reference - empirical| deviation.

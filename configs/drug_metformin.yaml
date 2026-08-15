@@ -3,7 +3,7 @@ drug:
   mol_weight: 129.16
   log_p: -2.4
   pka: [12.4]  # basic
-  fup: 0.0  # essentially unbound but ~0 because ion trapping
+  fup: 0.01  # fraction unbound plasma (ion trapping correction)
   bp_ratio: 1.0
   dose_unit: mg
   typical_cl_f: 0.35  # L/h (renal clearance dominant)
