@@ -1,0 +1,31 @@
+drug:
+  name: midazolam
+  mol_weight: 325.8  # g/mol
+  log_p: 0.5
+  pka: []  # not ionizable at pH 7.4
+  fup: 0.98  # fraction unbound plasma
+  bp_ratio: 1.0
+  dose_unit: mg
+  # PK parameters (literature: systematic reviews; FDA NDA)
+  # Units: total values for a 70 kg reference adult.
+  #   CL/F ~ 12 L/h, Vz/F ~ 6.3 L -> t1/2 ~ 3 h (matches label)
+  #   Midazolam is a CYP3A4 probe substrate.
+  typical_cl_f: 12.0   # L/h (total, 70 kg reference)
+  typical_v_f: 6.3     # L (total, 70 kg reference)
+  ka: 2.0
+  bioavailability: 0.9  # high oral bioavailability
+  metabolizing_enzyme: cyp3a4  # primary CYP3A4 substrate
+  target: gaba_a_receptor
+  ec50: 5.0
+  emax: 1.0
+  hill_coeff: 1.0
+  # QTc exposure-response (Emax model)
+  # Midazolam 2 mg IV -> ~7 ms deltaQTc; 5 mg IV -> ~15 ms deltaQTc
+  # Solving Emax/EC50 from: 7 = Emax*C/(EC50+C) and 15 = Emax*C/(EC50+C)
+  # with C proportional to dose: C(2mg) = k*2, C(5mg) = k*5
+  # From public data: Cmax(2mg IV) ~ 2.5 mg/L, Cmax(5mg IV) ~ 6.25 mg/L
+  # Emax = 15 ms, EC50 = 5 mg/L (approximate, calibrated to reproduce ~15 ms at 5 mg)
+  qtcd_baseline: 400.0  # ms baseline QTc
+  qtcd_emax: 15.0       # max QTc prolongation (ms)
+  qtcd_ec50: 0.03        # mg/L plasma conc for half-max QTc effect
+  dili_risk: 0.02

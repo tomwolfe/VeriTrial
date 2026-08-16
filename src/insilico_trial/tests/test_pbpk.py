@@ -78,5 +78,5 @@ def test_mass_balance_with_elimination():
         t_max_days=7.0,
     )
     mb_error = result["mass_balance"]
-    # With elimination, error can be larger but should still be reasonable
-    assert mb_error < 1.0, f"Mass balance error {mb_error} >= 1.0 with elimination"
+    # With elimination, error should still be very small
+    assert mb_error < 1e-7, f"Mass balance error {mb_error} >= 1e-7"

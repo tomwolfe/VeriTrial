@@ -575,22 +575,6 @@ class PopulationGenerator:
 
         return df
 
-    def _sample_genotypes(self, n: int, ages: np.ndarray, weights: np.ndarray, egfr_ml_min: np.ndarray) -> dict[str, np.ndarray]:
-        """Sample genotypes, optionally correlated with demographics.
-
-        For simplicity and config-driven compliance, genotypes are sampled
-        independently (allele frequencies from config). We include a hook
-        for age-genotype correlation (e.g., CYP2C19 loss-of-function slightly
-        more common in certain ethnic-ages) if needed in future extensions.
-        """
-        result: dict[str, np.ndarray] = {}
-        for gene, gdata in self.spec.genotype_db.items():
-            alleles = list(gdata.keys())
-            freqs = np.array([gdata[a]["frequency"] for a in alleles])
-            samples = self.rng.choice(alleles, size=n, p=freqs / freqs.sum())
-            result[gene] = samples
-        return result
-
     def _to_patient_schemas(self, df: pd.DataFrame) -> list[Patient]:
         """Convert DataFrame rows to validated Patient schema objects."""
         patients: list[Patient] = []

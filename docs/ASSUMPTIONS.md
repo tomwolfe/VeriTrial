@@ -73,12 +73,25 @@ ODE solved with **diffrax `Tsit5`** (Dormand-Prince) adaptive stepper,
 
 - **diffrax** is the only ODE backend. There is no scipy.integrate fallback
   (the PLAN mentioned one; it was not implemented).
-- On Apple Silicon (darwin), diffrax is **incompatible with the jax-metal
-  backend** (`unknown attribute code: 22` from lineax). The package
-  `__init__.py` therefore forces the **CPU** backend at import time unless
-  `VERITRIAL_ALLOW_METAL=1` is set — **even when set, diffrax will fail
-  because lineax/Metal is broken upstream.** So Metal is effectively
-  unsupported; all runs are CPU.
+- On Apple Silicon (darwin), the **jax-metal** backend is **fundamentally
+  broken** with the currently installed JAX/jax-metal versions, **not just
+  for diffrax**. Ground-truth check (2026-08-15): with jax 0.10.2 and
+  jax-metal 0.1.1 (both latest), **even `jax.numpy.arange(10)` fails** with
+  `unknown attribute code: 22` from StableHLO v1.13.7. Setting
+  `ENABLE_PJRT_COMPATIBILITY=1` (documented in jax-metal 0.1.1 release notes)
+  does **not** resolve it.
+- The root cause is an **upstream version deadlock**: jax-metal 0.1.1
+  (latest) cannot compile StableHLO IR from jax ≥ 0.6.x because its HLO→Metal
+  translator predates attributes introduced in newer StableHLO; meanwhile
+  lineax 0.1.1 (latest) requires jax ≥ 0.10.0. There is **no version
+  combination** that satisfies both jax-metal and lineax simultaneously — the
+  dependency triangle is unsatisfiable.
+- The package `__init__.py` therefore forces the **CPU** backend at import time
+  unless `VERITRIAL_ALLOW_METAL=1` is set. Setting that env var will still
+  crash; there is no graceful fallback. A future jax-metal release that
+  supports the current StableHLO IR would unblock Metal for diffrax if
+  lineax is not on the critical path (e.g., with a non-lineax linear-algebra
+  usage pattern or a fixed-step `jax.lax.scan` solver).
 - Kvaerno implicit solvers are numerically accurate but ~4× slower than
   Tsit5 for this system (43 s vs 10 s per 1000 patients); Tsit5 is the
   default.

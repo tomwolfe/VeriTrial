@@ -21,12 +21,24 @@ tool does **not** yet support.
 ## Known limitations & gaps
 
 ### G1. Hardware: Metal is unsupported
-- **Status**: diffrax/lineax raise `unknown attribute code: 22` on the
-  jax-metal backend (Apple Silicon).
+- **Status (re-verified 2026-08-15)**: Metal is **completely broken** for all
+  JAX computation on this machine (jax 0.10.2 + jax-metal 0.1.1). Even
+  `jax.numpy.arange(10)` crashes with `unknown attribute code: 22` from
+  StableHLO v1.13.7. The error is **not diffrax-specific** — it occurs in
+  basic XLA→Metal compilation. Setting `ENABLE_PJRT_COMPATIBILITY=1`
+  (per jax-metal docs) does not help.
+- **Root cause**: Upstream version deadlock. jax-metal 0.1.1 (latest) has an
+  HLO→Metal translator that doesn't understand StableHLO attributes
+  introduced in jax ≥ 0.6.x. Meanwhile lineax 0.1.1 (latest) requires
+  jax ≥ 0.10.0. No version combination satisfies both simultaneously.
 - **Mitigation**: `__init__.py` forces CPU at import. All benchmarks run on
   CPU (1000 patients ≈ 10 s, ~99 patients/sec single-process).
-- **Gap closure**: N/A upstream fix required in jax-metal/lineax. Documented;
-  CPU throughput is sufficient for the MVP scope sizes.
+- **Phase 4 plan**: If a future jax-metal supports the current StableHLO IR,
+  Metal for diffrax can be re-enabled provided lineax is not on the critical
+  path (or by swapping diffrax for a pure-`jax.lax.scan` fixed-step solver
+  that avoids lineax). Until then, the Metal-compatible fixed-step solver
+  (Goal C, Phase 4) remains the path forward — it can run on CPU now and on
+  Metal once the upstream blocker clears.
 
 ### G2. ODE solver diversity
 - **Status**: Only `diffrax.Tsit5` (explicit adaptive) is used. Kvaerno

@@ -49,16 +49,12 @@ src/insilico_trial/
 ├── safety/           # QTc, DILI, CTCAE DLT grading
 ├── trial/            # Event-driven SAD/MAD engine + NCA
 ├── stats/            # Bayesian calibration (NumPyro)
-├── validation/       # Warfarin PGx, Moxifloxacin QTc benchmarks
+├── validation/      # Warfarin PGx, Moxifloxacin QTc benchmarks
 ├── provenance/       # Run manifests, config hashing
 ├── reporting/        # ASME V&V 40 compliant reports
-└── cli.py            # Typer CLI
+├── cli/              # argparse CLI (cli/__init__.py)
+└── __init__.py
 ```
-
-## Hardware
-
-- **Primary**: JAX + jax-metal (Apple M-series)
-- **Fallback**: CPU with scipy.integrate
 
 ## License
 

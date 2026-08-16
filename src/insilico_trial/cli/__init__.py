@@ -1,4 +1,4 @@
-"""CLI entry point for the InSilico Clinical Trial Simulator.
+"""CLI entry point for the InSilico Clinical Trial Simulator (argparse).
 
 Usage:
     insilico-trial demo            # full 1000-patient SAD/MAD run on warfarin
