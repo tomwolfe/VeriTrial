@@ -265,6 +265,7 @@ class Protocol(BaseModel):
     adherence: AdherenceSpec
     measurement_noise: MeasurementNoiseSpec
     safety: SafetyThresholds
+    solver: str = Field(default="diffrax", description="PBPK ODE solver: 'diffrax' or 'fixed_step'")
 
     @property
     def doses_mg(self) -> list[float]:

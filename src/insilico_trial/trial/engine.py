@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as onp
 
+from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
 from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single
 from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
@@ -232,7 +233,8 @@ class TrialEngine:
             absorbed_doses = administered_doses * self.drug.bioavailability
 
             t_eval_hours, C_batch = self._solve_cohort_batch(
-                cohort_patients, absorbed_doses
+                cohort_patients, absorbed_doses,
+                solver=self.protocol.solver,
             )
 
             cohort_dlt_count = 0
@@ -352,6 +354,7 @@ class TrialEngine:
 
     def _solve_cohort_batch(
         self, cohort_patients: list[Patient], administered_doses: onp.ndarray,
+        solver: str = "diffrax",
     ) -> tuple[onp.ndarray, onp.ndarray]:
         """Batch-solve the dense PK profiles for a whole cohort at once.
 
@@ -372,17 +375,34 @@ class TrialEngine:
             )
             for p in cohort_patients
         ]
-        params_batch = {
-            "Q": onp.stack([p["Q"] for p in params_list]),
-            "V": onp.stack([p["V"] for p in params_list]),
-            "Kp": onp.stack([p["Kp"] for p in params_list]),
-            "CL": onp.array([p["CL"] for p in params_list]),
-            "ka": onp.array([p["ka"] for p in params_list]),
-        }
-        C_batch = onp.asarray(
-            solve_pbpk_batch(t_eval_hours, administered_doses, params_batch),
-            dtype=onp.float64,
-        )
+
+        if solver == "fixed_step":
+            # Fixed-step RK4 batch solve: vmap over solve_pbpk_batch_fixed_step
+            params_batch = {
+                "Q": onp.stack([p["Q"] for p in params_list]),
+                "V": onp.stack([p["V"] for p in params_list]),
+                "Kp": onp.stack([p["Kp"] for p in params_list]),
+                "CL": onp.array([p["CL"] for p in params_list]),
+                "ka": onp.array([p["ka"] for p in params_list]),
+            }
+            A_gut_0s = administered_doses * self.drug.bioavailability
+            C_batch = onp.asarray(
+                solve_pbpk_batch_fixed_step(t_eval_hours, A_gut_0s, params_batch, dt=0.01),
+                dtype=onp.float64,
+            )
+        else:
+            # Diffrax Tsit5 (default)
+            params_batch = {
+                "Q": onp.stack([p["Q"] for p in params_list]),
+                "V": onp.stack([p["V"] for p in params_list]),
+                "Kp": onp.stack([p["Kp"] for p in params_list]),
+                "CL": onp.array([p["CL"] for p in params_list]),
+                "ka": onp.array([p["ka"] for p in params_list]),
+            }
+            C_batch = onp.asarray(
+                solve_pbpk_batch(t_eval_hours, administered_doses, params_batch),
+                dtype=onp.float64,
+            )
         return t_eval_hours, C_batch
 
     def _evaluate_patient(
