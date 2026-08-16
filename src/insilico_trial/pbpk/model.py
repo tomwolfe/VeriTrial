@@ -3,8 +3,25 @@
 Implements a multi-compartment PBPK model for oral small molecule simulation.
 Uses JAX + diffrax for vectorized ODE solving across patient batches.
 
-Compartments: Gut, Liver, Kidney, Central, Peripheral, Effect-site
-Allometric scaling and genotype-dependent metabolism supported.
+Compartments: Gut, Liver, Central, Peripheral, Effect-site
+An additional bookkeeping state ``A_elim`` tracks cumulative eliminated amount so
+that total mass (sum of all compartment amounts + eliminated amount) is conserved
+exactly by the continuous model.
+
+Units
+-----
+- Doses / amounts: mg
+- Volumes (V): L
+- Blood flows (Q): L/h
+- Clearance (CL): L/h
+- Concentrations: mg/L
+
+NOTE ON BACKEND
+---------------
+diffrax (via lineax) is not currently compatible with the JAX Metal backend
+("unknown attribute code: 22" on Apple Silicon with recent JAX/jax-metal). The
+package therefore defaults to the CPU backend; see ``insilico_trial/__init__.py``
+and ``docs/ASSUMPTIONS.md``.
 """
 
 from __future__ import annotations
@@ -15,7 +32,7 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import numpy as onp
-from diffrax import Kvaerno3, ODETerm, diffeqsolve
+from jax import Array
 
 from insilico_trial.schemas import Drug
 
@@ -24,6 +41,11 @@ COMPARTMENT_ORDER = ["gut", "liver", "central", "peripheral", "effect-site"]
 
 # Default physiological parameters (70 kg adult, Hct = 0.45)
 DEFAULT_HCT = 0.45
+
+# Solver tolerances (explicit Tsit5 is Metal/CPU portable and fast for this linear system)
+_RTOL = 1e-4
+_ATOL = 1e-6
+_MAX_STEPS = 100_000
 
 
 def compute_fu_blood(fu_plasma: float, bp_ratio: float, hct: float = DEFAULT_HCT) -> float:
@@ -74,66 +96,33 @@ def rodgers_rowland_kp(
     mw: float = 300.0,
     hct: float = DEFAULT_HCT,
 ) -> float:
-    """Estimate tissue:plasma partition coefficient (Kp) using the Rodgers-Rowland method.
+    """Estimate tissue:plasma partition coefficient (Kp).
 
-    Uses tissue-specific water/lipid/protein fractions and albumin/AAG binding terms
-    per Rodgers & Rowland (2005), with ionization state differentiation for acidic
-    (pKa < 7) vs basic (pKa > 7) compounds.
+    Simplified lipophilicity-and-binding model inspired by Rodgers-Rowland (2005).
+    Tissue-specific water/lipid/protein fractions are combined with octanol-water
+    partitioning and the unbound fraction in blood:
 
-    Parameters
-    ----------
-    log_p : float
-        Octanol-water partition coefficient
-    pka : float or list of float
-        pKa value(s). Used to determine if compound is basic/acidic.
-    fu_plasma : float
-        Fraction unbound in plasma (0 < fu <= 1)
-    bp_ratio : float
-        Blood-to-plasma ratio
-    tissue_type : str
-        Type of tissue: "generic", "liver", "fat", "brain", "kidney"
-    mw : float
-        Molecular weight (g/mol)
-    hct : float
-        Hematocrit fraction
+        log10(Kp) = 0.5*logP - 0.01*(MW/300) + log10(fu_blood) + 0.6
+        Kp = 10**log10(Kp) * ion_factor * (water + lipid*10**(0.4*logP)) / 0.70
 
-    Returns
-    -------
-    Kp : float
-        Tissue-to-plasma partition ratio
+    This is a documented approximation (see docs/ASSUMPTIONS.md); the peripheral
+    compartment partition is instead derived from the drug's config volume of
+    distribution so that the model reproduces ``typical_v_f``.
     """
     fu_blood = compute_fu_blood(fu_plasma, bp_ratio, hct=hct)
     comp_fractions = _TISSUE_COMPOSITION.get(tissue_type, _TISSUE_COMPOSITION["generic"])
     water_fraction = comp_fractions["water"]
     lipid_fraction = comp_fractions["lipid"]
-    protein_fraction = comp_fractions["protein"]
 
-    # Ionization adjustment
     ion_factor = _ionization_factor(pka)
 
-    # Log10 Kp from Rodgers-Rowland base equation
-    # Base: 0.96*logP - 0.014*MW + 0.18*fu_blood/Hct - 0.55
-    log_kp_base = (
-        0.96 * log_p
-        - 0.014 * mw
-        + 0.18 * fu_blood / hct
-        - 0.55
-    )
+    log_kp_base = 0.5 * log_p - 0.01 * (mw / 300.0) + float(onp.log10(fu_blood)) + 0.6
 
-    # Tissue-specific partitioning from composition fractions
-    # Kp proportional to water + lipid/protein partitioning
-    # Lipid-rich tissues retain lipophilic compounds more strongly
-    # Using 10**x formulations to avoid jax-metal log10 limitation
-    lipid_adjustment = lipid_fraction * (10.0 ** (0.5 * log_p))  # lipid binding scaling
-
-    # Combined Kp using only 10**x (no log10 needed)
-    # log_kp = log_kp_base + log10(ion_factor) + log10((water_fraction + lipid_adjustment) / 0.70)
-    # kp = 10**log_kp = 10**log_kp_base * ion_factor * (water_fraction + lipid_adjustment) / 0.70
+    lipid_adjustment = lipid_fraction * (10.0 ** (0.4 * log_p))
     kp = (10.0 ** log_kp_base) * ion_factor * (water_fraction + lipid_adjustment) / 0.70
 
-    # Clamp to reasonable range
-    kp = max(kp, 0.01)
-    kp = min(kp, 200.0)
+    kp = max(kp, 0.02)
+    kp = min(kp, 50.0)
 
     return float(kp)
 
@@ -147,6 +136,7 @@ _TISSUE_KP_ADJUSTMENTS: dict[str, float] = {
     "fat": 3.0,
     "muscle": 0.7,
     "lung": 0.9,
+    "peripheral": 1.0,
 }
 
 
@@ -168,51 +158,30 @@ def kp_for_tissue(
 # PBPK ODE system (perfusion-limited)
 # ---------------------------------------------------------------------------
 
-# Compartment index mapping: 0=gut, 1=liver, 2=central(plasma), 3=peripheral, 4=effect-site
 _COMPARTMENT_COUNT = 5
 _GUT_IDX = 0
 _LIVER_IDX = 1
 _CENTRAL_IDX = 2
 _PERIPHERAL_IDX = 3
 _EFFECT_SITE_IDX = 4
+_ELIM_IDX = 5  # bookkeeping state: cumulative eliminated amount (mg)
+_STATE_COUNT = 6
 
 
 def pbpk_ode(
     t: float,
-    y: jnp.ndarray,
+    y: Any,
     args: dict[str, Any],
-) -> jnp.ndarray:
+) -> Array:
     """Compute derivatives for the perfusion-limited PBPK ODE system.
 
-    State vector y = [A_gut, A_liver, A_central, A_periph, A_effect]
-    representing drug amounts in each compartment (mg or ng).
-
-    Key property: total mass balance:
-    d(A_central + A_liver + A_periph + A_effect + A_gut)/dt = absorption - elimination
-
-    Parameters
-    ----------
-    t : float
-        Time point (h)
-    y : array of shape (n_compartments,)
-        Drug amounts in each compartment
-    args : dict
-        Patient-specific parameters (same keys as the params dict in solve_pbpk_single):
-            - Q: array (5,) blood flows (L/h)
-            - V: array (5,) volumes (L)
-            - Kp: array (5,) tissue:plasma partition ratios
-            - CL: float hepatic/eliminatory clearance (L/h)
-            - ka: float absorption rate constant (1/h)
-            - A_gut_dose: float initial gut dose (mg or ng)
-
-    Returns
-    -------
-    dydt : array of shape (n_compartments,)
-        Derivatives of drug amounts
+    State vector y = [A_gut, A_liver, A_central, A_periph, A_effect, A_elim]
+    (drug amounts in each compartment plus cumulative eliminated amount).
+    ``args`` carries patient parameters: Q (5,) flows, V (5,) volumes,
+    Kp (5,) partition ratios, CL (float) clearance, ka (float) absorption rate.
     """
-    A_gut, A_liver, A_central, A_periph, A_effect = y
+    A_gut, A_liver, A_central, A_periph, A_effect, _ = y
 
-    # Extract parameters (named "args" to match diffrax API)
     Q = args["Q"]  # (5,) blood flows L/h
     V = args["V"]  # (5,) volumes L
     Kp = args["Kp"]  # (5,) tissue:plasma partition ratios
@@ -220,27 +189,24 @@ def pbpk_ode(
     ka = args["ka"]  # float, absorption rate constant 1/h
 
     # Plasma concentration in central compartment
-    C_p = A_central / V[_CENTRAL_IDX]  # V[2] = central volume
+    C_p = A_central / V[_CENTRAL_IDX]
 
-    # --- Gut compartment ---
-    # First-order absorption: drug moves from gut to the rest of the system
+    # --- Gut compartment: first-order absorption ---
     dA_gut = -ka * A_gut
 
     # --- Liver compartment (perfusion-limited) ---
-    C_liver = A_liver / V[_LIVER_IDX]  # V[1]
-    # Hepatic exchange: Q_liver * (C_p - C_liver / Kp_liver)
+    C_liver = A_liver / V[_LIVER_IDX]
     dA_liver = Q[_LIVER_IDX] * (C_p - C_liver / Kp[_LIVER_IDX])
 
     # --- Peripheral compartment (perfusion-limited) ---
-    C_periph = A_periph / V[_PERIPHERAL_IDX]  # V[3]
+    C_periph = A_periph / V[_PERIPHERAL_IDX]
     dA_periph = Q[_PERIPHERAL_IDX] * (C_p - C_periph / Kp[_PERIPHERAL_IDX])
 
     # --- Effect-site compartment (perfusion-limited, rapid equilibration) ---
-    C_effect = A_effect / V[_EFFECT_SITE_IDX]  # V[4]
+    C_effect = A_effect / V[_EFFECT_SITE_IDX]
     dA_effect = Q[_EFFECT_SITE_IDX] * (C_p - C_effect / Kp[_EFFECT_SITE_IDX])
 
     # --- Central compartment (plasma) ---
-    # Influx from gut absorption, efflux to liver/periphery/effect-site, elimination
     dA_central = (
         ka * A_gut
         - dA_liver
@@ -249,55 +215,105 @@ def pbpk_ode(
         - CL * C_p
     )
 
-    return jnp.array([dA_gut, dA_liver, dA_central, dA_periph, dA_effect])
+    # --- Eliminated amount accumulator ---
+    dA_elim = CL * C_p
+
+    return jnp.array([dA_gut, dA_liver, dA_central, dA_periph, dA_effect, dA_elim])
 
 
 # ---------------------------------------------------------------------------
 # Rodgers-Rowland Kp estimation from drug schema
 # ---------------------------------------------------------------------------
 
-def compute_patient_kp(drug: Drug) -> dict[str, float]:
+
+def compute_patient_kp(
+    drug: Drug,
+    typical_v_f: float | None = None,
+    weight_kg: float = 70.0,
+    reference_weight_kg: float = 70.0,
+) -> dict[str, float]:
     """Compute Kp for all compartments based on drug properties.
 
-    Uses Rodgers-Rowland estimation from drug logP, pKa, fu_plasma, bp_ratio.
-    Tissue-specific adjustments are applied.
+    Gut/liver/effect-site Kp come from the simplified Rodgers-Rowland estimate.
+    The peripheral compartment Kp is derived from the drug's config volume of
+    distribution (``typical_v_f``) so that the model reproduces the configured
+    steady-state volume Vss = typical_v_f * (weight / 70).
 
     Returns
     -------
     Kp dict mapping compartment name to tissue:plasma partition ratio
     """
-    # Use drug properties for Kp estimation
     log_p = drug.log_p
     pka = drug.pka if drug.pka else []
     fu_plasma = drug.fup
     bp_ratio = drug.bp_ratio
     mw = drug.mol_weight
 
+    tissue_type_map = {
+        "gut": "generic",
+        "liver": "liver",
+        "central": "generic",
+        "peripheral": "peripheral",
+        "effect-site": "generic",
+    }
     kp: dict[str, float] = {}
-    for comp in ["gut", "liver", "central", "peripheral", "effect-site"]:
-        tissue_type_map = {
-            "gut": "generic",
-            "liver": "liver",
-            "central": "generic",
-            "peripheral": "peripheral",
-            "effect-site": "generic",
-        }
+    for comp in COMPARTMENT_ORDER:
         tissue_type = tissue_type_map[comp]
-        kp[comp] = kp_for_tissue(log_p, pka, fu_plasma, bp_ratio, tissue_type, mw=mw)
+        if comp == "central":
+            kp[comp] = 1.0  # plasma reference
+        elif comp == "peripheral":
+            # derived below from Vss
+            kp[comp] = 1.0
+        else:
+            kp[comp] = kp_for_tissue(log_p, pka, fu_plasma, bp_ratio, tissue_type, mw=mw)
+
+    # Derive peripheral Kp so the model steady-state volume matches config Vss.
+    if typical_v_f is not None and typical_v_f > 0:
+        v_physio = _reference_physiology()["V"]
+        vss_target = typical_v_f * (weight_kg / reference_weight_kg)
+        central_contrib = v_physio[_CENTRAL_IDX]
+        tissue_contrib = sum(kp[c] * v_physio[i] for i, c in enumerate(COMPARTMENT_ORDER) if i != _PERIPHERAL_IDX and i != _CENTRAL_IDX)
+        periph_volume = v_physio[_PERIPHERAL_IDX]
+        kp_periph = (vss_target - central_contrib - tissue_contrib) / periph_volume
+        kp_periph = max(kp_periph, 0.02)
+        kp_periph = min(kp_periph, 200.0)
+        kp["peripheral"] = kp_periph
 
     return kp
 
 
 # ---------------------------------------------------------------------------
-# Allometric scaling
+# Reference physiology (70 kg adult)
 # ---------------------------------------------------------------------------
+
+
+def _reference_physiology() -> dict[str, onp.ndarray]:
+    """Reference blood flows and organ volumes for a 70 kg adult.
+
+    Values are documented physiological approximations (see docs/ASSUMPTIONS.md).
+
+    Blood flows (L/h) at rest:
+    - Gut: 1.5 (splanchnic)
+    - Liver: 1.5 (hepatic artery + portal contribution represented implicitly)
+    - Central: 1.0
+    - Peripheral: 50.0 — lumps muscle, fat and skin, which together receive
+      ~20-25% of cardiac output (~70-80 L/h at rest in a 70 kg adult). A high
+      peripheral flow is required for the model to reproduce fast tissue
+      distribution (i.e. clinically observed Cmax) for drugs with large
+      volumes of distribution.
+    - Effect-site: 0.5
+    """
+    Q_ref = onp.array([1.5, 1.5, 1.0, 50.0, 0.5])  # gut, liver, central, peripheral, effect-site (L/h)
+    V_ref = onp.array([0.3, 1.5, 3.0, 12.0, 0.3])  # gut, liver, central, peripheral, effect-site (L)
+    return {"Q": Q_ref, "V": V_ref}
+
 
 def scale_physiological(weight_kg: float, age: float) -> dict[str, float]:
     """Scale blood flows and volumes from 70 kg reference to patient size.
 
     Allometric scaling exponents:
-    - Blood flows: Q ∝ weight^0.75
-    - Volumes: V ∝ weight^1.0 (linear with weight)
+    - Blood flows: Q proportional to weight^0.75
+    - Volumes: V proportional to weight (linear)
     """
     w_scaling = (weight_kg / 70.0) ** 0.75
     # Age factor: slight decline in hepatic function with age
@@ -309,95 +325,153 @@ def scale_physiological(weight_kg: float, age: float) -> dict[str, float]:
     }
 
 
+def build_pbpk_params(
+    weight_kg: float,
+    age: float,
+    drug: Drug,
+    genotype_scale: float = 1.0,
+) -> dict[str, Any]:
+    """Build the parameter dict for a single patient.
+
+    Parameters
+    ----------
+    weight_kg : float
+        Patient weight (kg)
+    age : float
+        Patient age (years)
+    drug : Drug
+        Drug schema with PK parameters
+    genotype_scale : float
+        Metabolizer activity scale applied to metabolic clearance (>=0)
+
+    Returns
+    -------
+    dict with Q, V, Kp, CL, ka (see pbpk_ode)
+    """
+    sc = scale_physiological(weight_kg, age)
+    w_scaling = sc["w_scaling"]
+    age_factor = sc["age_factor"]
+
+    ref = _reference_physiology()
+    Q = ref["Q"] * w_scaling
+    V = ref["V"] * (weight_kg / 70.0)
+
+    kp = compute_patient_kp(drug, typical_v_f=drug.typical_v_f, weight_kg=weight_kg)
+    kp_arr = onp.array([kp[c] for c in COMPARTMENT_ORDER])
+
+    # Genotype scales metabolic clearance, not tissue partitioning.
+    cl = max(drug.typical_cl_f * w_scaling * age_factor * genotype_scale, 1e-6)
+
+    return {
+        "Q": Q,
+        "V": V,
+        "Kp": kp_arr,
+        "CL": float(cl),
+        "ka": float(drug.ka),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Single-patient PBPK solver using diffrax
 # ---------------------------------------------------------------------------
 
-def _build_ode_term() -> ODETerm:
-    """Build a diffrax ODETerm wrapping the PBPK ODE function.
 
-    The ODE function signature is f(t, y, p) where p contains patient params.
-    """
-    return ODETerm(lambda t, y, p: pbpk_ode(t, y, p))
-
-
-def solve_pbpk_single(
-    t_eval: jnp.ndarray,
-    A_gut_0: float,
+def _solve_on_grid(
+    t_eval: Any,
+    A_gut_0: Any,
     params: dict[str, Any],
-) -> jnp.ndarray:
-    """Solve the PBPK ODE system for a single patient using diffrax.
+    t1: float,
+) -> Array:
+    """Solve the PBPK ODE returning the full state matrix.
 
     Parameters
     ----------
-    t_eval : array of shape (n_timepoints,)
-        Time points at which to output the solution (h)
-    A_gut_0 : float
-        Initial amount in gut compartment (mg or ng), typically the oral dose
+    t_eval : jnp array (n_timepoints,)
+        Output time grid (h). Passed via closure constant so it is concrete
+        inside JIT (diffrax requires the grid for SaveAt).
+    A_gut_0 : jnp scalar
+        Initial gut amount = absorbed oral dose (mg)
     params : dict
-        Patient-specific parameters:
-            - Q: array (5,) blood flows (L/h)
-            - V: array (5,) volumes (L)
-            - Kp: array (5,) tissue:plasma partition ratios
-            - CL: float clearance (L/h)
-            - ka: float absorption rate constant (1/h)
-            - A_gut_dose: float initial gut dose (mg or ng)
+        Patient parameters (see pbpk_ode)
+    t1 : float
+        Final integration time (h) — concrete Python float
 
     Returns
     -------
-    C_p : array of shape (n_timepoints,)
-        Plasma concentration (mg/L) at each time point
+    ys : jnp array (n_timepoints, n_state)
     """
-    # Initial state: [A_gut, A_liver, A_central, A_periph, A_effect]
-    y0 = onp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=onp.float64)
-
-    # Build ODE term
-    ode_term = ODETerm(lambda t, y, args: pbpk_ode(t, y, args))
-
-    # Solver: Kvaerno3 is preferred for PK stiff systems
-    solver = Kvaerno3()
-
-    # Solve the ODE
-    # Use saveat with ts=t_eval to specify output time points
-    # PIDController with rtol/atol is needed for implicit solvers like Kvaerno3
-    controller = diffrax.PIDController(rtol=1e-3, atol=1e-6)
-    solution = diffeqsolve(
-        ode_term,
-        solver,
+    y0 = jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    solution = diffrax.diffeqsolve(
+        diffrax.ODETerm(pbpk_ode),  # type: ignore[arg-type]
+        diffrax.Tsit5(),
         t0=0.0,
-        t1=t_eval[-1],
+        t1=t1,
         dt0=1e-3,
         y0=y0,
         args=params,
-        max_steps=int(1e5),
+        max_steps=_MAX_STEPS,
         saveat=diffrax.SaveAt(ts=t_eval),
-        stepsize_controller=controller,
+        stepsize_controller=diffrax.PIDController(rtol=_RTOL, atol=_ATOL),
     )
+    return jnp.asarray(solution.ys)  # (n_timepoints, n_state)
 
-    # Extract plasma concentration (central compartment, index 2)
-    # solution.ys has shape (n_compartments, n_timepoints)
-    C_p = solution.ys[_CENTRAL_IDX, :] / params["V"][_CENTRAL_IDX]  # divide by central volume to get concentration
 
-    return C_p
+def solve_pbpk_single(
+    t_eval: Any,
+    A_gut_0: float,
+    params: dict[str, Any],
+) -> Any:
+    """Solve the PBPK ODE system for a single patient.
+
+    Parameters
+    ----------
+    t_eval : array (n_timepoints,)
+        Time points (h)
+    A_gut_0 : float
+        Initial gut amount = absorbed oral dose (mg)
+    params : dict
+        Patient parameters (see pbpk_ode)
+
+    Returns
+    -------
+    C_p : array (n_timepoints,)
+        Plasma concentration (mg/L)
+    """
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    t1 = float(te[-1])
+    ys = _solve_on_grid(jnp.asarray(te), jnp.asarray(A_gut_0), params, t1)
+    return ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX]
+
+
+def solve_pbpk_full(
+    t_eval: Any,
+    A_gut_0: float,
+    params: dict[str, Any],
+) -> Any:
+    """Solve the PBPK ODE returning the full state matrix (n_time, n_state)."""
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    t1 = float(te[-1])
+    return _solve_on_grid(jnp.asarray(te), jnp.asarray(A_gut_0), params, t1)
 
 
 # ---------------------------------------------------------------------------
 # Batch PBPK solver using JAX vmap
 # ---------------------------------------------------------------------------
 
+
 def solve_pbpk_batch(
-    t_eval: jnp.ndarray,
-    A_gut_0s: jnp.ndarray,
-    params_batch: dict[str, jnp.ndarray],
-) -> jnp.ndarray:
-    """Solve the PBPK ODE system for a batch of patients using JAX vmap.
+    t_eval: Any,
+    A_gut_0s: Any,
+    params_batch: dict[str, Any],
+) -> Any:
+    """Solve the PBPK ODE for a batch of patients using JAX vmap + jit.
 
     Parameters
     ----------
-    t_eval : array of shape (n_timepoints,)
-        Time points at which to output the solution (h)
-    A_gut_0s : array of shape (n_patients,)
-        Initial gut amount (dose) for each patient (mg or ng)
+    t_eval : array (n_timepoints,)
+        Time points (h); used as a compile-time constant.
+    A_gut_0s : array (n_patients,)
+        Initial gut amounts (absorbed dose, mg) for each patient
     params_batch : dict with batched parameter arrays:
         - Q: array (n_patients, 5) blood flows (L/h)
         - V: array (n_patients, 5) volumes (L)
@@ -407,64 +481,62 @@ def solve_pbpk_batch(
 
     Returns
     -------
-    C_p_batch : array of shape (n_patients, n_timepoints)
-        Plasma concentrations for each patient at each time point
+    C_p_batch : array (n_patients, n_timepoints)
+        Plasma concentrations (mg/L) for each patient
     """
-    # JIT-compile the single-patient solver and map over patients
-    _solve_single_jit = jax.jit(lambda t_eval, A_gut_0, params: solve_pbpk_single(t_eval, A_gut_0, params))
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    t1 = float(te[-1])
+    te_j = jnp.asarray(te)
 
-    C_p_batch = jax.vmap(_solve_single_jit)(t_eval, A_gut_0s, params_batch)
+    def _single(a0: Any, p: dict[str, Any]) -> Array:
+        ys = _solve_on_grid(te_j, a0, p, t1)
+        return jnp.asarray(ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX])
 
-    return C_p_batch
+    batch_fn = jax.jit(jax.vmap(_single, in_axes=(0, 0)))
+    return batch_fn(A_gut_0s, params_batch)
 
 
 # ---------------------------------------------------------------------------
 # Mass balance verification
 # ---------------------------------------------------------------------------
 
+
 def compute_mass_balance(
-    y_final: jnp.ndarray,
-    y_initial: jnp.ndarray,
-    dose: float,
+    y_initial: Any,
+    y_final: Any,
 ) -> float:
-    """Compute the mass balance error for a PBPK simulation.
+    """Compute relative mass balance error.
 
-    Mass balance error = |(total_final - (total_initial + dose)) / dose|
-
-    For a closed system with elimination, total_final < total_initial + dose
-    because some drug is eliminated. The error metric accounts for this.
-
-    In practice for verification (no elimination, CL=0):
-    total_final should equal total_initial + dose
-    error = |total_final - total_initial - dose| / |dose|
+    The PBPK state includes an eliminated-amount accumulator, so the closed
+    system conserves total mass: sum(y_initial) == sum(y_final) up to solver
+    error. The dose is already included in ``y_initial`` (as the gut dose), so
+    it is NOT added separately here.
 
     Parameters
     ----------
-    y_final : array of shape (n_compartments,)
-        Final drug amounts in each compartment
-    y_initial : array of shape (n_compartments,)
-        Initial drug amounts in each compartment
-    dose : float
-        Administered dose (mg or ng)
+    y_initial : array (n_state,)
+        Initial compartment amounts (gut dose included)
+    y_final : array (n_state,)
+        Final compartment amounts (including eliminated amount)
 
     Returns
     -------
     error : float
-        Mass balance error (dimensionless, should be < 1e-6 for verification)
+        Relative mass balance error (dimensionless)
     """
     total_initial = float(jnp.sum(y_initial))
     total_final = float(jnp.sum(y_final))
 
-    if abs(dose) < 1e-15:
-        return abs(total_final - total_initial) / abs(total_initial) if total_initial != 0 else 0.0
+    if total_initial == 0.0:
+        return abs(total_final) if total_final != 0.0 else 0.0
 
-    error = abs(total_final - total_initial - dose) / abs(dose)
-    return error
+    return abs(total_final - total_initial) / abs(total_initial)
 
 
 # ---------------------------------------------------------------------------
 # Convenience: run a single patient PBPK simulation
 # ---------------------------------------------------------------------------
+
 
 def run_pbpk(
     dose_mg: float,
@@ -476,19 +548,23 @@ def run_pbpk(
     bp_ratio: float,
     cl: float = 0.5,
     ka: float = 1.0,
-    n_timepoints: int = 24 * 7,  # 7 days, hourly output
+    n_timepoints: int = 24 * 7,
     t_max_days: float = 7.0,
+    bioavailability: float = 1.0,
+    typical_v_f: float | None = None,
+    genotype_scale: float = 1.0,
 ) -> dict[str, Any]:
     """Run a single PBPK simulation for a virtual patient.
 
     Parameters
     ----------
     dose_mg : float
-        Oral dose in mg
+        Administered oral dose (mg). The absorbed gut dose is ``dose_mg *
+        bioavailability``.
     weight_kg : float
-        Patient weight in kg
+        Patient weight (kg)
     age : float
-        Patient age in years
+        Patient age (years)
     log_p : float
         Octanol-water partition coefficient
     pka : list of float
@@ -498,128 +574,109 @@ def run_pbpk(
     bp_ratio : float
         Blood-to-plasma ratio
     cl : float
-        Clearance L/h (population typical)
+        Total clearance CL/F (L/h) at 70 kg reference
     ka : float
-        Absorption rate constant 1/h
+        Absorption rate constant (1/h)
     n_timepoints : int
         Number of time points for output
     t_max_days : float
         Maximum simulation time in days
+    bioavailability : float
+        Absolute oral bioavailability (fraction absorbed)
+    typical_v_f : float | None
+        Total apparent volume V/F (L) at 70 kg reference; drives peripheral
+        partition so the model reproduces this steady-state volume.
+    genotype_scale : float
+        Metabolizer activity scale applied to clearance
 
     Returns
     -------
-    result : dict containing:
+    dict with keys:
         - "t": time array (h)
-        - "C_plasma": plasma concentration array (mg/L)
-        - "y": final compartment amounts
-        - "mass_balance": mass balance error
+        - "C_plasma": plasma concentration (mg/L)
+        - "y": final compartment amounts (n_state,)
+        - "eliminated": cumulative eliminated amount (mg)
+        - "mass_balance": relative mass balance error
     """
-    # Time points (hours) - use Python list for diffrax compatibility
-    t_eval = list(range(n_timepoints))  # placeholder, will be overridden
-    t_eval = [t * 24.0 / n_timepoints for t in range(n_timepoints * 24 + 1)]  # coarse, will be sliced properly
-    # Actually, let me use onp and convert properly
-    import numpy as onp
-    t_eval_onnp = onp.linspace(0, t_max_days * 24, n_timepoints)
-    t_eval = t_eval_onnp.tolist()
+    t_eval = onp.linspace(0, t_max_days * 24, n_timepoints)
 
-    # Allometric scaling
     w_scaling = (weight_kg / 70.0) ** 0.75
+    age_factor = 1.0 if age <= 40 else 0.9
 
-    # Kp from Rodgers-Rowland
-    kp = compute_patient_kp_early(log_p, pka, fu_plasma, bp_ratio)
+    ref = _reference_physiology()
+    Q = ref["Q"] * w_scaling
+    V = ref["V"] * (weight_kg / 70.0)
 
-    # Blood flows scaled from 70 kg reference (L/h)
-    Q_ref = onp.array([1.5, 1.5, 1.0, 1.0, 0.5])  # gut, liver, central, peripheral, effect-site
-    Q = Q_ref * w_scaling
+    kp = compute_patient_kp_early(log_p, pka, fu_plasma, bp_ratio, typical_v_f=typical_v_f, weight_kg=weight_kg)
 
-    # Volumes scaled from 70 kg reference (L)
-    # Volumes scale linearly with weight
-    V_ref = onp.array([0.3, 1.5, 3.0, 12.0, 0.3])  # gut, liver, central, peripheral, effect-site
-    V = V_ref * (weight_kg / 70.0)
+    cl_scaled = max(cl * w_scaling * age_factor * genotype_scale, 1e-6)
 
-    # Clearance scaled
-    CL_scaled = cl * w_scaling
-
-    # Absorption rate constant
-    ka_scaled = ka
-
-    # Initial gut dose
-    A_gut_0 = dose_mg
-
-    # Patient parameters dict
     params = {
         "Q": Q,
         "V": V,
         "Kp": kp,
-        "CL": CL_scaled,
-        "ka": ka_scaled,
-        "A_gut_dose": A_gut_0,
+        "CL": float(cl_scaled),
+        "ka": float(ka),
     }
 
-    # Solve PBPK
-    ode_term = ODETerm(lambda t, y, args: pbpk_ode(t, y, args))
-    solver = Kvaerno3()
-    controller = diffrax.PIDController(rtol=1e-3, atol=1e-6)
-    solution = diffeqsolve(
-        ode_term,
-        solver,
-        t0=0.0,
-        t1=t_eval[-1],
-        dt0=1e-3,
-        y0=onp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=onp.float64),
-        args=params,
-        max_steps=int(1e5),
-        saveat=diffrax.SaveAt(ts=None),  # will use solution.ts instead
-        stepsize_controller=controller,
-    )
+    absorbed_dose = dose_mg * bioavailability
+    y0 = onp.array([absorbed_dose, 0.0, 0.0, 0.0, 0.0, 0.0])
+    t1 = float(t_eval[-1])
+    ys = _solve_on_grid(jnp.asarray(t_eval), jnp.asarray(absorbed_dose), params, t1)
 
-    # Extract plasma concentration from central compartment
-    # solution.ys has shape (n_compartments, n_timepoints)
-    # solution.ts has the output time points
-    C_p = solution.ys[_CENTRAL_IDX, :] / params["V"][_CENTRAL_IDX]
-
-    # Extract time points from solution
-    t_eval = solution.ts
-
-    # Final state from diffrax solution
-    y_final = solution.ys[:, -1]
-
-    # Mass balance error
-    y_initial = onp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=onp.float64)
-    mb_error = compute_mass_balance(y_final, y_initial, dose_mg)
+    C_p = onp.asarray(ys[:, _CENTRAL_IDX]) / params["V"][_CENTRAL_IDX]
+    y_final = onp.asarray(ys[-1])
+    mb_error = compute_mass_balance(y0, y_final)
 
     return {
         "t": t_eval,
         "C_plasma": C_p,
         "y": y_final,
+        "eliminated": float(y_final[_ELIM_IDX]),
         "mass_balance": mb_error,
     }
 
 
-# Internal Kp computation (used by run_pbpk)
 def compute_patient_kp_early(
     log_p: float,
     pka: list[float],
     fu_plasma: float,
     bp_ratio: float,
+    typical_v_f: float | None = None,
+    weight_kg: float = 70.0,
 ) -> list[float]:
     """Compute Kp for all compartments - internal helper.
-
-    Kept separate to avoid circular imports during module init.
 
     Returns Kp as a list [gut, liver, central, peripheral, effect-site],
     matching the COMPARTMENT_ORDER indexing used by pbpk_ode.
     """
+    tissue_type_map = {
+        "gut": "generic",
+        "liver": "liver",
+        "central": "generic",
+        "peripheral": "peripheral",
+        "effect-site": "generic",
+    }
     kp_dict: dict[str, float] = {}
-    for comp in ["gut", "liver", "central", "peripheral", "effect-site"]:
-        tissue_type_map = {
-            "gut": "generic",
-            "liver": "liver",
-            "central": "generic",
-            "peripheral": "peripheral",
-            "effect-site": "generic",
-        }
+    for comp in COMPARTMENT_ORDER:
         tissue_type = tissue_type_map[comp]
-        kp_dict[comp] = kp_for_tissue(log_p, pka, fu_plasma, bp_ratio, tissue_type)
+        if comp == "central" or comp == "peripheral":
+            kp_dict[comp] = 1.0
+        else:
+            kp_dict[comp] = kp_for_tissue(log_p, pka, fu_plasma, bp_ratio, tissue_type)
 
-    return [kp_dict["gut"], kp_dict["liver"], kp_dict["central"], kp_dict["peripheral"], kp_dict["effect-site"]]
+    if typical_v_f is not None and typical_v_f > 0:
+        ref = _reference_physiology()
+        v_physio = ref["V"]
+        vss_target = typical_v_f * (weight_kg / 70.0)
+        central_contrib = v_physio[_CENTRAL_IDX]
+        tissue_contrib = sum(
+            kp_dict[c] * v_physio[i] for i, c in enumerate(COMPARTMENT_ORDER) if i not in (_PERIPHERAL_IDX, _CENTRAL_IDX)
+        )
+        periph_volume = v_physio[_PERIPHERAL_IDX]
+        kp_periph = (vss_target - central_contrib - tissue_contrib) / periph_volume
+        kp_periph = max(kp_periph, 0.02)
+        kp_periph = min(kp_periph, 200.0)
+        kp_dict["peripheral"] = kp_periph
+
+    return [kp_dict[c] for c in COMPARTMENT_ORDER]

@@ -12,7 +12,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Bioengineering",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Operating System :: MacOS",
 ]
 
@@ -32,9 +32,9 @@ dependencies = [
     "pyarrow>=15.0,<20.0",
     "jax>=0.4.20,<1.0",
     "jaxlib>=0.4.20,<1.0",
-    "diffrax>=0.11,<1.0",
+    "diffrax>=0.7,<1.0",
     "numpyro>=0.13,<1.0",
-    "tomli>=2.0,<3.0; python<3.11",
+    "tomli>=2.0,<3.0; python_version < '3.11'",
     "rich>=13.7,<14.0",
     "click>=8.1,<9.0",
 ]
@@ -52,8 +52,8 @@ dev = [
     "hypothesis>=6.92,<7.0",
     "pre-commit>=3.6,<4.0",
     "types-pyyaml>=6.0,<7.0",
-    "types-tqdm>=0.2,<1.0",
-    "types-click>=8.1,<9.0",
+    "types-tqdm>=4.64.0,<5.0",
+    "types-click>=7.1.8,<8.0",
 ]
 
 [project.scripts]
@@ -82,7 +82,7 @@ ignore = ["E501", "B008", "B904", "C901"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S301"]
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["insilico_trial"]
 
 [tool.mypy]
@@ -102,8 +102,16 @@ show_error_codes = true
 files = ["src/insilico_trial"]
 
 [[tool.mypy.overrides]]
-module = ["diffrax.*", "jax.*", "jaxlib.*", "numpyro.*", "scipy.*", "sklearn.*", "statsmodels.*"]
+module = ["diffrax.*", "jax.*", "jaxlib.*", "numpyro.*", "scipy.*", "pandas.*", "polars.*", "duckdb.*"]
 ignore_missing_imports = true
+
+# Tests do not need the full strict-typing contract.
+[[tool.mypy.overrides]]
+module = ["insilico_trial.tests.*"]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["src/insilico_trial/tests"]

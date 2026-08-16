@@ -6,15 +6,24 @@ drug:
   fup: 0.67  # fraction unbound plasma
   bp_ratio: 1.0
   dose_unit: mg
-  typical_cl_f: 0.45  # L/h/L body water ~ 12 L/h typical dose 400 mg
-  typical_v_f: 1.8   # L/L
+  # PK parameters (literature: Stass & Kubitza 2001; FDA Avelox label)
+  # Units: total values for a 70 kg reference adult.
+  #   CL/F ~ 7.3 L/h, Vz/F ~ 126 L (1.8 L/kg * 70) -> t1/2 ~ 12 h (matches label)
+  typical_cl_f: 7.3   # L/h (total, 70 kg reference)
+  typical_v_f: 126.0  # L (total, 70 kg reference)
   ka: 1.2
   bioavailability: 0.89
+  metabolizing_enzyme: cyp3a4  # partial CYP3A4 glucuronidation; simplified MVP
   target: bacterial_parp
   ec50: 0.5  # mg/L minimal effect conc
   emax: 0.95
   hill_coeff: 1.5
+  # QTc exposure-response (Emax model) calibrated so that the simulated Cmax
+  # values reproduce the published reference deltas (Démolis et al. 2000):
+  #   Cmax(400 mg) ~ 3.75 mg/L -> deltaQTc ~ 15 ms
+  #   Cmax(800 mg) ~ 7.51 mg/L -> deltaQTc ~ 25 ms
+  # Emax/EC50 solved from those two points: Emax = 75 ms, EC50 = 15 mg/L.
   qtcd_baseline: 420.0  # ms baseline QTc
-  qtcd_emax: 25.0       # max QTc prolongation (ms) — moxifloxacin known effect
-  qtcd_ec50: 1.5        # mg/L plasma conc for half-max QTc effect
+  qtcd_emax: 75.0       # max QTc prolongation (ms)
+  qtcd_ec50: 15.0       # mg/L plasma conc for half-max QTc effect
   dili_risk: 0.05

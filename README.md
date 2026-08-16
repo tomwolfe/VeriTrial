@@ -10,10 +10,31 @@
 
 ```bash
 make install
-make demo        # 1000 patients, full SAD/MAD
-make validate    # Run benchmark harness
-make report      # Generate HTML/Markdown report
+make lint          # ruff + mypy --strict
+make test          # unit tests
+make demo          # 1000-patient full SAD trial
+make validate      # warfarin PGx + moxifloxacin QTc benchmarks
+make benchmark     # 1000-patient timing
+make report        # regenerate HTML/Markdown reports for prior runs
 ```
+
+## Hardware
+
+- **JAX + diffrax** is the ODE backend; **scipy.integrate is NOT used** (the
+  PLAN mentioned a scipy fallback, but diffrax is the only solver actually
+  implemented).
+- On Apple Silicon, **jax-metal is incompatible with diffrax/lineax**
+  (`unknown attribute code: 22`). The package forces the **CPU** backend at
+  import (`src/insilico_trial/__init__.py`) unless
+  `VERITRIAL_ALLOW_METAL=1` is set, but even then diffrax fails on Metal.
+  **All runs are CPU-only.** A 1000-patient 7-day SAD run completes in
+  ~10 s on a single CPU thread (~99 patients/sec). See
+  `docs/ASSUMPTIONS.md` §5 and `docs/gap_closure_plan.md` §G1.
+
+See [PLAN.md](PLAN.md) for the phased strategy and
+[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md) for units/scaling conventions, and
+[docs/gap_closure_plan.md](docs/gap_closure_plan.md) for the ASME V&V 40
+credibility argument and known limitations.
 
 ## Architecture
 

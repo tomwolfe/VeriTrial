@@ -7,7 +7,7 @@ should exist outside config files that load into these models.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -60,11 +60,16 @@ class Drug(BaseModel):
     bp_ratio: float = Field(..., description="Blood-to-plasma partition ratio", gt=0)
     dose_unit: str = Field(default="mg")
 
-    # PK parameters (population-typical)
-    typical_cl_f: float = Field(..., description="Typical clearance/Bioavailability (L/h/L body water or per kg)", gt=0)
-    typical_v_f: float = Field(..., description="Typical volume of distribution/Bioavailability (L/L or L/kg)", gt=0)
+    # PK parameters (population-typical). Units convention (documented in docs/ASSUMPTIONS.md):
+    #   typical_cl_f : total apparent clearance CL/F (L/h) for a 70 kg reference adult
+    #   typical_v_f  : total apparent volume Vz/F (L) for a 70 kg reference adult
+    # Patient values are scaled allometrically by weight and (for CL) by the
+    # metabolizer activity score of ``metabolizing_enzyme``.
+    typical_cl_f: float = Field(..., description="Total apparent clearance CL/F (L/h), 70 kg reference adult", gt=0)
+    typical_v_f: float = Field(..., description="Total apparent volume Vz/F (L), 70 kg reference adult", gt=0)
     ka: float = Field(..., description="Absorption rate constant (1/h)", gt=0)
     bioavailability: float = Field(..., description="Absolute oral bioavailability", ge=0.0, le=1.0)
+    metabolizing_enzyme: str = Field(default="cyp3a4", description="Gene whose activity score scales metabolic clearance (e.g. cyp2c9, cyp3a4; 'none' disables)")
 
     # PD parameters
     target: str = Field(default="unnamed_target")
@@ -78,6 +83,14 @@ class Drug(BaseModel):
     qtcd_ec50: float = Field(default=0.0, description="Plasma conc for half-max QTc effect (same units as ec50)")
     qtcd_slope: float = Field(default=0.0, description="Linear QTc-concentration slope (ms per conc unit)")
     dili_risk: float = Field(default=0.01, description="Baseline DILI risk probability", ge=0.0, le=1.0)
+
+    # DILI exposure-response: drives simulated ALT/bilirubin from liver exposure
+    alt_baseline: float = Field(default=22.0, description="Baseline ALT (U/L)")
+    bili_baseline: float = Field(default=0.8, description="Baseline total bilirubin (mg/dL)")
+    dili_emax_alt: float = Field(default=1.5, description="Max ALT multiple over baseline", ge=0.0)
+    dili_ec50_alt: float = Field(default=8.0, description="Liver exposure (AUC, mg*h/L) for half-max ALT")
+    dili_emax_bili: float = Field(default=1.2, description="Max bilirubin multiple over baseline", ge=0.0)
+    dili_ec50_bili: float = Field(default=12.0, description="Liver exposure (AUC, mg*h/L) for half-max bilirubin")
 
     @field_validator("pka", mode="before")
     @classmethod
@@ -117,7 +130,7 @@ class Biometric(BaseModel):
     @property
     def bsa(self) -> float:
         """Body surface area (Du Bois formula)."""
-        return 0.007184 * (self.weight ** 0.425) * (self.height ** 0.725)
+        return float(0.007184 * (self.weight ** 0.425) * (self.height ** 0.725))
 
 
 class Patient(BaseModel):
@@ -334,6 +347,9 @@ class TrialResult(BaseModel):
     pk_summaries: list[PKSummary]
     population_summary: PopulationSummary | None = None
     safety_summary: dict[str, Any] = Field(default_factory=dict)
+    observations: list[Observation] = Field(default_factory=list)
+    cohort_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    uncertainty: dict[str, Any] = Field(default_factory=dict)
     timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
     provenance: dict[str, Any] = Field(default_factory=dict)
 
@@ -362,7 +378,7 @@ def load_drug_config(path: str | Path) -> Drug:
 def load_population_config(path: str | Path) -> dict[str, Any]:
     """Load population config from YAML."""
     raw = load_yaml(path)
-    return raw["population"]
+    return dict(raw["population"])
 
 
 def load_protocol_config(path: str | Path) -> Protocol:

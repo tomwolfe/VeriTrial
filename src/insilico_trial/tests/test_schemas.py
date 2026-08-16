@@ -1,8 +1,10 @@
 """Tests for the schemas module."""
 
 
+import pytest
+from pydantic import ValidationError
+
 from insilico_trial.schemas import (
-    DoseEscalationRule,
     Drug,
     Observation,
     PopulationSummary,
@@ -26,9 +28,9 @@ def test_drug_config_loads():
 
 
 def test_invalid_fup_rejected():
-    """fup=1.5 → ValidationError (must be > 0 and <= 1)."""
-    try:
-        drug = Drug.model_validate(
+    """fup=1.5 -> ValidationError (must be 0 <= fup <= 1)."""
+    with pytest.raises(ValidationError):
+        Drug.model_validate(
             {"name": "test", "mol_weight": 300.0, "log_p": 2.0, "pka": [5.0],
              "fup": 1.5, "bp_ratio": 1.0, "dose_unit": "mg",
              "typical_cl_f": 0.5, "typical_v_f": 2.0, "ka": 1.0,
@@ -36,40 +38,36 @@ def test_invalid_fup_rejected():
              "ec50": 1.0, "emax": 5.0, "hill_coeff": 2.0,
              "qtcd_baseline": 400.0, "qtcd_slope": 0.0, "dili_risk": 0.01}
         )
-        # If pydantic v2 doesn't validate, that's OK for MVP
-        # But fup > 1 should ideally be rejected
-    except Exception:
-        pass  # Expected if pydantic validates
 
 
 def test_protocol_sad_enum():
     """Protocol design SAD matches TrialDesign.SAD enum."""
     assert TrialDesign.SAD.value == "SAD"
 
-    protocol = Protocol(
-        name="SAD_Test",
-        phase="Phase I",
-        design="SAD",
-        n_cohorts=2,
-        cohort_size=10,
-        dose_levels=[1.0, 5.0],
-        dose_unit="mg",
-        dosing_route="oral",
-        dose_escalation=DoseEscalationRule(
-            rule="modified_accrual",
-            max_dlt_per_cohort=1,
-            min_dlt_free_days=7,
-            next_dose_multiplier=2.0,
-            starting_dose=1.0,
-        ),
-        dosing_interval_days=1,
-        observation_period_days=7,
-        visit_schedule=[],
-        dropout={"rate_per_day": 0.001, "cause": "protocol"},
-        adherence={"distribution": "uniform", "min": 0.85, "max": 1.0},
-        measurement_noise={"type": "lognormal", "cv_percent": 15.0},
-        safety={"qt_threshold": 500.0, "qt_delta": 60.0, "alt_threshold": 3.0, "bilirubin_threshold": 2.0, "ctcae_version": 5.0},
-    )
+    protocol = Protocol.model_validate({
+        "name": "SAD_Test",
+        "phase": "Phase I",
+        "design": "SAD",
+        "n_cohorts": 2,
+        "cohort_size": 10,
+        "dose_levels": [1.0, 5.0],
+        "dose_unit": "mg",
+        "dosing_route": "oral",
+        "dose_escalation": {
+            "rule": "modified_accrual",
+            "max_dlt_per_cohort": 1,
+            "min_dlt_free_days": 7,
+            "next_dose_multiplier": 2.0,
+            "starting_dose": 1.0,
+        },
+        "dosing_interval_days": 1,
+        "observation_period_days": 7,
+        "visit_schedule": [],
+        "dropout": {"rate_per_day": 0.001, "cause": "protocol"},
+        "adherence": {"distribution": "uniform", "min": 0.85, "max": 1.0},
+        "measurement_noise": {"type": "lognormal", "cv_percent": 15.0},
+        "safety": {"qt_threshold": 500.0, "qt_delta": 60.0, "alt_threshold": 3.0, "bilirubin_threshold": 2.0, "ctcae_version": 5.0},
+    })
     assert protocol.design == TrialDesign.SAD
 
 

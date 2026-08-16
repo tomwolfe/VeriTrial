@@ -66,9 +66,8 @@ class TruncatedNormalMarginal:
 
     def sample(self, u: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         a, b = (self.lo - self.mean) / self.std, (self.hi - self.mean) / self.std
-        return stats.truncnorm.rvs(a, b, loc=self.mean, scale=self.std, random_state=rng, size=len(u)) if False else (
-            stats.truncnorm.ppf(u, a, b, loc=self.mean, scale=self.std)
-        )
+        sampled = stats.truncnorm.ppf(u, a, b, loc=self.mean, scale=self.std)
+        return np.asarray(sampled, dtype=float)
 
     def clip_range(self) -> tuple[float, float]:
         return self.lo, self.hi
@@ -82,7 +81,8 @@ class LogNormalMarginal:
     std_log: float
 
     def sample(self, u: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        return np.exp(stats.norm.ppf(u, loc=self.mean_log, scale=self.std_log))
+        sampled = np.exp(stats.norm.ppf(u, loc=self.mean_log, scale=self.std_log))
+        return np.asarray(sampled, dtype=float)
 
     def clip_range(self) -> tuple[float, float]:
         return 0.0, np.inf
@@ -96,7 +96,7 @@ class NormalMarginal:
     std: float
 
     def sample(self, u: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        return stats.norm.ppf(u, loc=self.mean, scale=self.std)
+        return np.asarray(stats.norm.ppf(u, loc=self.mean, scale=self.std), dtype=float)
 
     def clip_range(self) -> tuple[float, float]:
         return -np.inf, np.inf
@@ -139,8 +139,9 @@ GENOTYPE_DB: dict[str, dict[str, dict[str, float]]] = {
         "CYP2D6*5":    {"frequency": 0.09, "activity_score": 0.0},
     },
     "cyp3a4": {
-        "CYP3A4*1B":   {"frequency": 0.07, "activity_score": 1.0},
-        "CYP3A4*22":   {"frequency": 0.13, "activity_score": 0.6},
+        "CYP3A4*1":   {"frequency": 0.80, "activity_score": 1.0},
+        "CYP3A4*1B":  {"frequency": 0.07, "activity_score": 1.0},
+        "CYP3A4*22":  {"frequency": 0.13, "activity_score": 0.6},
     },
 }
 
@@ -290,9 +291,18 @@ def config_from_yaml(pop_config: dict[str, Any]) -> PopulationSpec:
             alleles = gconf["alleles"]
             freqs = gconf["frequencies"]
             scores = gconf["activity_scores"]
+            if len({len(alleles), len(freqs), len(scores)}) != 1:
+                raise ValueError(f"Genotype config for '{gene}' must have matching allele/frequency/score lengths")
+            total_freq = sum(freqs)
+            if abs(total_freq - 1.0) > 1e-6:
+                raise ValueError(
+                    f"Allele frequencies for '{gene}' sum to {total_freq:.4f}, expected 1.0"
+                )
+            if any(f < 0 for f in freqs):
+                raise ValueError(f"Allele frequencies for '{gene}' must be non-negative")
             genotype_db[gene] = {
                 a: {"frequency": f, "activity_score": s}
-                for a, f, s in zip(alleles, freqs, scores)
+                for a, f, s in zip(alleles, freqs, scores, strict=True)
             }
     else:
         genotype_db = copy.deepcopy(GENOTYPE_DB)
@@ -364,7 +374,7 @@ class GaussianCopulaSampler:
         B = (matrix + matrix.T) / 2
         eigvals, eigvecs = np.linalg.eigh(B)
         eigvals = np.maximum(eigvals, 1e-10)
-        return eigvecs @ np.diag(eigvals) @ eigvecs.T
+        return np.asarray(eigvecs @ np.diag(eigvals) @ eigvecs.T, dtype=float)
 
     def sample(
         self,
@@ -633,7 +643,7 @@ class PopulationGenerator:
         """
         continuous_cols = ["age", "weight_kg", "height_cm", "egfr_ml_min", "liver_volume_ml"]
         corr = df[continuous_cols].corr().values
-        return corr
+        return np.asarray(corr, dtype=float)
 
     def validate_correlations(self, df: pd.DataFrame, tolerance: float = 0.05) -> dict[str, dict[str, float]]:
         """Validate that generated correlations match the reference within tolerance.
@@ -642,7 +652,7 @@ class PopulationGenerator:
         Raises ValueError if any deviation exceeds tolerance.
         """
         empirical = self.compute_empirical_correlations(df)
-        deviations: dict[str, float] = {}
+        deviations: dict[str, dict[str, float]] = {}
 
         # Map DataFrame column names to CONTINUOUS_VAR_NAMES indices
         col_to_var: dict[str, str] = {

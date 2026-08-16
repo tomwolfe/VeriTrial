@@ -9,13 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import numpy as np
-
-from insilico_trial.schemas import Drug, Observation, Patient
+from insilico_trial.schemas import Drug, Observation, SafetyThresholds
 
 # ---------------------------------------------------------------------------
 # QTc Exposure-Response Module
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class QTcResult:
@@ -23,12 +22,10 @@ class QTcResult:
 
     patient_id: str
     baseline_qtc: float  # ms
-    max_qtc: float  # ms
+    max_qtc: float  # ms (baseline + max delta)
     qtc_delta: float  # ms (max - baseline)
-    qtc_absolute: float  # ms
-    flag_qtc_60ms_delta: bool  # ΔQTc > 60 ms
-    flag_qtc_500ms_absolute: bool  # QTc > 500 ms
-    flag_hy_lhs: bool  # Hy's Law criteria met
+    flag_qtc_60ms_delta: bool  # deltaQTc > 60 ms
+    flag_qtc_500ms_absolute: bool  # absolute QTc > 500 ms
 
 
 def assess_qtc(
@@ -39,71 +36,44 @@ def assess_qtc(
 ) -> list[QTcResult]:
     """Assess QTc prolongation risk from observation data.
 
-    Uses an exposure-response model calibrated to moxifloxacin data.
-    For each patient, finds the maximum QTc interval and compares to thresholds.
+    Reports baseline QTc, absolute QTc, and delta QTc (baseline + Emax effect
+    from observed concentrations). Flags are set against the supplied
+    thresholds (defaults: 60 ms delta / 500 ms absolute, per FDA guidance).
 
-    Parameters
-    ----------
-    observations : list[Observation]
-        ECG observations from a patient population
-    drug : Drug
-        Drug schema with QTc parameters
-    qt_threshold_delta : float
-        Delta QTc threshold in ms (default: 60, per FDA guidance)
-    qt_threshold_absolute : float
-        Absolute QTc threshold in ms (default: 500, per FDA guidance)
-
-    Returns
-    -------
-    list[QTcResult]
-        QTc assessment results for each patient
+    Note: Hy's Law is a liver-safety concept and is deliberately NOT reported
+    here; it belongs to the DILI module.
     """
     results: list[QTcResult] = []
 
-    # Group observations by patient
     from collections import defaultdict
+
     patient_obs: dict[str, list[Observation]] = defaultdict(list)
     for obs in observations:
         patient_obs[obs.patient_id].append(obs)
 
     for patient_id, obs_list in patient_obs.items():
-        # Baseline QTc from drug configuration, not from observations
         baseline_qtc = drug.qtcd_baseline
 
-        # Find max delta QTc from exposure-response model
         max_delta_qtc = 0.0
         for obs in obs_list:
-            if obs.concentration is not None and drug.qtcd_ec50 > 0:
+            if obs.concentration is not None and obs.qt_interval is not None:
+                # Use the observed QTc relative to baseline as the delta.
+                delta_qtc = obs.qt_interval - baseline_qtc
+            elif obs.concentration is not None and drug.qtcd_ec50 > 0:
                 delta_qtc = drug.qtcd_emax * obs.concentration / (drug.qtcd_ec50 + obs.concentration)
-                if delta_qtc > max_delta_qtc:
-                    max_delta_qtc = delta_qtc
+            else:
+                continue
+            max_delta_qtc = max(max_delta_qtc, delta_qtc)
 
         max_qtc = baseline_qtc + max_delta_qtc
-        qtc_delta = max_qtc - baseline_qtc
-        qtc_absolute = max_qtc
-
-        # Exposure-response: Emax model using drug parameters
-        # delta_QTc = Emax * C / (EC50 + C)
-
-        # Check flags
-        flag_60ms_delta = qtc_delta > qt_threshold_delta
-        flag_500ms_absolute = qtc_absolute > qt_threshold_absolute
-
-        # Hy's Law: ALT > 3x ULN + bilirubin > 2x ULN + ALT/AST elevation
-        # For QTc assessment, we just check the QTc thresholds
-        flag_hy_lhs = flag_60ms_delta and flag_500ms_absolute
-
-        result = QTcResult(
+        results.append(QTcResult(
             patient_id=patient_id,
             baseline_qtc=baseline_qtc,
             max_qtc=max_qtc,
-            qtc_delta=qtc_delta,
-            qtc_absolute=qtc_absolute,
-            flag_qtc_60ms_delta=flag_60ms_delta,
-            flag_qtc_500ms_absolute=flag_500ms_absolute,
-            flag_hy_lhs=flag_hy_lhs,
-        )
-        results.append(result)
+            qtc_delta=max_delta_qtc,
+            flag_qtc_60ms_delta=max_delta_qtc > qt_threshold_delta,
+            flag_qtc_500ms_absolute=max_qtc > qt_threshold_absolute,
+        ))
 
     return results
 
@@ -115,6 +85,7 @@ def assess_qtc(
 # Standard ULN values (CTCAE v5.0 reference)
 ALT_ULN_UL = 40.0  # U/L, upper limit of normal for ALT
 BILI_ULN_MGDL = 1.2  # mg/dL, upper limit of normal for total bilirubin
+
 
 @dataclass
 class DiliResult:
@@ -132,68 +103,41 @@ class DiliResult:
 def assess_dili(
     observations: list[Observation],
     drug: Drug,
-    alt_uln: float = 3.0,
-    bili_uln: float = 2.0,
+    alt_uln_mult: float = 3.0,
+    bili_uln_mult: float = 2.0,
 ) -> list[DiliResult]:
     """Assess DILI (Drug-Induced Liver Injury) hazard from observation data.
 
-    Uses liver exposure × mitochondrial stress proxy to predict ALT/Bilirubin elevation.
-
-    Parameters
-    ----------
-    observations : list[Observation]
-        Liver function test observations from a patient population
-    drug : Drug
-        Drug schema with DILI risk parameters
-    alt_uln : float
-        Multiplier for ULN threshold (default: 3.0 for ALT)
-    bili_uln : float
-        Multiplier for ULN threshold (default: 2.0 for bilirubin)
-
-    Returns
-    -------
-    list[DiliResult]
-        DILI assessment results for each patient
+    Uses the simulated ALT/bilirubin values (generated by the trial engine from
+    liver exposure) to flag elevations relative to the thresholds (defaults:
+    ALT > 3x ULN and bilirubin > 2x ULN, Hy's Law).
     """
     results: list[DiliResult] = []
 
-    # Group observations by patient
     from collections import defaultdict
+
     patient_obs: dict[str, list[Observation]] = defaultdict(list)
     for obs in observations:
         patient_obs[obs.patient_id].append(obs)
 
     for patient_id, obs_list in patient_obs.items():
-        # Find max ALT and max bilirubin
         max_alt = 0.0
         max_bilirubin = 0.0
-
         for obs in obs_list:
             if obs.alt is not None and obs.alt > max_alt:
                 max_alt = obs.alt
             if obs.bilirubin is not None and obs.bilirubin > max_bilirubin:
                 max_bilirubin = obs.bilirubin
 
-        # DILI risk: baseline risk × liver exposure factor
-        # Baseline risk from drug config; liver exposure from PBPK
-        baseline_risk = drug.dili_risk  # default 0.01 (1%)
+        alt_3x_uln = max_alt > alt_uln_mult * ALT_ULN_UL
+        bili_2x_uln = max_bilirubin > bili_uln_mult * BILI_ULN_MGDL
+        hy_law = alt_3x_uln and bili_2x_uln
 
-        # Liver exposure factor (simplified: area under the liver concentration curve)
-        # For MVP, use a simple proxy based on max liver-related observations
-        # In a full PBPK model, this would use the simulated liver exposure
-
-        alt_3x_uln = max_alt > alt_uln * ALT_ULN_UL  # ALT > 3x ULN (using standard ULN = 40 U/L)
-        bili_2x_uln = max_bilirubin > bili_uln * BILI_ULN_MGDL  # Bilirubin > 2x ULN (using standard ULN = 1.2 mg/dL)
-
-        hy_law = alt_3x_uln and bili_2x_uln  # Hy's Law criteria
-
-        # DILI probability: baseline × exposure factor
-        # Simple model: if Hy's Law criteria met, probability increases
-        dili_prob = baseline_risk
+        dili_prob = drug.dili_risk
         if hy_law:
-            dili_prob = min(0.5, baseline_risk * 10)  # cap at 50%
+            dili_prob = min(0.5, drug.dili_risk * 10.0)
 
-        result = DiliResult(
+        results.append(DiliResult(
             patient_id=patient_id,
             max_alt=max_alt,
             max_bilirubin=max_bilirubin,
@@ -201,8 +145,7 @@ def assess_dili(
             bili_upper_2x_uln=bili_2x_uln,
             hy_law_criteria_met=hy_law,
             dili_probability=dili_prob,
-        )
-        results.append(result)
+        ))
 
     return results
 
@@ -224,122 +167,164 @@ def ctcae_dlt_grade(
 ) -> int:
     """Grade adverse events using CTCAE v5.0 criteria for DLT assessment.
 
-    CTCAE (Common Terminology Criteria for Adverse Events) v5.0 grades:
-    Grade 1: Mild, Grade 2: Moderate, Grade 3: Severe, Grade 4: Life-threatening,
-    Grade 5: Death
-
-    For DLT assessment in Phase I trials, we focus on:
-    - Hepatotoxicity (ALT/Altirubin elevation)
-    - QTc prolongation
-    - General toxicity related to dose exposure
-
-    Parameters
-    ----------
-    exposure : float
-        Drug exposure (e.g., AUC or Cmax-normalized dose)
-    dose : float
-        Administered dose
-    max_alt : float | None
-        Maximum ALT value (U/L)
-    max_bili : float | None
-        Maximum bilirubin value (mg/dL)
-    baseline_qtc : float | None
-        Baseline QTc interval (ms)
-    qtc_delta : float | None
-        QTc delta from baseline (ms)
-
-    Returns
-    -------
-    int
-        CTCAE grade (0-5, where 3-4 typically indicate DLT)
+    Grades 3+ are generally considered dose-limiting in Phase I trials.
     """
     grade = 0
 
-    # Hepatotoxicity grading per CTCAE v5.0
+    # Hepatotoxicity grading per CTCAE v5.0 (ALT)
     if max_alt is not None:
-        uln = ALT_ULN_UL  # 40 U/L
-        if max_alt > uln and max_alt <= 3 * uln:  # >ULN to 3xULN
+        uln = ALT_ULN_UL
+        if uln < max_alt <= 3 * uln:
             grade = max(grade, 1)
-        if max_alt > 3 * uln and max_alt <= 5 * uln:  # >3xULN to 5xULN
+        if 3 * uln < max_alt <= 5 * uln:
             grade = max(grade, 2)
-        if max_alt > 5 * uln and max_alt <= 20 * uln:  # >5xULN to 20xULN
+        if 5 * uln < max_alt <= 20 * uln:
             grade = max(grade, 3)
-        if max_alt > 20 * uln:  # >20xULN
+        if max_alt > 20 * uln:
             grade = max(grade, 4)
 
+    # Bilirubin
     if max_bili is not None:
-        uln = BILI_ULN_MGDL  # 1.2 mg/dL
-        if max_bili > 2 * uln and max_bili <= 3 * uln:
+        uln = BILI_ULN_MGDL
+        if 2 * uln < max_bili <= 3 * uln:
             grade = max(grade, 1)
-        if max_bili > 3 * uln and max_bili <= 5 * uln:
+        if 3 * uln < max_bili <= 5 * uln:
             grade = max(grade, 2)
-        if max_bili > 5 * uln and max_bili <= 10 * uln:
+        if 5 * uln < max_bili <= 10 * uln:
             grade = max(grade, 3)
         if max_bili > 10 * uln:
             grade = max(grade, 4)
 
-    # QTc prolongation grading per CTCAE v5.0
+    # QTc prolongation
     if baseline_qtc is not None:
-        if baseline_qtc >= 460 and baseline_qtc <= 480:
-            grade = max(grade, 2)
-        if baseline_qtc >= 481 and baseline_qtc <= 500:
+        qtc_delta = qtc_delta or 0.0
+        qtc_absolute = baseline_qtc + qtc_delta
+        if qtc_absolute > 500 or qtc_delta > 60:
             grade = max(grade, 3)
-        if baseline_qtc > 500:
-            grade = max(grade, 4)
-    if qtc_delta is not None:
-        qtc_absolute = baseline_qtc + qtc_delta if baseline_qtc is not None else qtc_delta
-        if qtc_absolute >= 460 and qtc_absolute <= 480:
+        elif qtc_absolute > 480 or qtc_delta > 30:
             grade = max(grade, 2)
-        if qtc_absolute >= 481 and qtc_absolute <= 500:
-            grade = max(grade, 3)
-        if qtc_absolute > 500:
-            grade = max(grade, 4)
-
-    if baseline_qtc is not None and baseline_qtc > 500:
-        grade = max(grade, 3)
+        elif qtc_absolute > 450 or qtc_delta > 0:
+            grade = max(grade, 1)
 
     return grade
+
+
+# ---------------------------------------------------------------------------
+# Integrated DLT determination
+# ---------------------------------------------------------------------------
+
+
+def determine_dlt(
+    observations: list[Observation],
+    drug: Drug,
+    thresholds: SafetyThresholds,
+    patient_id: str,
+) -> bool:
+    """Determine whether a single patient experiences a DLT.
+
+    A DLT is declared if any of the following hold:
+    - absolute QTc > protocol qt_threshold
+    - delta QTc > protocol qt_delta
+    - Hy's Law criteria (ALT > alt_threshold x ULN AND bilirubin > bilirubin_threshold x ULN)
+    - CTCAE grade >= 3 for ALT, bilirubin, or QTc
+    """
+    patient_obs = [o for o in observations if o.patient_id == patient_id]
+
+    qtc_results = assess_qtc(
+        patient_obs,
+        drug,
+        qt_threshold_delta=thresholds.qt_delta,
+        qt_threshold_absolute=thresholds.qt_threshold,
+    )
+    dili_results = assess_dili(
+        patient_obs,
+        drug,
+        alt_uln_mult=thresholds.alt_threshold,
+        bili_uln_mult=thresholds.bilirubin_threshold,
+    )
+
+    if qtc_results:
+        qtc_r = qtc_results[0]
+        if qtc_r.flag_qtc_60ms_delta or qtc_r.flag_qtc_500ms_absolute:
+            return True
+
+    if dili_results:
+        dili_r = dili_results[0]
+        if dili_r.hy_law_criteria_met:
+            return True
+
+    max_alt = max((o.alt for o in patient_obs if o.alt is not None), default=None)
+    max_bili = max((o.bilirubin for o in patient_obs if o.bilirubin is not None), default=None)
+
+    qtc_result = qtc_results[0] if qtc_results else None
+    grade = ctcae_dlt_grade(
+        exposure=0.0,
+        dose=0.0,
+        max_alt=max_alt,
+        max_bili=max_bili,
+        baseline_qtc=qtc_result.baseline_qtc if qtc_result else None,
+        qtc_delta=qtc_result.qtc_delta if qtc_result else None,
+    )
+    return grade >= 3
 
 
 # ---------------------------------------------------------------------------
 # Convenience: run safety assessment on a population
 # ---------------------------------------------------------------------------
 
+
 def run_safety_assessment(
     observations: list[Observation],
     drug: Drug,
+    thresholds: SafetyThresholds | None = None,
 ) -> dict[str, Any]:
-    """Run full safety assessment (QTc + DILI) on a population.
+    """Run full safety assessment (QTc + DILI) on a population."""
+    from insilico_trial.schemas import SafetyThresholds as _ST
 
-    Parameters
-    ----------
-    observations : list[Observation]
-        All observations from the trial simulation
-    drug : Drug
-        Drug schema with safety parameters
+    thresh = thresholds or _ST()
+    qtc_results = assess_qtc(
+        observations, drug,
+        qt_threshold_delta=thresh.qt_delta,
+        qt_threshold_absolute=thresh.qt_threshold,
+    )
+    dili_results = assess_dili(
+        observations, drug,
+        alt_uln_mult=thresh.alt_threshold,
+        bili_uln_mult=thresh.bilirubin_threshold,
+    )
 
-    Returns
-    -------
-    dict[str, Any]
-        Summary of safety findings
-    """
-    qtc_results = assess_qtc(observations, drug)
-    dili_results = assess_dili(observations, drug)
-
-    # Summarize
     n_qtc_60ms = sum(1 for r in qtc_results if r.flag_qtc_60ms_delta)
     n_qtc_500ms = sum(1 for r in qtc_results if r.flag_qtc_500ms_absolute)
-    n_hy_lhs = sum(1 for r in qtc_results if r.flag_hy_lhs)
-    n_dili = sum(1 for r in dili_results if r.hy_law_criteria_met)
+    n_hy_law = sum(1 for r in dili_results if r.hy_law_criteria_met)
     avg_dili_prob = sum(r.dili_probability for r in dili_results) / len(dili_results) if dili_results else 0.0
 
     return {
         "n_patients": len(qtc_results),
         "n_qtc_60ms_delta": n_qtc_60ms,
         "n_qtc_500ms_absolute": n_qtc_500ms,
-        "n_hy_lhs": n_hy_lhs,
-        "n_dili_hy_law": n_dili,
-        "avg_dili_probability": avg_dili_prob,
-        "qtc_results": [{"patient_id": r.patient_id, "flag_60ms": r.flag_qtc_60ms_delta, "flag_500ms": r.flag_qtc_500ms_absolute} for r in qtc_results],
-        "dili_results": [{"patient_id": r.patient_id, "max_alt": r.max_alt, "hy_law": r.hy_law_criteria_met, "dili_prob": r.dili_probability} for r in dili_results],
+        "n_dili_hy_law": n_hy_law,
+        "avg_dili_probability": float(avg_dili_prob),
+        "qtc_patients": [
+            {"patient_id": r.patient_id, "baseline_ms": r.baseline_qtc,
+             "max_ms": r.max_qtc, "delta_ms": r.qtc_delta,
+             "flag_60ms": r.flag_qtc_60ms_delta, "flag_500ms": r.flag_qtc_500ms_absolute}
+            for r in qtc_results
+        ],
+        "dili_patients": [
+            {"patient_id": r.patient_id, "max_alt": r.max_alt, "max_bili": r.max_bilirubin,
+             "hy_law": r.hy_law_criteria_met, "dili_prob": r.dili_probability}
+            for r in dili_results
+        ],
     }
+
+
+__all__ = [
+    "QTcResult",
+    "DiliResult",
+    "assess_qtc",
+    "assess_dili",
+    "ctcae_dlt_grade",
+    "determine_dlt",
+    "run_safety_assessment",
+    "CTCAE_GRADES",
+]

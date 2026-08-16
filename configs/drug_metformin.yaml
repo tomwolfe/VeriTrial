@@ -6,10 +6,14 @@ drug:
   fup: 0.01  # fraction unbound plasma (ion trapping correction)
   bp_ratio: 1.0
   dose_unit: mg
-  typical_cl_f: 0.35  # L/h (renal clearance dominant)
-  typical_v_f: 0.29   # L/kg
+  # PK parameters (literature: Graham et al. 2011; FDA Glucophage label)
+  # Units: total values for a 70 kg reference adult.
+  #   CL ~ 35 L/h (renal dominant), Vz/F ~ 300 L -> t1/2 ~ 6 h
+  typical_cl_f: 35.0   # L/h (total, 70 kg reference)
+  typical_v_f: 300.0   # L (total, 70 kg reference)
   ka: 1.0
   bioavailability: 0.55  # ~50-60% oral
+  metabolizing_enzyme: none  # renal clearance; no CYP genotype scaling
   target: oct1_transporter
   ec50: 10.0
   emax: 1.0

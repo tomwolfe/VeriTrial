@@ -1,15 +1,23 @@
 """Trial engine for event-driven SAD/MAD simulations.
 
 Implements event-driven dosing, dropout, adherence, missingness, and
-non-compartmental analysis (NCA) with Bayesian credible intervals.
+non-compartmental analysis (NCA) with uncertainty intervals.
+
+Visit-time convention
+---------------------
+``VisitSpec.time`` is hours from the first (single) dose. The ``day`` field is
+an informational annotation only; it is not multiplied by 24.
 """
 
+from __future__ import annotations
+
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as onp
 
-from insilico_trial.pbpk.model import solve_pbpk_single
-from insilico_trial.safety import assess_dili, assess_qtc
+from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single
+from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
     Drug,
     Observation,
@@ -22,64 +30,143 @@ from insilico_trial.schemas import (
 )
 
 # ---------------------------------------------------------------------------
-# Standalone NCA (non-compartmental analysis) function
+# Non-compartmental analysis (NCA)
 # ---------------------------------------------------------------------------
+
+
+def _trapezoidal_auc(times: onp.ndarray, concs: onp.ndarray) -> float:
+    """Area under the curve by the linear trapezoidal rule (mg*h/L)."""
+    auc = 0.0
+    for i in range(len(times) - 1):
+        dt = times[i + 1] - times[i]
+        auc += 0.5 * (concs[i] + concs[i + 1]) * dt
+    return float(auc)
+
+
+def _terminal_lambda_z(times: onp.ndarray, concs: onp.ndarray, tmax_idx: int) -> float | None:
+    """Estimate the terminal elimination rate constant lambda_z (1/h).
+
+    Uses the last three or more log-linear declining points after Tmax, provided
+    they cover at least 1.5 terminal half-lives of data and the fit is adequate.
+    Returns None if lambda_z cannot be estimated reliably.
+    """
+    idxs = onp.arange(tmax_idx + 1, len(times))
+    if len(idxs) < 3:
+        return None
+
+    log_c = onp.log(onp.maximum(concs[idxs], 1e-9))
+    t = times[idxs]
+
+    # Starting from the last point, greedily include earlier points that keep
+    # concentrations monotonically declining.
+    n = len(t)
+    best_slope: float | None = None
+    best_r2 = 0.0
+    for k in range(3, n + 1):
+        t_k = t[n - k :]
+        c_k = log_c[n - k :]
+        slope, intercept = onp.polyfit(t_k, c_k, 1)
+        pred = slope * t_k + intercept
+        ss_res = float(onp.sum((c_k - pred) ** 2))
+        ss_tot = float(onp.sum((c_k - c_k.mean()) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        if slope < 0 and r2 > best_r2:
+            best_r2 = r2
+            best_slope = float(-slope)
+
+    if best_slope is None or best_slope <= 0 or best_r2 < 0.7:
+        return None
+    return best_slope
+
 
 def compute_nca(observations: list[Observation], dose: float) -> dict[str, float | None]:
     """Compute non-compartmental analysis (NCA) PK parameters.
 
-    Returns dict with Cmax, Tmax, AUC, t1/2, CL/F, Vz/F.
+    Parameters
+    ----------
+    observations : list[Observation]
+        Concentration observations for one patient
+    dose : float
+        Administered (nominal) dose in mg; used for CL/F and Vz/F
+
+    Returns
+    -------
+    dict with Cmax, Tmax, AUClast, AUCinf, lambda_z, half-life, CL/F, Vz/F.
     """
-    valid_obs = [o for o in observations if o.concentration is not None]
+    valid_obs = [o for o in observations if o.concentration is not None and o.concentration >= 0]
 
+    empty: dict[str, float | None] = {
+        "cmax": None,
+        "tmax": None,
+        "auc_last": None,
+        "auc_inf": None,
+        "lambda_z": None,
+        "half_life": None,
+        "cl_f": None,
+        "vz_f": None,
+    }
     if not valid_obs:
-        return {
-            "cmax": None,
-            "tmax": None,
-            "auc": None,
-            "half_life": None,
-            "cl_f": None,
-            "vz_f": None,
-        }
+        return empty
 
-    # Cmax and Tmax
-    cmax_obs = max(valid_obs, key=lambda o: o.concentration)
-    tmax_candidates = [o for o in valid_obs if o.concentration > 0]
-    tmax_obs = min(tmax_candidates, key=lambda o: o.time) if tmax_candidates else valid_obs[0]
+    times = onp.array([o.time for o in valid_obs], dtype=onp.float64)
+    valid_conc = [float(o.concentration) for o in valid_obs if o.concentration is not None]
+    concs = onp.array(valid_conc, dtype=onp.float64)
 
-    cmax = cmax_obs.concentration
-    tmax = tmax_obs.time
+    order = onp.argsort(times)
+    times = times[order]
+    concs = concs[order]
 
-    # AUC by trapezoidal rule
-    times = onp.array([o.time for o in valid_obs])
-    concentrations = onp.array([o.concentration for o in valid_obs])
+    # Cmax at the time of the maximum concentration
+    cmax_idx = int(onp.argmax(concs))
+    cmax = float(concs[cmax_idx])
+    tmax = float(times[cmax_idx])
 
-    sort_idx = onp.argsort(times)
-    times_sorted = times[sort_idx]
-    concentrations_sorted = concentrations[sort_idx]
+    # AUClast by trapezoidal rule
+    auc_last = _trapezoidal_auc(times, concs)
 
-    auc = 0.0
-    for i in range(len(times_sorted) - 1):
-        dt = times_sorted[i + 1] - times_sorted[i]
-        auc += 0.5 * (concentrations_sorted[i] + concentrations_sorted[i + 1]) * dt
+    # Terminal elimination
+    lambda_z = _terminal_lambda_z(times, concs, cmax_idx)
+    half_life: float | None = None
+    auc_inf: float | None = None
+    cl_f: float | None = None
+    vz_f: float | None = None
 
-    auc_f = auc / dose if dose > 0 else None
-    cl_f = dose / auc if auc > 0 and dose > 0 else None
+    if lambda_z is not None and lambda_z > 0:
+        half_life = float(onp.log(2.0) / lambda_z)
+        c_last = float(concs[-1])
+        auc_inf = auc_last + c_last / lambda_z
+    else:
+        auc_inf = auc_last
 
-    # Terminal half-life: log-linear regression on last >=3 declining points
-    half_life = None  # simplified for MVP - would need terminal phase regression
-
-    # Vz/F = (CL/F) / lambda_z
-    vz_f = None  # would need half-life
+    if dose > 0 and auc_inf is not None and auc_inf > 0:
+        cl_f = dose / auc_inf
+        if lambda_z is not None and lambda_z > 0:
+            vz_f = cl_f / lambda_z
 
     return {
         "cmax": cmax,
         "tmax": tmax,
-        "auc": auc,
-        "auc_f": auc_f,
+        "auc_last": auc_last,
+        "auc_inf": auc_inf,
+        "lambda_z": lambda_z,
         "half_life": half_life,
         "cl_f": cl_f,
         "vz_f": vz_f,
+    }
+
+
+def summarize_metrics(values: list[float]) -> dict[str, float]:
+    """Summarize a list of per-patient metrics with median and 90% interval."""
+    arr = onp.asarray(values, dtype=onp.float64)
+    if len(arr) == 0:
+        return {"n": 0.0, "mean": float("nan"), "median": float("nan"),
+                "p5": float("nan"), "p95": float("nan")}
+    return {
+        "n": float(len(arr)),
+        "mean": float(arr.mean()),
+        "median": float(onp.median(arr)),
+        "p5": float(onp.quantile(arr, 0.05)),
+        "p95": float(onp.quantile(arr, 0.95)),
     }
 
 
@@ -92,205 +179,261 @@ class TrialEngine:
     """Event-driven SAD/MAD trial simulator.
 
     Handles:
-    - Dose escalation with DLT monitoring
+    - Dose escalation with DLT monitoring (rules actually control the next dose)
     - Patient dropout and non-adherence
     - Measurement noise and missing visits
     - Non-compartmental analysis (NCA)
-    - Bayesian posterior summaries
+    - Safety assessment (QTc, DILI, CTCAE DLT)
+    - Uncertainty intervals (median + 90% interval across virtual subjects)
     """
 
     def __init__(self, protocol: Protocol, drug: Drug, population: Population) -> None:
         self.protocol = protocol
         self.drug = drug
         self.population = population
-
-        # Trial state
-        self.cohort_number = 0
         self.current_dose_level_index = 0
-        self.dlt_observed = False
-        self.patients_dropped: list = []
-        self.all_observations: list = []
+        self.cohort_histories: list[dict[str, Any]] = []
 
     def run_sad_mad(self, rng: onp.random.Generator) -> TrialResult:
-        """Run a complete SAD/MAD trial simulation.
-
-        Returns a TrialResult containing all observations, PK summaries,
-        and safety assessments.
-        """
+        """Run a complete SAD/MAD trial simulation."""
         n_patients = len(self.population.patients)
         n_cohorts = self.protocol.n_cohorts
         cohort_size = self.protocol.cohort_size
         dose_levels = self.protocol.dose_levels
 
-        # Track DLT across cohorts
-        cohort_dlt_counts: list[int] = []
-        escalation_decisions: list[str] = []
-
-        # Result containers
-        all_patient_observations: list = []
+        all_observations: list[Observation] = []
         all_patient_pk: dict[str, dict[str, float | None]] = {}
-
-        # Start with first cohort
-        current_dose_mg = dose_levels[0] if dose_levels else 10.0
+        cohort_summaries: list[dict[str, Any]] = []
+        cohort_escalations: list[str] = []
+        n_enrolled = 0
+        next_dose_level_index = 0
+        stop = False
 
         for cohort_idx in range(n_cohorts):
-            self.cohort_number = cohort_idx
-            self.current_dose_level_index = cohort_idx
-
-            # Check escalation rules from previous cohort
-            if cohort_idx > 0:
-                self._apply_escalation_rules(
-                    cohort_dlt_counts[-1], escalation_decisions[-1]
-                )
-
-            # Enroll cohort
-            start_idx = cohort_idx * cohort_size
-            end_idx = min((cohort_idx + 1) * cohort_size, n_patients)
-            cohort_patients = self.population.patients[start_idx:end_idx]
-
-            # Reset DLT flag for this cohort
-            cohort_dlt_count = 0
-
-            for patient in cohort_patients:
-                patient_result = self._simulate_patient(
-                    patient, current_dose_mg, rng
-                )
-
-                # Record observations
-                all_patient_observations.extend(patient_result["observations"])
-                all_patient_pk[patient.id] = patient_result["pk_summary"]
-
-                # Check for DLT
-                has_dlt = patient_result.get("has_dlt", False)
-                if has_dlt:
-                    cohort_dlt_count += 1
-
-            cohort_dlt_counts.append(cohort_dlt_count)
-            escalation_decisions.append(self._determine_escalation(
-                cohort_dlt_count, current_dose_mg
-            ))
-
-            # If too many DLTs, stop escalation
-            if cohort_dlt_count >= self.protocol.dose_escalation.max_dlt_per_cohort:
-                if cohort_idx < n_cohorts - 1:
-                    current_dose_mg = max(dose_levels[0], current_dose_mg / 2)
+            if stop:
                 break
 
-            # Move to next dose level for next cohort
-            if cohort_idx < n_cohorts - 1:
-                current_dose_mg = dose_levels[min(cohort_idx + 1, len(dose_levels) - 1)]
+            start = cohort_idx * cohort_size
+            end = min(start + cohort_size, n_patients)
+            cohort_patients = self.population.patients[start:end]
+            if not cohort_patients:
+                break
 
-        # Compute population summaries
-        pop_summary = self._compute_population_summary(all_patient_observations, all_patient_pk)
+            # Dose for this cohort is controlled by escalation rules.
+            dose_mg = dose_levels[min(next_dose_level_index, len(dose_levels) - 1)]
+            n_enrolled += len(cohort_patients)
 
-        # Safety assessment
-        safety_summary = self._assess_safety(all_patient_observations)
+            # Batch-solve the dense PK profile for every patient in the cohort.
+            # Adherence is sampled per patient; absorbed (dose-entering-gut) amounts
+            # are passed to the batched solver.
+            administered_doses = onp.array([
+                dose_mg * self._sample_adherence(rng) for _ in cohort_patients
+            ], dtype=onp.float64)
+            absorbed_doses = administered_doses * self.drug.bioavailability
 
-        # Generate run ID
-        run_id = f"sad_mad_{onp.datetime64('now', 's').astype(str)}"
+            t_eval_hours, C_batch = self._solve_cohort_batch(
+                cohort_patients, absorbed_doses
+            )
+
+            cohort_dlt_count = 0
+
+            for pi, patient in enumerate(cohort_patients):
+                gs = self._genotype_scale(patient)
+                patient_result = self._evaluate_patient(
+                    patient, rng, t_eval_hours, C_batch[pi],
+                    float(administered_doses[pi]), gs,
+                )
+                all_observations.extend(patient_result["observations"])
+                all_patient_pk[patient.id] = patient_result["pk_summary"]
+                if patient_result["has_dlt"]:
+                    cohort_dlt_count += 1
+
+            dlt_rate = cohort_dlt_count / len(cohort_patients) if cohort_patients else 0.0
+
+            # Determine next dose via escalation rules.
+            decision, next_dose_level_index, stop = self._escalation_decision(
+                cohort_dlt_count, next_dose_level_index
+            )
+            cohort_escalations.append(decision)
+
+            cohort_summaries.append({
+                "cohort": cohort_idx + 1,
+                "dose_mg": dose_mg,
+                "n": len(cohort_patients),
+                "n_dlt": cohort_dlt_count,
+                "dlt_rate": dlt_rate,
+                "escalation_decision": decision,
+            })
+
+            # If too many DLTs, the trial stops.
+            if stop:
+                break
+
+        pop_summary = self._compute_population_summary(all_patient_pk, n_enrolled)
+        safety_summary = run_safety_assessment(all_observations, self.drug, self.protocol.safety)
+        pk_summaries = self._compute_pk_summaries(all_patient_pk, cohort_summaries)
+
+        run_id = self._make_run_id()
+        uncertainty = self._compute_uncertainty(all_patient_pk, cohort_summaries)
 
         return TrialResult(
             run_id=run_id,
             protocol_name=self.protocol.name,
             drug_name=self.drug.name,
             population_name=self.population.name,
-            n_subjects=len(all_patient_observations)
-            // len(self.protocol.dose_levels)
-            if self.protocol.dose_levels
-            else n_patients,
-            n_cohorts=self.cohort_number + 1,
-            pk_summaries=self._compute_pk_summaries(all_patient_pk),
+            n_subjects=n_enrolled,
+            n_cohorts=len(cohort_summaries),
+            pk_summaries=pk_summaries,
             population_summary=pop_summary,
             safety_summary=safety_summary,
-            timestamp_utc=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            observations=all_observations,
+            cohort_summaries=cohort_summaries,
+            uncertainty=uncertainty,
+            timestamp_utc=datetime.now(UTC),
             provenance={},
         )
+
+    # ------------------------------------------------------------------
+    # Escalation / de-escalation / stop rules
+    # ------------------------------------------------------------------
+
+    def _escalation_decision(self, dlt_count: int, current_level_index: int) -> tuple[str, int, bool]:
+        """Return (decision, next_level_index, stop).
+
+        Rules (modified accrual):
+        - DLTs >= max_dlt_per_cohort -> "stop" (no further cohorts)
+        - 0 DLTs -> escalate to the next pre-specified dose level
+        - 0 < DLTs < max -> "stay" at the current dose level
+        """
+        max_dlt = self.protocol.dose_escalation.max_dlt_per_cohort
+        if dlt_count >= max_dlt:
+            return "stop", current_level_index, True
+        if dlt_count == 0:
+            nxt = min(current_level_index + 1, len(self.protocol.dose_levels) - 1)
+            return "escalate", nxt, False
+        return "stay", current_level_index, False
+
+    # ------------------------------------------------------------------
+    # Patient-level simulation
+    # ------------------------------------------------------------------
 
     def _simulate_patient(
         self, patient: Patient, dose_mg: float, rng: onp.random.Generator
     ) -> dict[str, Any]:
         """Simulate a single patient in the trial.
 
-        Returns dict with observations and PK summary.
+        The nominal dose is ``dose_mg``. Adherence scales the administered dose,
+        and bioavailability scales the amount reaching the gut for absorption.
+        The nominal (adherence-adjusted) dose is used for NCA-derived CL/F.
+
+        This single-patient path is retained for small cohorts / testing; the
+        cohort loop in :meth:`run_sad_mad` batch-solves PK for each cohort for
+        throughput (see :meth:`_solve_cohort_batch`).
         """
-        # Apply adherence factor
         adherence = self._sample_adherence(rng)
+        administered_dose = dose_mg * adherence
+        absorbed_dose = administered_dose * self.drug.bioavailability
 
-        # Calculate effective dose
-        effective_dose = dose_mg * adherence
-
-        # Simulate PBPK to get concentration-time profile
-        weight = patient.biometrics.weight
-
-        # Time points for observation (protocol visit schedule)
-        visit_schedule = self.protocol.visit_schedule
-
-        # Solve PBPK for this patient
-        t_eval_hours = onp.linspace(
-            0, self.protocol.observation_period_days * 24, 50
+        # Genotype scales metabolic clearance (not tissue partitioning).
+        genotype_scale = self._genotype_scale(patient)
+        params = build_pbpk_params(
+            weight_kg=patient.biometrics.weight,
+            age=patient.biometrics.age,
+            drug=self.drug,
+            genotype_scale=genotype_scale,
         )
 
-        # Prepare PBPK parameters
-        w_scaling = (weight / 70.0) ** 0.75
+        # Simulation grid (hourly) over the observation period for smooth NCA.
+        t_end_h = float(self.protocol.observation_period_days * 24)
+        t_eval_hours = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
 
-        # Kp from Rodgers-Rowland
-        kp = self._compute_patient_kp(patient, self.drug)
+        C_p = onp.asarray(solve_pbpk_single(t_eval_hours, absorbed_dose, params), dtype=onp.float64)
+        return self._evaluate_patient(patient, rng, t_eval_hours, C_p, administered_dose, genotype_scale)
 
-        # Blood flows scaled - onp arrays (jnp.array() wrapper crashes on Metal backend)
-        Q_base = onp.array([1.5, 1.5, 1.0, 1.0, 0.5])  # gut, liver, central, peripheral, effect-site
-        V_base = onp.array([0.3, 1.5, 3.0, 12.0, 0.3])  # gut, liver, central, peripheral, effect-site
-        Q = Q_base * w_scaling  # onp array * float → onp array, works with pbpk_ode indexing
-        V = V_base * (weight / 70.0)  # onp array * float → onp array
-        CL = self.drug.typical_cl_f * w_scaling
-        ka = self.drug.ka
+    def _solve_cohort_batch(
+        self, cohort_patients: list[Patient], administered_doses: onp.ndarray,
+    ) -> tuple[onp.ndarray, onp.ndarray]:
+        """Batch-solve the dense PK profiles for a whole cohort at once.
 
-        params = {
-            "Q": Q,
-            "V": V,
-            "Kp": kp,
-            "CL": CL,
-            "ka": ka,
-            "A_gut_dose": effective_dose,
+        Returns
+        -------
+        t_eval_hours : ndarray (n_time,)
+        C_batch : ndarray (n_patients, n_time)   plasma concentrations (mg/L)
+        """
+        t_end_h = float(self.protocol.observation_period_days * 24)
+        t_eval_hours = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
+
+        params_list = [
+            build_pbpk_params(
+                weight_kg=p.biometrics.weight,
+                age=p.biometrics.age,
+                drug=self.drug,
+                genotype_scale=self._genotype_scale(p),
+            )
+            for p in cohort_patients
+        ]
+        params_batch = {
+            "Q": onp.stack([p["Q"] for p in params_list]),
+            "V": onp.stack([p["V"] for p in params_list]),
+            "Kp": onp.stack([p["Kp"] for p in params_list]),
+            "CL": onp.array([p["CL"] for p in params_list]),
+            "ka": onp.array([p["ka"] for p in params_list]),
         }
+        C_batch = onp.asarray(
+            solve_pbpk_batch(t_eval_hours, administered_doses, params_batch),
+            dtype=onp.float64,
+        )
+        return t_eval_hours, C_batch
 
-        try:
-            C_p = solve_pbpk_single(t_eval_hours, effective_dose, params)
-        except Exception:
-            # Fallback: simple single-compartment if PBPK fails
-            C_p = onp.zeros_like(t_eval_hours)
-            if effective_dose > 0 and V[2] > 0:
-                C_p[0] = effective_dose / V[2]
+    def _evaluate_patient(
+        self, patient: Patient, rng: onp.random.Generator,
+        t_eval_hours: onp.ndarray, C_p: onp.ndarray,
+        administered_dose: float, genotype_scale: float,
+    ) -> dict[str, Any]:
+        """NCA + visit noise + DIL/DLT for a single patient's profile."""
+        # Smooth-profile NCA on the dense grid.
+        smooth_obs = self._obs_from_profile(patient.id, t_eval_hours, C_p)
+        pk_summary = compute_nca(smooth_obs, administered_dose)
 
-        # Generate observations at visit schedule
+        # Observations at the protocol visit schedule (with noise/missingness).
         observations = self._generate_observations(
-            patient.id,
-            t_eval_hours,
-            C_p,
-            visit_schedule,
-            rng,
+            patient.id, t_eval_hours, C_p, rng, administered_dose, pk_summary
         )
 
-        # Compute PK summary (NCA-like)
-        pk_summary = self._compute_patient_pk(observations, effective_dose)
-
-        # Check for DLT using safety thresholds from protocol
-        has_dlt = False
-        # Get latest QTc observation from patient observations
-        patient_obs = [o for o in observations if o.patient_id == patient.id and o.qt_interval is not None]
-        if patient_obs:
-            latest_qtc = max(o.qt_interval for o in patient_obs if o.qt_interval is not None)
-            qt_threshold = self.protocol.safety.qt_threshold
-            qt_delta_threshold = self.protocol.safety.qt_delta
-            # DLT if absolute QTc > threshold or delta QTc > delta threshold
-            if latest_qtc > qt_threshold or latest_qtc - self.drug.qtcd_baseline > qt_delta_threshold:
-                has_dlt = True
+        # DLT determination integrates QTc, DILI, and CTCAE.
+        has_dlt = determine_dlt(observations, self.drug, self.protocol.safety, patient.id)
 
         return {
             "observations": observations,
             "pk_summary": pk_summary,
             "has_dlt": has_dlt,
-            "adherence": adherence,
+            "adherence": 1.0,
+            "genotype_scale": genotype_scale,
         }
+
+    @staticmethod
+    def _obs_from_profile(patient_id: str, t: onp.ndarray, C: onp.ndarray) -> list[Observation]:
+        """Create concentration observations at every simulation grid point."""
+        obs = []
+        for ti, ci in zip(t, C, strict=False):
+            obs.append(Observation(
+                patient_id=patient_id,
+                time=float(ti),
+                compartment="plasma",
+                concentration=float(ci),
+            ))
+        return obs
+
+    def _genotype_scale(self, patient: Patient) -> float:
+        """Map the drug's metabolizing enzyme activity score to a clearance scale."""
+        enzyme = self.drug.metabolizing_enzyme
+        if not enzyme or enzyme == "none":
+            return 1.0
+        score_obj = patient.genotypes.get(enzyme)
+        if score_obj is None:
+            return 1.0
+        # Floor so poor metabolizers do not get zero (or negative) clearance.
+        return max(score_obj.activity_score, 0.05)
 
     def _sample_adherence(self, rng: onp.random.Generator) -> float:
         """Sample adherence for a patient."""
@@ -298,194 +441,124 @@ class TrialEngine:
         min_val = self.protocol.adherence.min
         max_val = self.protocol.adherence.max
 
-        if dist == "uniform":
-            return float(rng.uniform(min_val, max_val))
-        elif dist == "beta":
+        if dist == "beta":
             a, b = 2.0, 5.0
             beta_sample = rng.beta(a, b)
-            return min_val + beta_sample * (max_val - min_val)
-        else:
-            return float(rng.uniform(min_val, max_val))
-
-    def _compute_patient_kp(self, patient: Patient, drug: Drug) -> list[float]:
-        """Compute Kp for a patient using Rodgers-Rowland + genotype scaling.
-
-        Returns Kp as a list [gut, liver, central, peripheral, effect-site],
-        matching the COMPARTMENT_ORDER indexing used by pbpk_ode.
-        """
-        from insilico_trial.pbpk.model import kp_for_tissue
-
-        # Base Kp from drug properties
-        kp_dict: dict[str, float] = {}
-        tissue_type_map = {
-            "gut": "generic",
-            "liver": "liver",
-            "central": "generic",
-            "peripheral": "peripheral",
-            "effect-site": "generic",
-        }
-        for comp in ["gut", "liver", "central", "peripheral", "effect-site"]:
-            kp_dict[comp] = kp_for_tissue(
-                drug.log_p,
-                drug.pka,
-                drug.fup,
-                drug.bp_ratio,
-                tissue_type_map[comp],
-                mw=drug.mol_weight,
-            )
-
-        # Apply genotype activity score scaling to liver Kp
-        genotype_scales: dict[str, float] = {}
-        for gene, score in patient.genotypes.items():
-            if gene in ["cyp2d6", "cyp2c19", "cyp2c9"]:
-                if score.activity_score >= 1.25:
-                    scale = 1.25  # ultra-rapid
-                elif score.activity_score >= 0.75:
-                    scale = 1.0  # extensive
-                elif score.activity_score >= 0.25:
-                    scale = 0.5  # intermediate
-                else:
-                    scale = 0.1  # poor
-                genotype_scales[gene] = scale
-
-        # Apply to liver Kp if applicable
-        if "liver" in kp_dict and genotype_scales:
-            liver_gene = "cyp3a4"
-            if liver_gene in genotype_scales:
-                kp_dict["liver"] = kp_dict["liver"] * genotype_scales[liver_gene]
-
-        return [kp_dict["gut"], kp_dict["liver"], kp_dict["central"], kp_dict["peripheral"], kp_dict["effect-site"]]
+            return float(min_val + beta_sample * (max_val - min_val))
+        return float(rng.uniform(min_val, max_val))
 
     def _generate_observations(
         self,
         patient_id: str,
         t_eval_hours: onp.ndarray,
         C_p: onp.ndarray,
-        visit_schedule: list[dict[str, float]],
         rng: onp.random.Generator,
+        administered_dose: float,
+        pk_summary: dict[str, float | None],
     ) -> list[Observation]:
         """Generate clinical observations at scheduled visits.
 
-        Includes measurement noise and missingness.
+        Includes measurement noise (never producing negative concentrations),
+        missingness/dropout, QTc exposure-response, and DILI-driven
+        ALT/bilirubin.
         """
-        observations = []
+        observations: list[Observation] = []
+        liver_exposure = pk_summary.get("auc_last") or 0.0
 
-        for visit in visit_schedule:
-            # Handle both dict and VisitSpec objects
-            if isinstance(visit, dict):
-                day = visit["day"]
-                time = visit["time"]
-            else:
-                day = visit.day
-                time = visit.time
+        for visit in self.protocol.visit_schedule:
+            target_time = float(visit.time)  # hours from first dose
 
-            target_time = day * 24 + time  # total hours
-            idx = onp.argmin(onp.abs(t_eval_hours - target_time))
-            concentration = float(C_p[idx]) if idx < len(C_p) else None
+            idx = int(onp.argmin(onp.abs(t_eval_hours - target_time)))
+            concentration = float(C_p[idx])
 
-            # Add measurement noise
-            noise_type = self.protocol.measurement_noise.type
-            cv_percent = self.protocol.measurement_noise.cv_percent
-
-            if noise_type == "lognormal":
-                sigma = cv_percent / 100.0 / onp.sqrt(2)
-                epsilon = rng.standard_normal()
-                observed_c = concentration * onp.exp(sigma * epsilon) if concentration is not None else None
-            elif noise_type == "normal":
-                sd_rel = cv_percent / 100.0
-                epsilon = rng.standard_normal()
-                observed_c = concentration * (1 + sd_rel * epsilon) if concentration is not None else None
-            else:
-                observed_c = concentration
-
-            # Add missingness (some visits may be skipped)
-            dropout_prob = self.protocol.dropout.rate_per_day * day
-            should_skip = rng.random() < dropout_prob
-            if should_skip:
-                obs = Observation(
+            # Missingness (dropout) — the visit is skipped.
+            dropout_prob = self.protocol.dropout.rate_per_day * (target_time / 24.0)
+            if rng.random() < dropout_prob:
+                observations.append(Observation(
                     patient_id=patient_id,
-                    time=time,
+                    time=target_time,
                     compartment="plasma",
                     concentration=None,
                     qt_interval=None,
+                    alt=None,
+                    bilirubin=None,
                     notes="Visit skipped (dropout)",
-                )
-                observations.append(obs)
+                ))
                 continue
 
-            # QTc interval (exposure-response effect)
-            qt_delta = 0.0
-            if concentration is not None and self.drug.qtcd_ec50 > 0:
-                delta_qtc = self.drug.qtcd_emax * concentration / (self.drug.qtcd_ec50 + concentration)
-                qt_delta = delta_qtc
+            # Measurement noise: lognormal, never below zero.
+            cv_percent = self.protocol.measurement_noise.cv_percent or 15.0
+            sigma = cv_percent / 100.0 / onp.sqrt(2)
+            observed_c = float(concentration * onp.exp(sigma * rng.standard_normal()))
 
-            obs = Observation(
+            # QTc exposure-response (Emax).
+            qt_delta = 0.0
+            if self.drug.qtcd_ec50 > 0:
+                qt_delta = self.drug.qtcd_emax * observed_c / (self.drug.qtcd_ec50 + observed_c)
+            qt_interval = self.drug.qtcd_baseline + qt_delta
+
+            # DILI exposure-response driven by liver exposure (plasma AUC proxy).
+            alt, bilirubin = self._simulate_lft(liver_exposure)
+
+            observations.append(Observation(
                 patient_id=patient_id,
-                time=time,
+                time=target_time,
                 compartment="plasma",
                 concentration=observed_c,
-                qt_interval=self.drug.qtcd_baseline + qt_delta if observed_c is not None else None,
-                alt=None,
-                bilirubin=None,
-                notes=f"Visit day {day}, {time}h post-dose",
-            )
-            observations.append(obs)
+                qt_interval=float(qt_interval),
+                alt=alt,
+                bilirubin=bilirubin,
+                notes=f"Visit day {int(target_time // 24)}, {target_time}h post-dose",
+            ))
 
         return observations
 
-    def _compute_patient_pk(
-        self, observations: list[Observation], dose: float
-    ) -> dict[str, float | None]:
-        """Compute non-compartmental analysis (NCA) PK parameters.
-
-        Delegates to the standalone `compute_nca` function.
-        """
-        return compute_nca(observations, dose)
+    def _simulate_lft(self, liver_exposure: float) -> tuple[float, float]:
+        """Simulate ALT (U/L) and bilirubin (mg/dL) from liver exposure."""
+        alt = self.drug.alt_baseline * (1.0 + self.drug.dili_emax_alt * liver_exposure / (self.drug.dili_ec50_alt + liver_exposure))
+        bili = self.drug.bili_baseline * (1.0 + self.drug.dili_emax_bili * liver_exposure / (self.drug.dili_ec50_bili + liver_exposure))
+        return float(alt), float(bili)
 
     def _compute_population_summary(
-        self, all_observations: list, all_pk: dict[str, dict[str, float | None]]
+        self, all_pk: dict[str, dict[str, float | None]], n_enrolled: int
     ) -> PopulationSummary:
         """Compute population-level summary statistics from actual patient data."""
-        n = len(all_pk)
-
+        patients = self.population.patients[:n_enrolled]
+        n = len(patients)
         if n == 0:
             return PopulationSummary(
-                n=0,
-                mean_age=0.0,
-                std_age=0.0,
-                n_male=0,
-                n_female=0,
-                mean_weight=0.0,
-                std_weight=0.0,
-                mean_bmi=0.0,
-                median_egfr=0.0,
-                mean_cl=0.0,
-                std_cl=0.0,
-                mean_v=0.0,
-                std_v=0.0,
+                n=0, mean_age=0.0, std_age=0.0, n_male=0, n_female=0,
+                mean_weight=0.0, std_weight=0.0, mean_bmi=0.0, median_egfr=0.0,
+                mean_cl=0.0, std_cl=0.0, mean_v=0.0, std_v=0.0,
             )
 
-        ages = [p.biometrics.age for p in self.population.patients[:n]]
-        weights = [p.biometrics.weight for p in self.population.patients[:n]]
-        heights = [p.biometrics.height for p in self.population.patients[:n]]
+        ages = [p.biometrics.age for p in patients]
+        weights = [p.biometrics.weight for p in patients]
+        heights = [p.biometrics.height for p in patients]
 
-        mean_age = float(onp.mean(ages)) if ages else 0.0
+        mean_age = float(onp.mean(ages))
         std_age = float(onp.std(ages)) if len(ages) > 1 else 0.0
-
-        n_male = sum(1 for p in self.population.patients[:n] if p.biometrics.sex.value == "male")
+        n_male = sum(1 for p in patients if p.biometrics.sex.value == "male")
         n_female = n - n_male
-
-        mean_weight = float(onp.mean(weights)) if weights else 0.0
+        mean_weight = float(onp.mean(weights))
         std_weight = float(onp.std(weights)) if len(weights) > 1 else 0.0
-
-        mean_height = float(onp.mean(heights)) if heights else 68.0
+        mean_height = float(onp.mean(heights))
         bmi = mean_weight / ((mean_height / 100.0) ** 2) if mean_height > 0 else 0.0
 
-        cmax_values = [pk.get("cmax") for pk in all_pk.values() if pk.get("cmax") is not None]
-        cl_values = [pk.get("cl_f") for pk in all_pk.values() if pk.get("cl_f") is not None]
+        cl_values: list[float] = []
+        vz_values: list[float] = []
+        for pk in all_pk.values():
+            v = pk.get("cl_f")
+            if v is not None:
+                cl_values.append(float(v))
+            vz = pk.get("vz_f")
+            if vz is not None:
+                vz_values.append(float(vz))
 
         mean_cl = float(onp.mean(cl_values)) if cl_values else 0.0
         std_cl = float(onp.std(cl_values)) if len(cl_values) > 1 else 0.0
+        mean_vz = float(onp.mean(vz_values)) if vz_values else 0.0
+        std_vz = float(onp.std(vz_values)) if len(vz_values) > 1 else 0.0
 
         return PopulationSummary(
             n=n,
@@ -496,102 +569,122 @@ class TrialEngine:
             mean_weight=mean_weight,
             std_weight=std_weight,
             mean_bmi=bmi,
-            median_egfr=140.0,
+            median_egfr=float(onp.median([p.biometrics.egfr for p in patients])),
             mean_cl=mean_cl,
             std_cl=std_cl,
-            mean_v=mean_weight,
-            std_v=std_weight,
+            mean_v=mean_vz,
+            std_v=std_vz,
         )
 
-    def _assess_safety(self, observations: list) -> dict[str, Any]:
-        """Assess safety signals (QTc, DILI, DLT)."""
-        qtc_results = assess_qtc(observations, self.drug)
-        dili_results = assess_dili(observations, self.drug)
+    def _compute_pk_summaries(
+        self,
+        all_patient_pk: dict[str, dict[str, float | None]],
+        cohort_summaries: list[dict[str, Any]],
+    ) -> list[PKSummary]:
+        """Compute per-cohort and overall PK summaries."""
+        summaries: list[PKSummary] = []
 
-        n_dlt = sum(1 for r in qtc_results if r.flag_qtc_60ms_delta)
+        # Per-cohort: slice patients by enrollment order.
+        cohort_sizes = [c["n"] for c in cohort_summaries]
+        cursor = 0
+        for ci, size in enumerate(cohort_sizes):
+            cohort_pk = list(all_patient_pk.values())[cursor : cursor + size]
+            cursor += size
+            dose_mg = cohort_summaries[ci]["dose_mg"]
+            summaries.append(self._pk_summary_for(cohort_pk, f"Cohort {ci + 1} ({dose_mg:g} mg)"))
 
-        qtc_deltas = [r.qtc_delta for r in qtc_results]
-        avg_qtc_delta = onp.mean(qtc_deltas) if qtc_deltas else 0.0
-        max_qtc_delta = onp.max(qtc_deltas) if qtc_deltas else 0.0
-
-        dili_flagged = sum(1 for r in dili_results if r.hy_law_criteria_met)
-        avg_dili_prob = onp.mean([r.dili_probability for r in dili_results]) if dili_results else 0.0
-
-        return {
-            "n_dlt_proxy": n_dlt,
-            "avg_qtc_delta_ms": float(avg_qtc_delta),
-            "max_qtc_delta_ms": float(max_qtc_delta),
-            "n_qtc_60ms_delta": sum(1 for r in qtc_results if r.flag_qtc_60ms_delta),
-            "n_dili_hy_law": dili_flagged,
-            "avg_dili_probability": float(avg_dili_prob),
-            "qtc_patients": [
-                {"patient_id": r.patient_id, "delta_ms": r.qtc_delta, "flag_60ms": r.flag_qtc_60ms_delta}
-                for r in qtc_results
-            ],
-            "dili_patients": [
-                {"patient_id": r.patient_id, "hy_law": r.hy_law_criteria_met, "dili_prob": r.dili_probability}
-                for r in dili_results
-            ],
-        }
-
-    def _compute_pk_summaries(self, all_patient_pk: dict[str, dict[str, float | None]]) -> list[PKSummary]:
-        """Compute population PK summaries from individual patient NCA results."""
-        summaries = []
-        cmax_values = []
-        auc_values = []
-        cl_f_values = []
-
-        for pk in all_patient_pk.values():
-            if pk.get("cmax") is not None:
-                cmax_values.append(pk["cmax"])
-            if pk.get("auc") is not None:
-                auc_values.append(pk["auc"])
-            if pk.get("cl_f") is not None:
-                cl_f_values.append(pk["cl_f"])
-
-        mean_cmax = onp.mean(cmax_values) if cmax_values else None
-        std_cmax = onp.std(cmax_values) if cmax_values else None
-        mean_auc = onp.mean(auc_values) if auc_values else None
-        mean_cl_f = onp.mean(cl_f_values) if cl_f_values else None
-
-        summary = PKSummary(
-            compound=self.drug.name,
-            cohort_label="overall",
-            n=len(all_patient_pk),
-            cmax_mean=mean_cmax,
-            cmax_median=None,
-            cmax_cv=None,
-            tmax_mean=None,
-            tmax_median=None,
-            auc_mean=mean_auc,
-            auc_median=None,
-            auc_cv=None,
-            half_life_mean=None,
-            cl_f_mean=mean_cl_f,
-            vz_f_mean=None,
-            pct_with_dlt=None,
-        )
-        summaries.append(summary)
+        summaries.append(self._pk_summary_for(list(all_patient_pk.values()), "Overall"))
         return summaries
 
-    def _apply_escalation_rules(self, prev_dlt_count: int, prev_decision: str) -> None:
-        """Apply dose escalation/de-escalation rules between cohorts."""
-        if prev_dlt_count >= self.protocol.dose_escalation.max_dlt_per_cohort:
-            self.current_dose_level_index = max(0, self.current_dose_level_index - 1)
-        elif prev_dlt_count == 0:
-            self.current_dose_level_index = min(
-                self.current_dose_level_index + 1,
-                len(self.protocol.dose_levels) - 1
-            )
+    def _pk_summary_for(self, pk_list: list[dict[str, float | None]], label: str) -> PKSummary:
+        def col(key: str) -> list[float]:
+            val: list[float] = []
+            for pk in pk_list:
+                v = pk.get(key)
+                if v is not None:
+                    val.append(float(v))
+            return val
 
-    def _determine_escalation(self, dlt_count: int, current_dose: float) -> str:
-        """Determine escalation decision for next cohort.
+        cmax = col("cmax")
+        tmax = col("tmax")
+        auc = col("auc_inf")
+        half = col("half_life")
+        clf = col("cl_f")
+        vzf = col("vz_f")
 
-        Returns: "escalate", "stay", "de-escalate", or "stop"
+        def stats(v: list[float]) -> tuple[float | None, float | None, float | None]:
+            if not v:
+                return None, None, None
+            arr = onp.asarray(v)
+            mean = float(arr.mean())
+            median = float(onp.median(arr))
+            cv = float(arr.std(ddof=1) / arr.mean()) if arr.mean() > 0 and len(arr) > 1 else None
+            return mean, median, cv
+
+        cmax_m, cmax_med, cmax_cv = stats(cmax)
+        tmax_m, tmax_med, _ = stats(tmax)
+        auc_m, auc_med, auc_cv = stats(auc)
+        half_m, _, _ = stats(half)
+        clf_m, _, _ = stats(clf)
+        vzf_m, _, _ = stats(vzf)
+
+        return PKSummary(
+            compound=self.drug.name,
+            cohort_label=label,
+            n=len(pk_list),
+            cmax_mean=cmax_m,
+            cmax_median=cmax_med,
+            cmax_cv=cmax_cv,
+            tmax_mean=tmax_m,
+            tmax_median=tmax_med,
+            auc_mean=auc_m,
+            auc_median=auc_med,
+            auc_cv=auc_cv,
+            half_life_mean=half_m,
+            cl_f_mean=clf_m,
+            vz_f_mean=vzf_m,
+        )
+
+    def _compute_uncertainty(
+        self,
+        all_patient_pk: dict[str, dict[str, float | None]],
+        cohort_summaries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Compute median and 90% interval for key metrics across virtual subjects.
+
+        Reported per cohort (doses differ across cohorts in a SAD design) plus an
+        overall summary.
         """
-        if dlt_count >= self.protocol.dose_escalation.max_dlt_per_cohort:
-            return "stop"
-        elif dlt_count == 0 and self.current_dose_level_index < self.protocol.n_cohorts - 1:
-            return "escalate"
-        else:
-            return "stay"
+        pk_list = list(all_patient_pk.values())
+        metric_keys = ["cmax", "auc_inf", "half_life", "cl_f"]
+
+        def _summarize(pts: list[dict[str, float | None]]) -> dict[str, Any]:
+            out: dict[str, Any] = {}
+            for key in metric_keys:
+                vals: list[float] = []
+                for p in pts:
+                    v = p.get(key)
+                    if v is not None:
+                        vals.append(float(v))
+                out[key] = summarize_metrics(vals)
+            return out
+
+        result: dict[str, Any] = {"overall": _summarize(pk_list)}
+
+        cursor = 0
+        for ci, summary in enumerate(cohort_summaries):
+            size = int(summary["n"])
+            chunk = pk_list[cursor : cursor + size]
+            cursor += size
+            result[f"cohort_{ci + 1}"] = _summarize(chunk)
+
+        return result
+
+    @staticmethod
+    def _make_run_id() -> str:
+        import hashlib
+        import uuid
+
+        stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        h = hashlib.sha256(uuid.uuid4().hex.encode()).hexdigest()[:6]
+        return f"sad_{stamp}_{h}"

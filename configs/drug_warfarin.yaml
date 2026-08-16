@@ -6,16 +6,18 @@ drug:
   fup: 0.008  # fraction unbound plasma
   bp_ratio: 0.8  # blood:plasma ratio
   dose_unit: mg
-  # Pharmacokinetic parameters (literature: Gabriel et al., Clin Pharmacokinet 1994)
-  # These are population-typical values; individual variation comes from population generator
-  # and genotype scaling
-  typical_cl_f: 0.042  # L/h/kg (bioavailability-adjusted clearance)
-  typical_v_f: 0.12    # L/kg (bioavailability-adjusted volume)
-  ka: 1.0              # 1/h absorption rate constant
+  # PK parameters (literature: Gabriel et al., Clin Pharmacokinet 1994; Hamberg et al.)
+  # Units: typical_cl_f and typical_v_f are TOTAL values for a 70 kg reference adult.
+  #   CL/F ~ 0.15 L/h total -> t1/2 ~ 0.693*V/F/CL/F ~ 0.693*8.4/0.15 ~ 39 h (matches ~38 h ref)
+  #   Vz/F ~ 0.12 L/kg * 70 kg ~ 8.4 L
+  typical_cl_f: 0.15  # L/h (total, 70 kg reference)
+  typical_v_f: 8.4    # L (total, 70 kg reference)
+  ka: 1.0             # 1/h absorption rate constant
   bioavailability: 0.95  # fraction absorbed
+  metabolizing_enzyme: cyp2c9  # S-warfarin clearance is CYP2C9 mediated
   # Dose-response
   target: vkorc1
-  ec50: 3.0  # ng/mL nominal INR response
+  ec50: 3.0  # mg/L nominal INR response
   emax: 5.0
   hill_coeff: 2.0
   # Safety

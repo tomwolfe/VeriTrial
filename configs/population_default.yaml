@@ -1,4 +1,5 @@
 population:
+  name: default_population
   n_subjects: 1000
   seed: 42
   # NHANES-based priors (simplified)
@@ -18,7 +19,7 @@ population:
     std: 10.0
     min: 150.0
     max: 200.0
-liver_volume:
+  liver_volume:
     dist: lognormal
     mean_log: 7.31  # median ~1500 mL for typical patient
     std_log: 0.20
@@ -40,9 +41,9 @@ liver_volume:
       frequencies: [0.71, 0.12, 0.08, 0.09]
       activity_scores: [1.0, 0.5, 0.0, 0.0]
     cyp3a4:
-      alleles: [CYP3A4*1B, CYP3A4*22]
-      frequencies: [0.07, 0.13]
-      activity_scores: [1.0, 0.6]
+      alleles: [CYP3A4*1, CYP3A4*1B, CYP3A4*22]
+      frequencies: [0.80, 0.07, 0.13]
+      activity_scores: [1.0, 1.0, 0.6]
   correlation_matrix:
     age_egfr: -0.35
     weight_height: 0.72

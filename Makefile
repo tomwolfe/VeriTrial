@@ -15,7 +15,7 @@ help:
 	@echo "  clean        - Remove build artifacts"
 
 install:
-	uv pip install -e ".[dev]"
+	uv pip install --system -e ".[dev]"
 
 lint:
 	ruff check src/insilico_trial
@@ -30,16 +30,16 @@ test-cov:
 	pytest src/insilico_trial/tests/ -x -q --cov=insilico_trial --cov-report=term-missing
 
 demo-small:
-	python -m insilico_trial.cli demo --patients 100 --duration-days 7
+	python -m insilico_trial.cli demo-small --patients 100 --duration-days 7
 
 demo:
 	python -m insilico_trial.cli demo --patients 1000 --duration-days 7
 
 validate:
-	python -m insilico_trial.cli validate
+	python -m insilico_trial.cli validate --warfarin-n 300
 
 benchmark:
-	python scripts/benchmark_hardware.py
+	python -m insilico_trial.cli benchmark
 
 report:
 	python -m insilico_trial.cli report

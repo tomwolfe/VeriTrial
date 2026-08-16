@@ -1,8 +1,0 @@
-{
-  "platform": "cpu",
-  "n_patients": 100,
-  "elapsed_seconds": 0.000559,
-  "throughput_patients_per_sec": 1788908.7656529516,
-  "estimated_1000_patient_seconds": 0.000559,
-  "timestamp": "2026-08-15T12:12:25.064784"
-}

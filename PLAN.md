@@ -25,7 +25,7 @@ Apple Silicon M5 Pro. This is a **decision support tool**, NOT a replacement for
 
 ### Phase 2 — Vectorized PBPK Core
 - **Goal**: Perfusion-limited PBPK with Rodgers-Rowland Kp, vectorized for 1000×7-day runs <30s.
-- **Tech**: JAX + diffrax + jax-metal (primary), scipy.integrate (fallback).
+- **Tech**: JAX + diffrax. CPU-only (jax-metal is incompatible with diffrax/lineax on Apple Silicon — see `docs/ASSUMPTIONS.md` §5 and §G1).
 - **Deliverables**:
   - Compartments: Gut, Liver, Kidney, Central, Peripheral, Effect-site.
   - Rodgers-Rowland Kp estimation from logP, pKa, fup, B/P ratio.
@@ -70,14 +70,17 @@ src/insilico_trial/
 ├── validation/       # Warfarin PGx, Moxifloxacin QTc benchmarks
 ├── provenance/       # Run manifests, config hashing, output integrity
 ├── reporting/        # ASME V&V 40 compliant reports
-├── cli.py            # Typer CLI
+├── cli/              # Typer CLI (`cli/__init__.py`, `cli/__main__.py`)
 └── __init__.py
 ```
 
 ## Hardware Target
-- **Primary**: JAX + jax-metal on Apple M5 Pro.
-- **Fallback**: CPU with scipy.integrate.solve_ivp.
-- Numerical agreement tolerance: 1e-4.
+- **Runtime**: JAX + diffrax on CPU. jax-metal is incompatible with diffrax/lineax
+  on Apple Silicon (`unknown attribute code: 22`), so `src/insilico_trial/__init__.py`
+  forces the CPU backend at import unless `VERITRIAL_ALLOW_METAL=1` — but even
+  then diffrax will fail. **There is no scipy.integrate fallback**; diffrax is
+  the only solver. Numerical tolerance: rtol/atol = 1e-4/1e-6; PBPK mass balance
+  < 1e-7. See `docs/ASSUMPTIONS.md`.
 
 ## Definition of Done
 - [x] All Makefile targets pass (`make install`, `make lint`, `make typecheck`, `make test`, `make demo`, `make validate`, `make benchmark`, `make report`).
@@ -85,7 +88,7 @@ src/insilico_trial/
 - [x] Provenance manifest generated for every run.
 - [x] Validation report shows benchmark concordance.
 - [x] No hardcoded parameters; all config-driven.
-- [x] JAX-metal acceleration verified and benchmarked.
+- [x] CPU throughput benchmarked (jax-metal unsupported — see §G1).
 
 ## Limitations
 - This is a research tool. Clinical decisions require human oversight.
