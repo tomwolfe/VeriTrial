@@ -22,6 +22,11 @@ diffrax (via lineax) is not currently compatible with the JAX Metal backend
 ("unknown attribute code: 22" on Apple Silicon with recent JAX/jax-metal). The
 package therefore defaults to the CPU backend; see ``insilico_trial/__init__.py``
 and ``docs/ASSUMPTIONS.md``.
+
+A fixed-step PBPK solver using ``jax.lax.scan`` with matrix-exponential integration
+is available when ``VERITRIAL_ALLOW_METAL=1`` is set. This bypasses lineax entirely
+and uses only jax.lax primitives, which are pure XLA and can potentially run on Metal
+once the upstream StableHLO IR version mismatch is resolved.
 """
 
 from __future__ import annotations
