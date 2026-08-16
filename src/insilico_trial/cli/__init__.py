@@ -10,9 +10,8 @@ import sys
 import jax
 import jax.numpy as jnp
 
-from insilico_trial.pbpk.model import run_pbpk, solve_pbpk_batch, solve_pbpk_single
+from insilico_trial.pbpk.model import solve_pbpk_batch, solve_pbpk_single
 from insilico_trial.population.generator import generate_population
-from insilico_trial.safety import assess_dili, assess_qtc, run_safety_assessment
 from insilico_trial.schemas import (
     ActivityScore,
     Biometric,
@@ -69,18 +68,18 @@ def cmd_demo(args: argparse.Namespace) -> int:
     # Create patients from population dataframe
     patients = []
     for _, row in pop_df.head(n_patients).iterrows():
-        sex_val = row.get("sex", 0)
-        sex_enum = "male" if sex_val else "female"
+        sex_val = row.get("sex", "male")
+        sex_enum = SexEnum(sex_val) if sex_val in ("male", "female") else SexEnum.MALE
 
         biometric = Biometric(
             age=float(row.get("age", 40.0)),
-            sex=SexEnum(sex_enum),
-            weight=float(row.get("weight", 70.0)),
-            height=float(row.get("height", 170.0)),
-            egfr=float(row.get("egfr", 90.0)),
+            sex=sex_enum,
+            weight=float(row.get("weight_kg", 70.0)),
+            height=float(row.get("height_cm", 170.0)),
+            egfr=float(row.get("egfr_ml_min", 90.0)),
         )
 
-        # Get CYP2C9 activity score from genotype
+        # Get CYP2C9 activity score from diploid genotype
         cyp2c9_allele1 = row.get("cyp2c9_allele1", "CYP2C9*1")
         cyp2c9_allele2 = row.get("cyp2c9_allele2", "CYP2C9*1")
         allele_scores = {"CYP2C9*1": 1.0, "CYP2C9*2": 0.5, "CYP2C9*3": 0.0}
@@ -374,9 +373,7 @@ def main() -> int:
         print(f"  Date: {report_path['date']}")
 
         return 0
-    elif args.command == "demo-small":
-        return cmd_demo(args)
-    elif args.command == "demo":
+    elif args.command == "demo-small" or args.command == "demo":
         return cmd_demo(args)
     elif args.command == "benchmark":
         return cmd_benchmark(args)

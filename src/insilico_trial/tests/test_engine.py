@@ -123,7 +123,7 @@ def test_escalation_max_dlt():
 
 def test_nca_auc_trapezoid():
     """Known concentration-time data → correct AUC."""
-    from insilico_trial.trial.engine import _compute_patient_pk
+    from insilico_trial.trial.engine import compute_nca
 
     # Create observations with known concentrations at known times
     obs = [
@@ -168,7 +168,7 @@ def test_nca_auc_trapezoid():
             notes=o.notes,
         ))
 
-    pk = _compute_patient_pk(obs_list, dose=100.0)
+    pk = compute_nca(obs_list, dose=100.0)
     assert pk["auc"] is not None, "AUC should be computable"
     assert pk["cl_f"] is not None, "CL/F should be computable"
     # AUC by trapezoidal rule for the given data:

@@ -72,11 +72,15 @@ def test_genotype_frequencies():
     })
 
     # Check allele frequencies approximate config frequencies
-    # The generator samples one allele per patient per gene
+    # The generator samples two alleles per patient (diploid)
     total = len(df)
-    cyp2c9_1_pct = (df["cyp2c9_allele"] == "CYP2C9*1").sum() / total
-    cyp2c9_2_pct = (df["cyp2c9_allele"] == "CYP2C9*2").sum() / total
-    cyp2c9_3_pct = (df["cyp2c9_allele"] == "CYP2C9*3").sum() / total
+    # Count allele1 and allele2 copies of each variant
+    cyp2c9_1_count = (df["cyp2c9_allele1"] == "CYP2C9*1").sum() + (df["cyp2c9_allele2"] == "CYP2C9*1").sum()
+    cyp2c9_2_count = (df["cyp2c9_allele1"] == "CYP2C9*2").sum() + (df["cyp2c9_allele2"] == "CYP2C9*2").sum()
+    cyp2c9_3_count = (df["cyp2c9_allele1"] == "CYP2C9*3").sum() + (df["cyp2c9_allele2"] == "CYP2C9*3").sum()
+    cyp2c9_1_pct = cyp2c9_1_count / (2 * total)
+    cyp2c9_2_pct = cyp2c9_2_count / (2 * total)
+    cyp2c9_3_pct = cyp2c9_3_count / (2 * total)
 
     assert 0.80 < cyp2c9_1_pct < 0.95, f"CYP2C9*1 freq {cyp2c9_1_pct} outside expected range"
     assert 0.05 < cyp2c9_2_pct < 0.15, f"CYP2C9*2 freq {cyp2c9_2_pct} outside expected range"

@@ -16,22 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as onp
-from scipy import stats
 
 from insilico_trial.pbpk.model import run_pbpk
-from insilico_trial.population.generator import generate_population
-from insilico_trial.schemas import (
-    ActivityScore,
-    Biometric,
-    Drug,
-    Observation,
-    Patient,
-    Population,
-    Protocol,
-    SexEnum,
-    TrialResult,
-    load_drug_config,
-)
 
 # ---------------------------------------------------------------------------
 # Benchmark: Warfarin PGx
@@ -173,9 +159,7 @@ def validate_warfarin_pgx(
                 cohort: {"CL_F": mean_cl_f}
                 for cohort, mean_cl_f in cohort_means.items()
             },
-            "cohort_weights": {
-                cohort: weight for cohort, weight in cohort_weights.items()
-            },
+            "cohort_weights": dict(cohort_weights.items()),
         },
     }
 
@@ -265,15 +249,9 @@ def validate_moxifloxacin_qtc(
     delta_qtc_400 = drug.qtcd_emax * cmax_400 / (drug.qtcd_ec50 + cmax_400)
     delta_qtc_800 = drug.qtcd_emax * cmax_800 / (drug.qtcd_ec50 + cmax_800)
 
-    # Baseline QTc from drug config
-    baseline_qtc = drug.qtcd_baseline
-
     # Compare to reference values within ±5ms
     reference_400 = MOXIFAXACIN_REFERENCE["dose_400mg_QTc_delta_mean_ms"]
     reference_800 = MOXIFAXACIN_REFERENCE["dose_800mg_QTc_delta_mean_ms"]
-
-    qtc_400_within_5ms = abs(delta_qtc_400 - reference_400) < 5
-    qtc_800_within_5ms = abs(delta_qtc_800 - reference_800) < 5
 
     results = {
         "benchmark": "moxifloxacin_qtc",

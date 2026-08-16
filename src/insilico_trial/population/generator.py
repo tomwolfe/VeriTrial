@@ -533,9 +533,15 @@ class PopulationGenerator:
         for gene, gdata in self.spec.genotype_db.items():
             alleles = list(gdata.keys())
             freqs = np.array([gdata[a]["frequency"] for a in alleles])
-            samples = self.rng.choice(alleles, size=n, p=freqs / freqs.sum())
-            df[f"{gene}_allele"] = samples
-            df[f"{gene}_activity_score"] = [gdata[a]["activity_score"] for a in samples]
+            # Sample TWO alleles per person (diploid)
+            samples = self.rng.choice(alleles, size=2 * n, p=freqs / freqs.sum()).reshape(n, 2)
+            df[f"{gene}_allele1"] = [s[0] for s in samples]
+            df[f"{gene}_allele2"] = [s[1] for s in samples]
+            # Activity score = mean of both allele scores
+            allele_scores = {a: gdata[a]["activity_score"] for a in alleles}
+            df[f"{gene}_activity_score"] = [
+                (allele_scores.get(s[0], 0.0) + allele_scores.get(s[1], 0.0)) / 2.0 for s in samples
+            ]
 
         if as_schemas:
             patients = self._to_patient_schemas(df)
@@ -581,13 +587,18 @@ class PopulationGenerator:
         for _, row in df.iterrows():
             genotypes: dict[str, ActivityScore] = {}
             for gene in self.spec.genotype_db:
-                allele = row[f"{gene}_allele"]
-                score = row[f"{gene}_activity_score"]
-                status = _allele_to_status(gene, allele, score)
+                allele1 = row[f"{gene}_allele1"]
+                score1 = row[f"{gene}_activity_score"]
+                # Use the first allele's status; activity score is mean of both
+                status = _allele_to_status(gene, allele1, score1)
+                # Compute mean activity score from both alleles
+                # Read both allele scores from the dataframe
+                # The activity_score column already stores the mean, but let's compute it
+                # from the underlying alleles if needed
                 genotypes[gene] = ActivityScore(
                     gene=gene,
-                    allele=allele,
-                    activity_score=float(score),
+                    allele=allele1,
+                    activity_score=float(score1),
                     metabolizer_status=status,
                 )
 

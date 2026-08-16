@@ -9,13 +9,18 @@ Allometric scaling and genotype-dependent metabolism supported.
 
 from __future__ import annotations
 
+from typing import Any
+
 import diffrax
 import jax
 import jax.numpy as jnp
-import math
+import numpy as onp
 from diffrax import Kvaerno3, ODETerm, diffeqsolve
 
 from insilico_trial.schemas import Drug
+
+# Compartment index mapping: 0=gut, 1=liver, 2=central, 3=peripheral, 4=effect-site
+COMPARTMENT_ORDER = ["gut", "liver", "central", "peripheral", "effect-site"]
 
 # Default physiological parameters (70 kg adult, Hct = 0.45)
 DEFAULT_HCT = 0.45
@@ -120,7 +125,6 @@ def rodgers_rowland_kp(
     # Lipid-rich tissues retain lipophilic compounds more strongly
     # Using 10**x formulations to avoid jax-metal log10 limitation
     lipid_adjustment = lipid_fraction * (10.0 ** (0.5 * log_p))  # lipid binding scaling
-    protein_adjustment = protein_fraction * (10.0 ** (-0.3 * log_p))  # protein binding inversely related to logP
 
     # Combined Kp using only 10**x (no log10 needed)
     # log_kp = log_kp_base + log10(ion_factor) + log10((water_fraction + lipid_adjustment) / 0.70)
@@ -214,7 +218,6 @@ def pbpk_ode(
     Kp = args["Kp"]  # (5,) tissue:plasma partition ratios
     CL = args["CL"]  # float, clearance L/h
     ka = args["ka"]  # float, absorption rate constant 1/h
-    A_gut_dose = args.get("A_gut_dose", 0.0)
 
     # Plasma concentration in central compartment
     C_p = A_central / V[_CENTRAL_IDX]  # V[2] = central volume
@@ -346,7 +349,7 @@ def solve_pbpk_single(
         Plasma concentration (mg/L) at each time point
     """
     # Initial state: [A_gut, A_liver, A_central, A_periph, A_effect]
-    y0 = jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    y0 = onp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=onp.float64)
 
     # Build ODE term
     ode_term = ODETerm(lambda t, y, args: pbpk_ode(t, y, args))
@@ -407,8 +410,6 @@ def solve_pbpk_batch(
     C_p_batch : array of shape (n_patients, n_timepoints)
         Plasma concentrations for each patient at each time point
     """
-    n_patients = A_gut_0s.shape[0]
-
     # JIT-compile the single-patient solver and map over patients
     _solve_single_jit = jax.jit(lambda t_eval, A_gut_0, params: solve_pbpk_single(t_eval, A_gut_0, params))
 
@@ -513,8 +514,13 @@ def run_pbpk(
         - "y": final compartment amounts
         - "mass_balance": mass balance error
     """
-    # Time points (hours)
-    t_eval = jnp.linspace(0, t_max_days * 24, n_timepoints)
+    # Time points (hours) - use Python list for diffrax compatibility
+    t_eval = list(range(n_timepoints))  # placeholder, will be overridden
+    t_eval = [t * 24.0 / n_timepoints for t in range(n_timepoints * 24 + 1)]  # coarse, will be sliced properly
+    # Actually, let me use onp and convert properly
+    import numpy as onp
+    t_eval_onnp = onp.linspace(0, t_max_days * 24, n_timepoints)
+    t_eval = t_eval_onnp.tolist()
 
     # Allometric scaling
     w_scaling = (weight_kg / 70.0) ** 0.75
@@ -523,12 +529,12 @@ def run_pbpk(
     kp = compute_patient_kp_early(log_p, pka, fu_plasma, bp_ratio)
 
     # Blood flows scaled from 70 kg reference (L/h)
-    Q_ref = jnp.array([1.5, 1.5, 1.0, 1.0, 0.5])  # gut, liver, central, peripheral, effect-site
+    Q_ref = onp.array([1.5, 1.5, 1.0, 1.0, 0.5])  # gut, liver, central, peripheral, effect-site
     Q = Q_ref * w_scaling
 
     # Volumes scaled from 70 kg reference (L)
     # Volumes scale linearly with weight
-    V_ref = jnp.array([0.3, 1.5, 3.0, 12.0, 0.3])  # gut, liver, central, peripheral, effect-site
+    V_ref = onp.array([0.3, 1.5, 3.0, 12.0, 0.3])  # gut, liver, central, peripheral, effect-site
     V = V_ref * (weight_kg / 70.0)
 
     # Clearance scaled
@@ -560,21 +566,26 @@ def run_pbpk(
         t0=0.0,
         t1=t_eval[-1],
         dt0=1e-3,
-        y0=jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64),
+        y0=onp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=onp.float64),
         args=params,
         max_steps=int(1e5),
-        saveat=diffrax.SaveAt(ts=t_eval),
+        saveat=diffrax.SaveAt(ts=None),  # will use solution.ts instead
         stepsize_controller=controller,
     )
 
     # Extract plasma concentration from central compartment
+    # solution.ys has shape (n_compartments, n_timepoints)
+    # solution.ts has the output time points
     C_p = solution.ys[_CENTRAL_IDX, :] / params["V"][_CENTRAL_IDX]
+
+    # Extract time points from solution
+    t_eval = solution.ts
 
     # Final state from diffrax solution
     y_final = solution.ys[:, -1]
 
     # Mass balance error
-    y_initial = jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    y_initial = onp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0], dtype=onp.float64)
     mb_error = compute_mass_balance(y_final, y_initial, dose_mg)
 
     return {
@@ -591,12 +602,15 @@ def compute_patient_kp_early(
     pka: list[float],
     fu_plasma: float,
     bp_ratio: float,
-) -> dict[str, float]:
+) -> list[float]:
     """Compute Kp for all compartments - internal helper.
 
     Kept separate to avoid circular imports during module init.
+
+    Returns Kp as a list [gut, liver, central, peripheral, effect-site],
+    matching the COMPARTMENT_ORDER indexing used by pbpk_ode.
     """
-    kp: dict[str, float] = {}
+    kp_dict: dict[str, float] = {}
     for comp in ["gut", "liver", "central", "peripheral", "effect-site"]:
         tissue_type_map = {
             "gut": "generic",
@@ -606,6 +620,6 @@ def compute_patient_kp_early(
             "effect-site": "generic",
         }
         tissue_type = tissue_type_map[comp]
-        kp[comp] = kp_for_tissue(log_p, pka, fu_plasma, bp_ratio, tissue_type)
+        kp_dict[comp] = kp_for_tissue(log_p, pka, fu_plasma, bp_ratio, tissue_type)
 
-    return kp
+    return [kp_dict["gut"], kp_dict["liver"], kp_dict["central"], kp_dict["peripheral"], kp_dict["effect-site"]]

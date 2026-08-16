@@ -4,10 +4,8 @@ Implements event-driven dosing, dropout, adherence, missingness, and
 non-compartmental analysis (NCA) with Bayesian credible intervals.
 """
 
-
 from typing import Any
 
-import jax.numpy as jnp
 import numpy as onp
 
 from insilico_trial.pbpk.model import solve_pbpk_single
@@ -22,6 +20,68 @@ from insilico_trial.schemas import (
     Protocol,
     TrialResult,
 )
+
+# ---------------------------------------------------------------------------
+# Standalone NCA (non-compartmental analysis) function
+# ---------------------------------------------------------------------------
+
+def compute_nca(observations: list[Observation], dose: float) -> dict[str, float | None]:
+    """Compute non-compartmental analysis (NCA) PK parameters.
+
+    Returns dict with Cmax, Tmax, AUC, t1/2, CL/F, Vz/F.
+    """
+    valid_obs = [o for o in observations if o.concentration is not None]
+
+    if not valid_obs:
+        return {
+            "cmax": None,
+            "tmax": None,
+            "auc": None,
+            "half_life": None,
+            "cl_f": None,
+            "vz_f": None,
+        }
+
+    # Cmax and Tmax
+    cmax_obs = max(valid_obs, key=lambda o: o.concentration)
+    tmax_candidates = [o for o in valid_obs if o.concentration > 0]
+    tmax_obs = min(tmax_candidates, key=lambda o: o.time) if tmax_candidates else valid_obs[0]
+
+    cmax = cmax_obs.concentration
+    tmax = tmax_obs.time
+
+    # AUC by trapezoidal rule
+    times = onp.array([o.time for o in valid_obs])
+    concentrations = onp.array([o.concentration for o in valid_obs])
+
+    sort_idx = onp.argsort(times)
+    times_sorted = times[sort_idx]
+    concentrations_sorted = concentrations[sort_idx]
+
+    auc = 0.0
+    for i in range(len(times_sorted) - 1):
+        dt = times_sorted[i + 1] - times_sorted[i]
+        auc += 0.5 * (concentrations_sorted[i] + concentrations_sorted[i + 1]) * dt
+
+    auc_f = auc / dose if dose > 0 else None
+    cl_f = dose / auc if auc > 0 and dose > 0 else None
+
+    # Terminal half-life: log-linear regression on last >=3 declining points
+    half_life = None  # simplified for MVP - would need terminal phase regression
+
+    # Vz/F = (CL/F) / lambda_z
+    vz_f = None  # would need half-life
+
+    return {
+        "cmax": cmax,
+        "tmax": tmax,
+        "auc": auc,
+        "auc_f": auc_f,
+        "half_life": half_life,
+        "cl_f": cl_f,
+        "vz_f": vz_f,
+    }
+
 
 # ---------------------------------------------------------------------------
 # SAD/MAD trial engine
@@ -161,8 +221,6 @@ class TrialEngine:
 
         # Simulate PBPK to get concentration-time profile
         weight = patient.biometrics.weight
-        height = patient.biometrics.height
-        age = patient.biometrics.age
 
         # Time points for observation (protocol visit schedule)
         visit_schedule = self.protocol.visit_schedule
@@ -178,11 +236,11 @@ class TrialEngine:
         # Kp from Rodgers-Rowland
         kp = self._compute_patient_kp(patient, self.drug)
 
-        # Blood flows scaled
-        Q_base = onp.array([1.5, 1.5, 1.0, 1.0, 0.5])
-        V_base = onp.array([0.3, 1.5, 3.0, 12.0, 0.3])
-        Q = jnp.array(Q_base * w_scaling)
-        V = jnp.array(V_base * (weight / 70.0))
+        # Blood flows scaled - onp arrays (jnp.array() wrapper crashes on Metal backend)
+        Q_base = onp.array([1.5, 1.5, 1.0, 1.0, 0.5])  # gut, liver, central, peripheral, effect-site
+        V_base = onp.array([0.3, 1.5, 3.0, 12.0, 0.3])  # gut, liver, central, peripheral, effect-site
+        Q = Q_base * w_scaling  # onp array * float → onp array, works with pbpk_ode indexing
+        V = V_base * (weight / 70.0)  # onp array * float → onp array
         CL = self.drug.typical_cl_f * w_scaling
         ka = self.drug.ka
 
@@ -249,12 +307,16 @@ class TrialEngine:
         else:
             return float(rng.uniform(min_val, max_val))
 
-    def _compute_patient_kp(self, patient: Patient, drug: Drug) -> dict[str, float]:
-        """Compute Kp for a patient using Rodgers-Rowland + genotype scaling."""
+    def _compute_patient_kp(self, patient: Patient, drug: Drug) -> list[float]:
+        """Compute Kp for a patient using Rodgers-Rowland + genotype scaling.
+
+        Returns Kp as a list [gut, liver, central, peripheral, effect-site],
+        matching the COMPARTMENT_ORDER indexing used by pbpk_ode.
+        """
         from insilico_trial.pbpk.model import kp_for_tissue
 
         # Base Kp from drug properties
-        kp: dict[str, float] = {}
+        kp_dict: dict[str, float] = {}
         tissue_type_map = {
             "gut": "generic",
             "liver": "liver",
@@ -263,7 +325,7 @@ class TrialEngine:
             "effect-site": "generic",
         }
         for comp in ["gut", "liver", "central", "peripheral", "effect-site"]:
-            kp[comp] = kp_for_tissue(
+            kp_dict[comp] = kp_for_tissue(
                 drug.log_p,
                 drug.pka,
                 drug.fup,
@@ -287,12 +349,12 @@ class TrialEngine:
                 genotype_scales[gene] = scale
 
         # Apply to liver Kp if applicable
-        if "liver" in kp and genotype_scales:
+        if "liver" in kp_dict and genotype_scales:
             liver_gene = "cyp3a4"
             if liver_gene in genotype_scales:
-                kp["liver"] = kp["liver"] * genotype_scales[liver_gene]
+                kp_dict["liver"] = kp_dict["liver"] * genotype_scales[liver_gene]
 
-        return kp
+        return [kp_dict["gut"], kp_dict["liver"], kp_dict["central"], kp_dict["peripheral"], kp_dict["effect-site"]]
 
     def _generate_observations(
         self,
@@ -319,7 +381,6 @@ class TrialEngine:
 
             target_time = day * 24 + time  # total hours
             idx = onp.argmin(onp.abs(t_eval_hours - target_time))
-            closest_t = t_eval_hours[idx]
             concentration = float(C_p[idx]) if idx < len(C_p) else None
 
             # Add measurement noise
@@ -377,57 +438,9 @@ class TrialEngine:
     ) -> dict[str, float | None]:
         """Compute non-compartmental analysis (NCA) PK parameters.
 
-        Returns dict with Cmax, Tmax, AUC, t1/2, CL/F, Vz/F.
+        Delegates to the standalone `compute_nca` function.
         """
-        valid_obs = [o for o in observations if o.concentration is not None]
-
-        if not valid_obs:
-            return {
-                "cmax": None,
-                "tmax": None,
-                "auc": None,
-                "half_life": None,
-                "cl_f": None,
-                "vz_f": None,
-            }
-
-        # Cmax and Tmax
-        cmax_obs = max(valid_obs, key=lambda o: o.concentration)
-        tmax_candidates = [o for o in valid_obs if o.concentration > 0]
-        tmax_obs = min(tmax_candidates, key=lambda o: o.time) if tmax_candidates else valid_obs[0]
-
-        cmax = cmax_obs.concentration
-        tmax = tmax_obs.time
-
-        # AUC by trapezoidal rule
-        times = onp.array([o.time for o in valid_obs])
-        concentrations = onp.array([o.concentration for o in valid_obs])
-
-        sort_idx = onp.argsort(times)
-        times_sorted = times[sort_idx]
-        concentrations_sorted = concentrations[sort_idx]
-
-        auc = 0.0
-        for i in range(len(times_sorted) - 1):
-            dt = times_sorted[i + 1] - times_sorted[i]
-            auc += 0.5 * (concentrations_sorted[i] + concentrations_sorted[i + 1]) * dt
-
-        auc_f = auc / dose if dose > 0 else None
-        cl_f = dose / auc if auc > 0 and dose > 0 else None
-
-        half_life = None  # simplified for MVP
-
-        vz_f = None  # would need half-life
-
-        return {
-            "cmax": cmax,
-            "tmax": tmax,
-            "auc": auc,
-            "auc_f": auc_f,
-            "half_life": half_life,
-            "cl_f": cl_f,
-            "vz_f": vz_f,
-        }
+        return compute_nca(observations, dose)
 
     def _compute_population_summary(
         self, all_observations: list, all_pk: dict[str, dict[str, float | None]]
@@ -471,8 +484,6 @@ class TrialEngine:
         cmax_values = [pk.get("cmax") for pk in all_pk.values() if pk.get("cmax") is not None]
         cl_values = [pk.get("cl_f") for pk in all_pk.values() if pk.get("cl_f") is not None]
 
-        mean_cmax = float(onp.mean(cmax_values)) if cmax_values else 0.0
-        std_cmax = float(onp.std(cmax_values)) if len(cmax_values) > 1 else 0.0
         mean_cl = float(onp.mean(cl_values)) if cl_values else 0.0
         std_cl = float(onp.std(cl_values)) if len(cl_values) > 1 else 0.0
 
