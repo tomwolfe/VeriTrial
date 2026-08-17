@@ -1,0 +1,36 @@
+protocol:
+  name: "MAD_Warfarin"
+  phase: "Phase I"
+  design: "MAD"
+  n_cohorts: 3
+  cohort_size: 10
+  dose_levels: [2.0, 5.0, 10.0]
+  dose_unit: mg
+  dosing_route: "oral"
+  dosing_interval_days: 1
+  n_doses: 7
+  observation_period_days: 10
+  dose_escalation:
+    rule: "modified_accrual"
+    max_dlt_per_cohort: 1
+    min_dlt_free_days: 7
+    next_dose_multiplier: 2.0
+    starting_dose: 2.0
+  visit_schedule:
+    - {day: 0, time: 0.0, description: "Pre-dose Day 1"}
+    - {day: 0, time: 1.0, description: "1h Day 1"}
+    - {day: 0, time: 4.0, description: "4h Day 1"}
+    - {day: 1, time: 24.0, description: "Trough Day 2"}
+    - {day: 3, time: 72.0, description: "Trough Day 4"}
+    - {day: 7, time: 168.0, description: "Steady-state trough"}
+    - {day: 10, time: 240.0, description: "End of observation"}
+  dropout: {rate_per_day: 0.001, cause: "protocol"}
+  adherence: {distribution: "uniform", min: 0.85, max: 1.0}
+  measurement_noise: {type: "lognormal", cv_percent: 15.0}
+  safety:
+    qt_threshold: 500.0
+    qt_delta: 60.0
+    alt_threshold: 3.0
+    bilirubin_threshold: 2.0
+    ctcae_version: 5.0
+  solver: "fixed_step"

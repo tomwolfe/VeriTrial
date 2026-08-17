@@ -62,4 +62,4 @@ protocol:
     alt_threshold: 3.0     # x ULN (Hy's Law)
     bilirubin_threshold: 2.0  # x ULN
     ctcae_version: 5.0
-  solver: "diffrax"
+  solver: "fixed_step"

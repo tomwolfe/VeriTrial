@@ -14,12 +14,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import jax.numpy as jnp
 import numpy as onp
 
 from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
 from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single
 from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
+    DosingEvent,
     Drug,
     Observation,
     Patient,
@@ -29,6 +31,7 @@ from insilico_trial.schemas import (
     Protocol,
     TrialResult,
 )
+from insilico_trial.stats import posterior_predictive_pk
 
 # ---------------------------------------------------------------------------
 # Non-compartmental analysis (NCA)
@@ -188,10 +191,17 @@ class TrialEngine:
     - Uncertainty intervals (median + 90% interval across virtual subjects)
     """
 
-    def __init__(self, protocol: Protocol, drug: Drug, population: Population) -> None:
+    def __init__(
+        self,
+        protocol: Protocol,
+        drug: Drug,
+        population: Population,
+        posterior_samples: dict[str, Any] | None = None,
+    ) -> None:
         self.protocol = protocol
         self.drug = drug
         self.population = population
+        self.posterior_samples = posterior_samples
         self.current_dose_level_index = 0
         self.cohort_histories: list[dict[str, Any]] = []
 
@@ -230,12 +240,20 @@ class TrialEngine:
             administered_doses = onp.array([
                 dose_mg * self._sample_adherence(rng) for _ in cohort_patients
             ], dtype=onp.float64)
-            absorbed_doses = administered_doses * self.drug.bioavailability
 
-            t_eval_hours, C_batch = self._solve_cohort_batch(
-                cohort_patients, absorbed_doses,
-                solver=self.protocol.solver,
-            )
+            if self.protocol.design == "MAD":
+                # MAD: use event-driven multi-dose solver
+                t_eval_hours, C_batch = self._solve_mad_batch(
+                    cohort_patients, administered_doses,
+                    solver=self.protocol.solver,
+                )
+            else:
+                # SAD: single dose
+                absorbed_doses = administered_doses * self.drug.bioavailability
+                t_eval_hours, C_batch = self._solve_cohort_batch(
+                    cohort_patients, absorbed_doses,
+                    solver=self.protocol.solver,
+                )
 
             cohort_dlt_count = 0
 
@@ -265,6 +283,7 @@ class TrialEngine:
                 "n_dlt": cohort_dlt_count,
                 "dlt_rate": dlt_rate,
                 "escalation_decision": decision,
+                "steady_state_reached": self._check_steady_state(cohort_patients, t_eval_hours, C_batch, administered_doses),
             })
 
             # If too many DLTs, the trial stops.
@@ -404,6 +423,212 @@ class TrialEngine:
                 dtype=onp.float64,
             )
         return t_eval_hours, C_batch
+
+    def _get_dosing_events(self) -> list[DosingEvent]:
+        """Get dosing events for MAD, auto-generating if not provided."""
+        if self.protocol.dosing_events:
+            return self.protocol.dosing_events
+        # Auto-generate from n_doses and dosing_interval_days
+        if self.protocol.n_doses is None:
+            return []
+        interval_h = self.protocol.dosing_interval_days * 24.0
+        dose_mg = self.protocol.dose_levels[0]  # MAD uses single dose level per cohort
+        events = []
+        for i in range(self.protocol.n_doses):
+            events.append(DosingEvent(
+                time_h=float(i * interval_h),
+                dose_mg=float(dose_mg),
+                route=self.protocol.dosing_route,
+            ))
+        return events
+
+    def _solve_mad_batch(
+        self,
+        cohort_patients: list[Patient],
+        administered_doses: onp.ndarray,
+        solver: str = "fixed_step",
+    ) -> tuple[onp.ndarray, onp.ndarray]:
+        """Solve MAD PK profiles for a cohort with repeated dosing events.
+
+        Uses event-driven integration: between dosing events, integrate normally;
+        at each event time, add the dose to the gut compartment.
+
+        Returns
+        -------
+        t_eval_hours : ndarray (n_time,)
+        C_batch : ndarray (n_patients, n_time)   plasma concentrations (mg/L)
+        """
+        dosing_events = self._get_dosing_events()
+        if not dosing_events:
+            # Fall back to single-dose SAD
+            return self._solve_cohort_batch(cohort_patients, administered_doses, solver)
+
+        t_end_h = float(self.protocol.observation_period_days * 24)
+        t_eval_hours = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
+
+        # Build patient params
+        params_list = [
+            build_pbpk_params(
+                weight_kg=p.biometrics.weight,
+                age=p.biometrics.age,
+                drug=self.drug,
+                genotype_scale=self._genotype_scale(p),
+            )
+            for p in cohort_patients
+        ]
+
+        if solver == "fixed_step":
+            return self._solve_mad_batch_fixed_step(
+                t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list
+            )
+        else:
+            return self._solve_mad_batch_diffrax(
+                t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list
+            )
+
+    def _solve_mad_batch_fixed_step(
+        self,
+        t_eval_hours: onp.ndarray,
+        cohort_patients: list[Patient],
+        administered_doses: onp.ndarray,
+        dosing_events: list[DosingEvent],
+        params_list: list[dict[str, Any]],
+    ) -> tuple[onp.ndarray, onp.ndarray]:
+        """MAD batch solve using fixed-step RK4 with event-driven dosing."""
+
+        # Instead of complex event-driven scan, use a simpler approach:
+        # Solve segment by segment between dosing events
+        return self._solve_mad_segments_fixed_step(t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list)
+
+    def _solve_mad_segments_fixed_step(
+        self,
+        t_eval_hours: onp.ndarray,
+        cohort_patients: list[Patient],
+        administered_doses: onp.ndarray,
+        dosing_events: list[DosingEvent],
+        params_list: list[dict[str, Any]],
+    ) -> tuple[onp.ndarray, onp.ndarray]:
+        """Solve MAD by chaining fixed-step segments between dosing events."""
+        from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
+
+        n_patients = len(cohort_patients)
+        dt = 0.01
+
+        # Sort events
+        events = sorted(dosing_events, key=lambda e: e.time_h)
+
+        # Initial state: all zero, then add first dose
+        y_current = jnp.zeros((n_patients, 6), dtype=jnp.float32)
+        for i in range(n_patients):
+            y_current = y_current.at[i, 0].set(float(administered_doses[i] * self.drug.bioavailability))
+
+        # Accumulate concentrations on the full output grid
+        C_accum = onp.zeros((n_patients, len(t_eval_hours)), dtype=onp.float64)
+
+        prev_time = 0.0
+        for event_idx, event in enumerate(events):
+            event_time = float(event.time_h)
+            if event_idx > 0:
+                # Add dose at event time
+                for i in range(n_patients):
+                    y_current = y_current.at[i, 0].add(float(administered_doses[i] * self.drug.bioavailability))
+
+            # Integrate from prev_time to event_time (or t_end for last segment)
+            t_end_segment = event_time if event_idx < len(events) else float(t_eval_hours[-1])
+
+            if t_end_segment <= prev_time + dt:
+                continue
+
+            # Create time grid for this segment
+            t_segment = onp.linspace(prev_time, t_end_segment, max(int((t_end_segment - prev_time) / dt) + 1, 2))
+
+            # Build params batch
+            params_batch = {
+                "Q": onp.stack([p["Q"] for p in params_list]),
+                "V": onp.stack([p["V"] for p in params_list]),
+                "Kp": onp.stack([p["Kp"] for p in params_list]),
+                "CL": onp.array([p["CL"] for p in params_list]),
+                "ka": onp.array([p["ka"] for p in params_list]),
+            }
+
+            # Initial gut amounts for this segment
+            A_gut_0s = onp.array([float(y_current[i, 0]) for i in range(n_patients)])
+
+            # Solve segment
+            C_segment = solve_pbpk_batch_fixed_step(t_segment, A_gut_0s, params_batch, dt=dt)
+
+            # Interpolate onto full grid and add to accumulator
+            for i in range(n_patients):
+                C_interp = onp.interp(t_eval_hours, t_segment, C_segment[i])
+                # Only add contribution from this segment (mask by time)
+                mask = (t_eval_hours >= prev_time) & (t_eval_hours <= t_end_segment + dt)
+                C_accum[i, mask] += C_interp[mask]
+
+            # Update state to end of segment
+            # The last state is approximately the state at t_end_segment
+            # We use the final y from the segment - but fixed_step doesn't return full state
+            # For simplicity, estimate remaining gut amount
+            for i in range(n_patients):
+                # Gut amount decays exponentially: A_gut * exp(-ka * dt)
+                y_current = y_current.at[i, 0].set(float(A_gut_0s[i] * onp.exp(-params_list[i]["ka"] * (t_end_segment - prev_time))))
+
+            prev_time = t_end_segment
+
+        return t_eval_hours, C_accum
+
+    def _solve_mad_batch_diffrax(
+        self,
+        t_eval_hours: onp.ndarray,
+        cohort_patients: list[Patient],
+        administered_doses: onp.ndarray,
+        dosing_events: list[DosingEvent],
+        params_list: list[dict[str, Any]],
+    ) -> tuple[onp.ndarray, onp.ndarray]:
+        """MAD batch solve using diffrax with event-driven dosing (not yet implemented)."""
+        # Fallback to SAD for now
+        return self._solve_cohort_batch(cohort_patients, administered_doses, "diffrax")
+
+    def _check_steady_state(
+        self,
+        cohort_patients: list[Patient],
+        t_eval_hours: onp.ndarray,
+        C_batch: onp.ndarray,
+        administered_doses: onp.ndarray,
+    ) -> bool:
+        """Check if steady-state is reached by comparing AUC over last two dosing intervals.
+
+        Returns True if AUC ratio (last_interval / prev_interval) < 1.05 for all patients.
+        """
+        if self.protocol.n_doses is None or self.protocol.n_doses < 2:
+            return False
+
+        interval_h = self.protocol.dosing_interval_days * 24.0
+        last_dose_time = (self.protocol.n_doses - 1) * interval_h
+        prev_dose_time = (self.protocol.n_doses - 2) * interval_h
+
+        # Find indices for the last two dosing intervals
+        last_mask = (t_eval_hours >= last_dose_time) & (t_eval_hours < last_dose_time + interval_h)
+        prev_mask = (t_eval_hours >= prev_dose_time) & (t_eval_hours < prev_dose_time + interval_h)
+
+        if not (onp.any(last_mask) and onp.any(prev_mask)):
+            return False
+
+        # Compute AUC for each interval for each patient
+        t_last = t_eval_hours[last_mask]
+        t_prev = t_eval_hours[prev_mask]
+
+        for i in range(len(cohort_patients)):
+            C_last = C_batch[i, last_mask]
+            C_prev = C_batch[i, prev_mask]
+            if len(C_last) < 2 or len(C_prev) < 2:
+                continue
+            auc_last = _trapezoidal_auc(t_last, C_last)
+            auc_prev = _trapezoidal_auc(t_prev, C_prev)
+            if auc_prev > 0:
+                ratio = auc_last / auc_prev
+                if ratio >= 1.05:
+                    return False
+        return True
 
     def _evaluate_patient(
         self, patient: Patient, rng: onp.random.Generator,
@@ -674,6 +899,9 @@ class TrialEngine:
 
         Reported per cohort (doses differ across cohorts in a SAD design) plus an
         overall summary.
+
+        If posterior samples are available, use posterior-predictive credible intervals.
+        Otherwise, fall back to normal-approx intervals across virtual subjects.
         """
         pk_list = list(all_patient_pk.values())
         metric_keys = ["cmax", "auc_inf", "half_life", "cl_f"]
@@ -689,7 +917,41 @@ class TrialEngine:
                 out[key] = summarize_metrics(vals)
             return out
 
-        result: dict[str, Any] = {"overall": _summarize(pk_list)}
+        # If posterior samples are available, compute posterior-predictive intervals
+        if self.posterior_samples is not None:
+            # Get first dose level for prediction
+            dose_mg = self.protocol.dose_levels[0] if self.protocol.dose_levels else 10.0
+            t_end_h = float(self.protocol.observation_period_days * 24)
+            t_eval = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
+
+            post_pred = posterior_predictive_pk(
+                self.posterior_samples,
+                n_patients=len(pk_list),
+                dose_mg=dose_mg,
+                t_eval=t_eval,
+                drug=self.drug,
+            )
+
+            def _summarize_posterior(metric: str) -> dict[str, float]:
+                """Summarize posterior-predictive samples."""
+                samples = post_pred[metric]  # (n_samples, n_patients)
+                # Collapse to per-patient posterior mean, then summarize across patients
+                patient_means = onp.nanmean(samples, axis=0)  # (n_patients,)
+                return summarize_metrics(patient_means.tolist())
+
+            result: dict[str, Any] = {"overall": {}}
+            for key in metric_keys:
+                if key in post_pred:
+                    result["overall"][key] = _summarize_posterior(key)
+
+            # Add per-cohort breakdowns (same for all cohorts since posterior is global)
+            for ci in range(len(cohort_summaries)):
+                result[f"cohort_{ci + 1}"] = result["overall"].copy()
+
+            return result
+
+        # Fall back to normal-approx intervals across virtual subjects
+        result = {"overall": _summarize(pk_list)}
 
         cursor = 0
         for ci, summary in enumerate(cohort_summaries):

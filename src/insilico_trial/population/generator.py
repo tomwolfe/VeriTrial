@@ -205,6 +205,7 @@ class PopulationSpec:
     seed: int = 42
     marginals: list[MarginalConfig] = field(default_factory=list)
     correlations: dict[str, float] = field(default_factory=dict)
+    egfr_scale: float = 1.0  # Hepatic impairment scale factor for eGFR
     genotype_db: dict[str, dict[str, dict[str, float]]] = field(default_factory=lambda: copy.deepcopy(GENOTYPE_DB))
     organ_volumes_per_kg: dict[str, float] = field(default_factory=lambda: {
         "liver": 0.025,  # ~2.5% body weight
@@ -283,6 +284,9 @@ def config_from_yaml(pop_config: dict[str, Any]) -> PopulationSpec:
         params={"mean_log": lc.get("mean_log", 1.84), "std_log": lc.get("std_log", 0.20)},
     ))
 
+    # eGFR scale factor (e.g., 0.6 for hepatic impairment)
+    egfr_sc = pop_config.get("egfr_scale", 1.0)
+
     # Note: sex is handled separately after the copula draw (Bernoulli p=0.5),
     # so it is not included as a copula marginal here.
     genotype_db: dict[str, dict[str, dict[str, float]]] = {}
@@ -313,6 +317,7 @@ def config_from_yaml(pop_config: dict[str, Any]) -> PopulationSpec:
         seed=pop_config.get("seed", 42),
         marginals=marginals,
         correlations=pop_config.get("correlation_matrix", {}),
+        egfr_scale=egfr_sc,
         genotype_db=genotype_db,
     )
 
@@ -607,7 +612,7 @@ class PopulationGenerator:
             # Allometric scaling
             weight_sc = float((row["weight_kg"] / 70.0) ** 0.75)
             age_sc = float((row["age"] / 40.0) ** 0.25) if row["age"] <= 65 else float((row["age"] / 40.0) ** 0.25) * 0.8
-            egfr_sc = float(row["egfr_ml_min"] / 120.0)
+            egfr_sc = float(row["egfr_ml_min"] / 120.0 * self.spec.egfr_scale)
 
             patient = Patient(
                 id=str(row["subject_id"]),

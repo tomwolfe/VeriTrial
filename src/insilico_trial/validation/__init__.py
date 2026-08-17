@@ -344,6 +344,276 @@ def validate_moxifloxacin_qtc(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark: Midazolam CYP3A4
+# ---------------------------------------------------------------------------
+
+# Midazolam reference data (CYP3A4 probe substrate)
+# CL/F ~ 12 L/h, V/F ~ 6.3 L for 70 kg EM. PM vs EM AUC ratio > 2.0.
+MIDAZOLAM_REFERENCE = {
+    "typical_cl_f_Lh": 12.0,  # total CL/F (L/h) at 70 kg
+    "typical_v_f_L": 6.3,     # total Vz/F (L) at 70 kg
+    "cl_tolerance_pct": 30.0,
+    "pm_em_auc_ratio_min": 2.0,
+}
+
+
+def validate_midazolam_cyp3a4(
+    n_patients: int = 200,
+    seed: int = 42,
+    dose_mg: float = 5.0,
+) -> dict[str, Any]:
+    """Validate Midazolam CYP3A4 PGx simulation against reference data.
+
+    Generates a CYP3A4-genotyped virtual population, simulates a single oral
+    dose through the PBPK model for every patient, and derives PK metrics.
+
+    Validation criteria:
+    - EM-cohort CL/F within +/- 30% of 12 L/h for 70 kg reference
+    - PM/EM AUC ratio > 2.0 (strong CYP3A4 PM effect)
+    """
+    drug = load_drug_config("configs/drug_midazolam.yaml")
+    pop_config = load_population_config("configs/population_default.yaml")
+    pop_config["name"] = "midazolam_cyp3a4"
+    pop_config["n_subjects"] = n_patients
+    pop_config["seed"] = seed
+
+    df, _spec = generate_population(pop_config)
+
+    # Batch-solve the PBPK ODE for all patients at once (JAX vmap + jit).
+    t_eval = onp.linspace(0.0, 3.0 * 24.0, 3 * 24)  # 3 days for midazolam (short half-life)
+    n = len(df)
+    absorbed_dose = dose_mg * drug.bioavailability
+
+    params_list = []
+    for _, row in df.iterrows():
+        # CYP3A4 activity score
+        a1 = row.get("cyp3a4_allele1", "CYP3A4*1")
+        a2 = row.get("cyp3a4_allele2", "CYP3A4*1")
+        # CYP3A4 activity scores: *1=1.0, *1B=1.0, *22=0.6
+        activity_map = {"CYP3A4*1": 1.0, "CYP3A4*1B": 1.0, "CYP3A4*22": 0.6}
+        gs = (activity_map.get(a1, 1.0) + activity_map.get(a2, 1.0)) / 2.0
+        params_list.append(
+            build_pbpk_params(
+                weight_kg=float(row["weight_kg"]),
+                age=float(row["age"]),
+                drug=drug,
+                genotype_scale=gs,
+            )
+        )
+
+    params_batch = {
+        "Q": onp.stack([p["Q"] for p in params_list], axis=0),
+        "V": onp.stack([p["V"] for p in params_list], axis=0),
+        "Kp": onp.stack([p["Kp"] for p in params_list], axis=0),
+        "CL": onp.array([p["CL"] for p in params_list]),
+        "ka": onp.array([p["ka"] for p in params_list]),
+    }
+
+    C_batch = onp.asarray(
+        solve_pbpk_batch(t_eval, onp.full(n, absorbed_dose), params_batch)
+    )  # (n_patients, n_time)
+
+    cohort_pk: dict[str, list[dict[str, Any]]] = {"EM": [], "PM": [], "IM": []}
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        # Determine CYP3A4 metabolizer status
+        a1 = row.get("cyp3a4_allele1", "CYP3A4*1")
+        a2 = row.get("cyp3a4_allele2", "CYP3A4*1")
+        activity_map = {"CYP3A4*1": 1.0, "CYP3A4*1B": 1.0, "CYP3A4*22": 0.6}
+        gs = (activity_map.get(a1, 1.0) + activity_map.get(a2, 1.0)) / 2.0
+        if gs >= 1.0:
+            cohort = "EM"
+        elif gs >= 0.6:
+            cohort = "IM"
+        else:
+            cohort = "PM"
+
+        obs = [
+            Observation(patient_id=str(row["subject_id"]), time=float(t), compartment="plasma", concentration=float(c))
+            for t, c in zip(t_eval, C_batch[i], strict=True)
+        ]
+        pk = compute_nca(obs, dose=absorbed_dose)
+
+        cohort_pk[cohort].append({
+            "cl_f": pk["cl_f"],
+            "half_life": pk["half_life"],
+            "auc_inf": pk["auc_inf"],
+            "cmax": pk["cmax"],
+            "genotype_scale": gs,
+        })
+
+    em_cl = [v["cl_f"] for v in cohort_pk["EM"] if v["cl_f"] is not None]
+    em_auc = [v["auc_inf"] for v in cohort_pk["EM"] if v["auc_inf"] is not None]
+    pm_auc = [v["auc_inf"] for v in cohort_pk["PM"] if v["auc_inf"] is not None]
+
+    cl_ref = MIDAZOLAM_REFERENCE["typical_cl_f_Lh"]
+    em_mean_cl = float(onp.nanmean(em_cl)) if em_cl else float("nan")
+    cl_pass = abs(em_mean_cl - cl_ref) / cl_ref <= MIDAZOLAM_REFERENCE["cl_tolerance_pct"] / 100.0
+
+    em_median_auc = float(onp.nanmedian(em_auc)) if em_auc else float("nan")
+    pm_median_auc = float(onp.nanmedian(pm_auc)) if pm_auc else float("nan")
+    pm_em_ratio = pm_median_auc / em_median_auc if em_median_auc else float("nan")
+    pgx_pass = pm_em_ratio >= MIDAZOLAM_REFERENCE["pm_em_auc_ratio_min"]
+
+    def _cohort_summary(rows: list[dict[str, float]]) -> dict[str, Any]:
+        if not rows:
+            return {"n": 0, "mean_cl_f": None, "median_auc_inf": None}
+        cl = [r["cl_f"] for r in rows if r["cl_f"] is not None]
+        auc = [r["auc_inf"] for r in rows if r["auc_inf"] is not None]
+        return {
+            "n": len(rows),
+            "mean_cl_f": float(onp.nanmean(cl)) if cl else None,
+            "median_auc_inf": float(onp.nanmedian(auc)) if auc else None,
+        }
+
+    return {
+        "benchmark": "midazolam_cyp3a4",
+        "n_patients": n_patients,
+        "seed": seed,
+        "dose_mg": dose_mg,
+        "reference_cl_f_Lh": cl_ref,
+        "observed_EM_mean_cl_f_Lh": em_mean_cl,
+        "clearance_within_30pct": cl_pass,
+        "EM_median_auc_inf": em_median_auc,
+        "PM_median_auc_inf": pm_median_auc,
+        "PM_over_EM_auc_ratio": float(pm_em_ratio),
+        "pgx_exposure_separation_pass": pgx_pass,
+        "overall_pass": bool(cl_pass and pgx_pass),
+        "details": {
+            "cohorts": {c: _cohort_summary(rows) for c, rows in cohort_pk.items()},
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Benchmark: Metformin Renal
+# ---------------------------------------------------------------------------
+
+# Metformin reference data (renal elimination via OCT2/MATE)
+# CL/F ~ 35 L/h at eGFR=90. Corr(eGFR, CL/F) > 0.5.
+METFORMIN_REFERENCE = {
+    "typical_cl_f_Lh_at_egfr90": 35.0,  # total CL/F (L/h) at eGFR=90
+    "cl_tolerance_pct": 30.0,
+    "egfr_cl_corr_min": 0.5,
+}
+
+
+
+# ---------------------------------------------------------------------------
+# Benchmark: Metformin Renal
+# ---------------------------------------------------------------------------
+
+# Metformin reference data (renal elimination via OCT2/MATE)
+# CL/F ~ 35 L/h at eGFR=90. Corr(eGFR, CL/F) > 0.5.
+METFORMIN_REFERENCE = {
+    "typical_cl_f_Lh_at_egfr90": 35.0,  # total CL/F (L/h) at eGFR=90
+    "cl_tolerance_pct": 30.0,
+    "egfr_cl_corr_min": 0.5,
+}
+
+
+def validate_metformin_renal(
+    n_patients: int = 200,
+    seed: int = 42,
+    dose_mg: float = 500.0,
+) -> dict[str, Any]:
+    """Validate Metformin renal elimination simulation against reference data.
+
+    Generates a virtual population with varying eGFR, simulates a single oral
+    dose, and verifies the correlation between eGFR and CL/F.
+
+    Validation criteria:
+    - Mean CL/F at eGFR~90 within +/- 30% of 35 L/h
+    - Correlation between eGFR and CL/F > 0.5
+    """
+    drug = load_drug_config("configs/drug_metformin.yaml")
+    pop_config = load_population_config("configs/population_default.yaml")
+    pop_config["name"] = "metformin_renal"
+    pop_config["n_subjects"] = n_patients
+    pop_config["seed"] = seed
+
+    df, _spec = generate_population(pop_config)
+
+    t_eval = onp.linspace(0.0, 6.0 * 24.0, 6 * 24)  # 6 days for metformin
+    n = len(df)
+    absorbed_dose = dose_mg * drug.bioavailability
+
+    params_list = []
+    for _, row in df.iterrows():
+        params_list.append(
+            build_pbpk_params(
+                weight_kg=float(row["weight_kg"]),
+                age=float(row["age"]),
+                drug=drug,
+                genotype_scale=1.0,  # No CYP metabolism
+            )
+        )
+
+    params_batch = {
+        "Q": onp.stack([p["Q"] for p in params_list], axis=0),
+        "V": onp.stack([p["V"] for p in params_list], axis=0),
+        "Kp": onp.stack([p["Kp"] for p in params_list], axis=0),
+        "CL": onp.array([p["CL"] for p in params_list]),
+        "ka": onp.array([p["ka"] for p in params_list]),
+    }
+
+    C_batch = onp.asarray(
+        solve_pbpk_batch(t_eval, onp.full(n, absorbed_dose), params_batch)
+    )
+
+    egfrs = []
+    cl_fs = []
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        egfr = float(row["egfr_ml_min"])
+        obs = [
+            Observation(patient_id=str(row["subject_id"]), time=float(t), compartment="plasma", concentration=float(c))
+            for t, c in zip(t_eval, C_batch[i], strict=True)
+        ]
+        pk = compute_nca(obs, dose=absorbed_dose)
+        if pk["cl_f"] is not None:
+            egfrs.append(egfr)
+            cl_fs.append(pk["cl_f"])
+
+    egfr_arr = onp.array(egfrs)
+    cl_arr = onp.array(cl_fs)
+
+    # Find patients with eGFR near 90 for reference comparison
+    near_90 = onp.abs(egfr_arr - 90.0) < 10.0
+    if onp.any(near_90):
+        cl_at_90 = float(onp.nanmean(cl_arr[near_90]))
+    else:
+        cl_at_90 = float(onp.nanmean(cl_arr))
+
+    cl_ref = METFORMIN_REFERENCE["typical_cl_f_Lh_at_egfr90"]
+    cl_pass = abs(cl_at_90 - cl_ref) / cl_ref <= METFORMIN_REFERENCE["cl_tolerance_pct"] / 100.0
+
+    if len(egfr_arr) >= 10:
+        egfr_cl_corr = float(onp.corrcoef(egfr_arr, cl_arr)[0, 1])
+    else:
+        egfr_cl_corr = float("nan")
+    corr_pass = egfr_cl_corr > METFORMIN_REFERENCE["egfr_cl_corr_min"]
+
+    return {
+        "benchmark": "metformin_renal",
+        "n_patients": n_patients,
+        "seed": seed,
+        "dose_mg": dose_mg,
+        "reference_cl_f_Lh_at_egfr90": cl_ref,
+        "observed_mean_cl_f_at_egfr90": cl_at_90,
+        "clearance_within_30pct": cl_pass,
+        "egfr_cl_correlation": float(egfr_cl_corr),
+        "renal_clearance_correlation_pass": corr_pass,
+        "overall_pass": bool(cl_pass and corr_pass),
+        "details": {
+            "n_with_cl": len(cl_fs),
+            "egfr_range": [float(onp.min(egfr_arr)), float(onp.max(egfr_arr))],
+            "cl_f_range": [float(onp.min(cl_arr)), float(onp.max(cl_arr))],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # ASME V&V 40 Report Generation
 # ---------------------------------------------------------------------------
 
@@ -363,6 +633,8 @@ def generate_vvv40_report(
 
     wf = validation_results.get("warfarin_pgx", {})
     mq = validation_results.get("moxifloxacin_qtc", {})
+    mm = validation_results.get("midazolam_cyp3a4", {})
+    metro = validation_results.get("metformin_renal", {})
 
     report: dict[str, Any] = {
         "title": "VeriTrial: InSilico Clinical Trial Simulator - V&V Report",
@@ -372,6 +644,8 @@ def generate_vvv40_report(
         "summary": {
             "warfarin_pgx_pass": wf.get("overall_pass", False),
             "moxifloxacin_qtc_pass": mq.get("overall_pass", False),
+            "midazolam_cyp3a4_pass": mm.get("overall_pass", False),
+            "metformin_renal_pass": metro.get("overall_pass", False),
         },
         "provenance": {
             "run_hash": run_hash,
@@ -399,6 +673,30 @@ def generate_vvv40_report(
             ("corr(activity, log AUCinf)", "< -0.5",
              f"{wf.get('auc_activity_correlation', 'N/A'):.3f}" if wf.get("auc_activity_correlation") is not None else "N/A",
              wf.get("pgx_exposure_separation_pass", False)),
+        ]
+    )
+
+    mm_rows = "".join(
+        f"""<tr><td>{label}</td><td>{ref}</td><td>{obs}</td>{_pass_cell(pass_)}</tr>"""
+        for label, ref, obs, pass_ in [
+            ("CL/F (L/h) - EM", f"{MIDAZOLAM_REFERENCE['typical_cl_f_Lh']:.3f}",
+             f"{mm.get('observed_EM_mean_cl_f_Lh', 'N/A'):.4f}" if mm.get('observed_EM_mean_cl_f_Lh') is not None else "N/A",
+             mm.get('clearance_within_30pct', False)),
+            ("PM/EM AUC ratio", ">= 2.0",
+             f"{mm.get('PM_over_EM_auc_ratio', 'N/A'):.2f}" if mm.get('PM_over_EM_auc_ratio') else "N/A",
+             mm.get('pgx_exposure_separation_pass', False)),
+        ]
+    )
+
+    metro_rows = "".join(
+        f"""<tr><td>{label}</td><td>{ref}</td><td>{obs}</td>{_pass_cell(pass_)}</tr>"""
+        for label, ref, obs, pass_ in [
+            ("CL/F at eGFR~90 (L/h)", f"{METFORMIN_REFERENCE['typical_cl_f_Lh_at_egfr90']:.3f}",
+             f"{metro.get('observed_mean_cl_f_at_egfr90', 'N/A'):.4f}" if metro.get('observed_mean_cl_f_at_egfr90') is not None else "N/A",
+             metro.get('clearance_within_30pct', False)),
+            ("eGFR/CL/F correlation", "> 0.5",
+             f"{metro.get('egfr_cl_correlation', 'N/A'):.3f}" if metro.get('egfr_cl_correlation') is not None else "N/A",
+             metro.get('renal_clearance_correlation_pass', False)),
         ]
     )
 
@@ -430,7 +728,7 @@ def generate_vvv40_report(
 </head>
 <body>
     <h1>VeriTrial InSilico Clinical Trial Simulator</h1>
-    <h2>ASME V&V 40 Validation Report</h2>
+    <h2>ASME V&V 40 Validation Report</p>
     <p><strong>Version:</strong> {report['version']}</p>
     <p><strong>Date:</strong> {report['date']}</p>
     <p><strong>Run Hash:</strong> {report['provenance']['run_hash']}</p>
@@ -439,6 +737,18 @@ def generate_vvv40_report(
     <table>
         <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
         {wf_rows}
+    </table>
+
+    <h3>Midazolam CYP3A4 Validation</h3>
+    <table>
+        <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+        {mm_rows}
+    </table>
+
+    <h3>Metformin Renal Validation</h3>
+    <table>
+        <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+        {metro_rows}
     </table>
 
     <h3>Moxifloxacin QTc Validation</h3>
@@ -450,6 +760,8 @@ def generate_vvv40_report(
     <h3>Summary</h3>
     <ul>
         <li>Warfarin PGx Validation: {'PASS' if wf.get('overall_pass') else 'FAIL'}</li>
+        <li>Midazolam CYP3A4 Validation: {'PASS' if mm.get('overall_pass') else 'FAIL'}</li>
+        <li>Metformin Renal Validation: {'PASS' if metro.get('overall_pass') else 'FAIL'}</li>
         <li>Moxifloxacin QTc Validation: {'PASS' if mq.get('overall_pass') else 'FAIL'}</li>
     </ul>
 
@@ -484,10 +796,14 @@ def run_all_validations(
     """Run all validation benchmarks and generate V&V report."""
     warfarin_results = validate_warfarin_pgx(n_patients=warfarin_n, seed=warfarin_seed)
     moxi_results = validate_moxifloxacin_qtc(n_patients=moxi_n, seed=moxi_seed)
+    midaz_results = validate_midazolam_cyp3a4(n_patients=200, seed=warfarin_seed)
+    metro_results = validate_metformin_renal(n_patients=200, seed=warfarin_seed)
 
     all_results = {
         "warfarin_pgx": warfarin_results,
         "moxifloxacin_qtc": moxi_results,
+        "midazolam_cyp3a4": midaz_results,
+        "metformin_renal": metro_results,
     }
 
     report_meta = generate_vvv40_report(all_results, "output/vvv40_report.html")

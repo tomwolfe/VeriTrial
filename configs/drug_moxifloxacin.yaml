@@ -27,3 +27,10 @@ drug:
   qtcd_emax: 75.0       # max QTc prolongation (ms)
   qtcd_ec50: 15.0       # mg/L plasma conc for half-max QTc effect
   dili_risk: 0.05
+  # DILI exposure-response (explicit per drug)
+  alt_baseline: 22.0
+  bili_baseline: 0.8
+  dili_emax_alt: 1.5
+  dili_ec50_alt: 8.0
+  dili_emax_bili: 1.2
+  dili_ec50_bili: 12.0

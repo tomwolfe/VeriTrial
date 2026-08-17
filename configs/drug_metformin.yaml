@@ -21,3 +21,10 @@ drug:
   qtcd_baseline: 400.0
   qtcd_slope: 0.0
   dili_risk: 0.02
+  # DILI exposure-response (explicit per drug)
+  alt_baseline: 22.0
+  bili_baseline: 0.8
+  dili_emax_alt: 0.3
+  dili_ec50_alt: 30.0
+  dili_emax_bili: 1.05
+  dili_ec50_bili: 35.0

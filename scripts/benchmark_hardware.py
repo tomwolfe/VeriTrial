@@ -79,9 +79,12 @@ def _single_kp(drug: Any, comp: str, weight: float) -> float:
     return kpd[comp]
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 def run_benchmark(n_patients: int = 1000, reps: int = 5, out_dir: str = "output/benchmark") -> dict[str, Any]:
     """Run the benchmark and return (and persist) results."""
-    drug = load_drug_config("configs/drug_warfarin.yaml")
+    drug = load_drug_config(_PROJECT_ROOT / "configs" / "drug_warfarin.yaml")
     t_eval = onp.linspace(0.0, 24.0 * 7, 24 * 7)  # hourly, 7 days
     dose = 10.0 * drug.bioavailability
 

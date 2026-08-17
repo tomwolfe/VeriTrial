@@ -24,3 +24,10 @@ drug:
   qtcd_baseline: 400.0  # ms
   qtcd_slope: 0.0  # no significant QT prolongation expected
   dili_risk: 0.01  # low baseline risk
+  # DILI exposure-response (explicit per drug)
+  alt_baseline: 22.0
+  bili_baseline: 0.8
+  dili_emax_alt: 0.5
+  dili_ec50_alt: 20.0
+  dili_emax_bili: 1.1
+  dili_ec50_bili: 25.0

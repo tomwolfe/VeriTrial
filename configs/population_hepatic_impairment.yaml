@@ -38,6 +38,7 @@ population:
     cyp2c19:
       alleles: [CYP2C19*1, CYP2C19*2, CYP2C19*3, CYP2C19*17]
       frequencies: [0.62, 0.17, 0.04, 0.17]
+      activity_scores: [1.0, 0.0, 0.0, 1.5]
     cyp2d6:
       alleles: [CYP2D6*1, CYP2D6*10, CYP2D6*4, CYP2D6*5]
       frequencies: [0.71, 0.12, 0.08, 0.09]

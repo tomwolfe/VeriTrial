@@ -82,7 +82,12 @@ def _ionization_factor(pka: float | list[float], pH: float = 7.4) -> float:
     Compounds with pKa > pH are basic (ionized at pH 7.4).
     The ionization factor modulates Kp based on the unbound fraction.
     """
-    pka_min = min(pka) if isinstance(pka, list) else pka
+    if isinstance(pka, list):
+        if len(pka) == 0:
+            return 1.0  # neutral compound, no ionizable groups
+        pka_min = min(pka)
+    else:
+        pka_min = pka
     is_basic = pka_min > pH  # basic if pKa > pH 7.4
 
     # Simplified: ionization reduces tissue partitioning for ionized species

@@ -44,6 +44,10 @@ def _load_trial_inputs(
     output_dir: str,
 ) -> tuple[TrialEngine, Population, str, Path]:
     protocol = load_protocol_config(protocol_config)
+    import os
+    solver_override = os.environ.get("VERITRIAL_SOLVER")
+    if solver_override:
+        protocol.solver = solver_override
     drug = load_drug_config(drug_config)
     pop_cfg = load_population_config(population_config)
     pop_cfg["n_subjects"] = n_patients
@@ -116,6 +120,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         args.protocol_config, args.drug_config, args.population_config,
         args.patients, args.seed, args.output_dir,
     )
+    engine.protocol.observation_period_days = float(args.duration_days)
 
     rng = onp.random.default_rng(args.seed)
     t0 = datetime.now(UTC)
@@ -224,6 +229,38 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sensitivity(args: argparse.Namespace) -> int:
+    """Run Sobol sensitivity analysis over PBPK parameters."""
+    from insilico_trial.validation.sensitivity import sobol_sensitivity
+
+    drug = load_drug_config(args.drug_config)
+    param_names = [p.strip() for p in args.params.split(",")]
+
+    results = sobol_sensitivity(
+        drug=drug,
+        param_names=param_names,
+        n_samples=args.samples,
+        seed=args.seed,
+    )
+
+    print(f"Sobol sensitivity analysis for {args.drug_config}")
+    print(f"Parameters: {param_names}")
+    print(f"Samples: {args.samples}")
+    print()
+    print("{:<20} {:>10} {:>10}".format("Parameter", "S_cmax", "S_auc"))
+    print("-" * 40)
+    for name, idx in sorted(results.items(), key=lambda x: x[1]["auc"], reverse=True):
+        print("{:<20} {:>10.4f} {:>10.4f}".format(name, idx["cmax"], idx["auc"]))
+
+    # Print summary: which parameter has highest index for AUC
+    best_param = max(results.items(), key=lambda x: x[1]["auc"])
+    print()
+    print(f"Highest Sobol index for AUC: {best_param[0]} ({best_param[1]['auc']:.4f})")
+    print("  (dominant parameter for AUC is expected to be clearance/cl_f)")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="insilico-trial",
@@ -257,6 +294,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--reps", type=int, default=3)
     p_bench.add_argument("--output-dir", default=DEFAULT_OUT)
     p_bench.set_defaults(func=cmd_benchmark)
+
+    p_sens = sub.add_parser("sensitivity", help="Sobol sensitivity analysis over PBPK parameters")
+    p_sens.add_argument("--drug-config", default="configs/drug_warfarin.yaml")
+    p_sens.add_argument("--params", default="typical_cl_f,ka,fup,log_p", help="Comma-separated param names")
+    p_sens.add_argument("--samples", type=int, default=1024)
+    p_sens.add_argument("--seed", type=int, default=42)
+    p_sens.add_argument("--output-dir", default=DEFAULT_OUT)
+    p_sens.set_defaults(func=cmd_sensitivity)
 
     return parser
 

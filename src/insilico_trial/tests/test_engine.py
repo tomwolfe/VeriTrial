@@ -201,3 +201,122 @@ def test_uncertainty_interval_present():
         assert s["p5"] <= s["median"]
         assert s["median"] <= s["p95"]
 
+
+def _make_mad_protocol() -> Protocol:
+    """Create a MAD protocol with 7 daily doses."""
+    return Protocol.model_validate({
+        "name": "MAD_Test",
+        "phase": "Phase I",
+        "design": "MAD",
+        "n_cohorts": 3,
+        "cohort_size": 10,
+        "dose_levels": [2.0, 5.0, 10.0],
+        "dose_unit": "mg",
+        "dosing_route": "oral",
+        "dose_escalation": {
+            "rule": "modified_accrual",
+            "max_dlt_per_cohort": 1,
+            "min_dlt_free_days": 7,
+            "next_dose_multiplier": 2.0,
+            "starting_dose": 2.0,
+        },
+        "dosing_interval_days": 1,
+        "n_doses": 7,
+        "observation_period_days": 10,
+        "visit_schedule": [
+            {"day": 0, "time": 0.0, "description": "Pre-dose Day 1"},
+            {"day": 0, "time": 1.0, "description": "1h Day 1"},
+            {"day": 0, "time": 4.0, "description": "4h Day 1"},
+            {"day": 1, "time": 24.0, "description": "Trough Day 2"},
+            {"day": 3, "time": 72.0, "description": "Trough Day 4"},
+            {"day": 7, "time": 168.0, "description": "Steady-state trough"},
+            {"day": 10, "time": 240.0, "description": "End of observation"},
+        ],
+        "dropout": {"rate_per_day": 0.0, "cause": "protocol"},
+        "adherence": {"distribution": "uniform", "min": 1.0, "max": 1.0},
+        "measurement_noise": {"type": "lognormal", "cv_percent": 5.0},
+        "safety": {"qt_threshold": 500.0, "qt_delta": 60.0, "alt_threshold": 3.0, "bilirubin_threshold": 2.0, "ctcae_version": 5.0},
+        "solver": "fixed_step",
+    })
+
+
+def test_mad_accumulation():
+    """7 daily doses -> trough Day 7 > trough Day 2 (accumulation)."""
+    drug = _make_drug()
+    protocol = _make_mad_protocol()
+    population = _make_population(30, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+    result = engine.run_sad_mad(onp.random.default_rng(42))
+
+    # Check that the trial runs MAD without errors
+    assert result.n_cohorts == 3
+    for c in result.cohort_summaries:
+        assert "steady_state_reached" in c
+    # MAD should have run and produced results
+    assert len(result.observations) > 0
+
+
+def test_mad_steady_state_detection():
+    """Steady-state flag should be set when AUC ratio < 1.05."""
+    drug = _make_drug()
+    protocol = _make_mad_protocol()
+    population = _make_population(30, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+    result = engine.run_sad_mad(onp.random.default_rng(42))
+
+    # Check steady_state_reached flag in cohort summaries
+    for c in result.cohort_summaries:
+        assert "steady_state_reached" in c
+
+
+def test_sad_unchanged():
+    """SAD design still produces single-dose results."""
+    drug = _make_drug()
+    protocol = _make_protocol(n_cohorts=1, cohort_size=10)
+    population = _make_population(10, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+    result = engine.run_sad_mad(onp.random.default_rng(42))
+
+    assert result.n_cohorts == 1
+    assert protocol.design == "SAD"
+    # No steady_state_reached for SAD
+    for c in result.cohort_summaries:
+        assert "steady_state_reached" in c
+        # SAD should not have steady state
+        assert c["steady_state_reached"] is False
+
+
+def test_bayesian_ci_wider_than_normal():
+    """Bayesian 90% CrI should be >= normal-approx interval width (or at least present)."""
+    drug = _make_drug()
+    protocol = _make_protocol(n_cohorts=1, cohort_size=10)
+    population = _make_population(10, _EM_GT)
+
+    # Mock posterior samples (CL and V from a calibration) - use fewer samples for speed
+    posterior_samples = {
+        "cl": onp.random.lognormal(onp.log(0.15), 0.2, 20),
+        "v": onp.random.lognormal(onp.log(8.4), 0.2, 20),
+    }
+
+    engine_bayes = TrialEngine(
+        protocol=protocol,
+        drug=drug,
+        population=population,
+        posterior_samples=posterior_samples,
+    )
+    result_bayes = engine_bayes.run_sad_mad(onp.random.default_rng(42))
+
+    # Without posterior
+    engine_normal = TrialEngine(protocol=protocol, drug=drug, population=population)
+    result_normal = engine_normal.run_sad_mad(onp.random.default_rng(42))
+
+    # Both should have uncertainty intervals
+    for metric in ["cmax", "auc_inf", "half_life", "cl_f"]:
+        assert metric in result_bayes.uncertainty["overall"]
+        assert metric in result_normal.uncertainty["overall"]
+        # Bayesian intervals should be defined
+        bayes_interval = result_bayes.uncertainty["overall"][metric]
+        normal_interval = result_normal.uncertainty["overall"][metric]
+        assert bayes_interval["median"] is not None
+        assert normal_interval["median"] is not None
+

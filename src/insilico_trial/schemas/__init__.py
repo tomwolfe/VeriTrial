@@ -188,6 +188,15 @@ class VisitSpec(BaseModel):
     description: str
 
 
+class DosingEvent(BaseModel):
+    """A single dosing event in a MAD protocol."""
+
+    model_config = ConfigDict(extra="forbid")
+    time_h: float = Field(..., ge=0, description="Hours from trial start")
+    dose_mg: float = Field(..., gt=0)
+    route: DosingRoute = DosingRoute.ORAL
+
+
 class DoseEscalationRule(BaseModel):
     """Rules for dose escalation in SAD/MAD trials."""
 
@@ -266,6 +275,11 @@ class Protocol(BaseModel):
     measurement_noise: MeasurementNoiseSpec
     safety: SafetyThresholds
     solver: str = Field(default="diffrax", description="PBPK ODE solver: 'diffrax' or 'fixed_step'")
+    dosing_events: list[DosingEvent] = Field(
+        default_factory=list,
+        description="Explicit dosing events for MAD; if empty, auto-generated from dose_levels + dosing_interval_days"
+    )
+    n_doses: int | None = Field(default=None, description="Number of doses for MAD (auto-generates dosing_events if provided)")
 
     @property
     def doses_mg(self) -> list[float]:
@@ -411,6 +425,7 @@ __all__ = [
     "Patient",
     "Population",
     "VisitSpec",
+    "DosingEvent",
     "DoseEscalationRule",
     "DropoutSpec",
     "AdherenceSpec",
