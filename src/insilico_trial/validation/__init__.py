@@ -614,6 +614,23 @@ def validate_metformin_renal(
 
 
 # ---------------------------------------------------------------------------
+# Formal Verification Integration (QED/Lean 4)
+# ---------------------------------------------------------------------------
+
+def run_formal_verification(
+    formal_specs_dir: str = "VeriTrial/formal_specs",
+) -> dict[str, Any]:
+    """Run formal verification and integrate results into V&V 40 report.
+
+    Uses QED (Lean 4 agentic pipeline) to verify PBPK ODE properties.
+    Results include which lemmas were verified, any failed proofs,
+    and an audit trail of the verification process.
+    """
+    from .formal_verification import check_qed_proofs
+    return check_qed_proofs(formal_specs_dir)
+
+
+# ---------------------------------------------------------------------------
 # ASME V&V 40 Report Generation
 # ---------------------------------------------------------------------------
 
@@ -806,6 +823,10 @@ def run_all_validations(
         "metformin_renal": metro_results,
     }
 
+    # Integrate formal verification from QED
+    formal_results = run_formal_verification()
+    all_results["formal_verification"] = formal_results
+
     report_meta = generate_vvv40_report(all_results, "output/vvv40_report.html")
 
     # Also emit machine-readable JSON per benchmark.
@@ -832,4 +853,6 @@ __all__ = [
     "validate_moxifloxacin_qtc",
     "generate_vvv40_report",
     "run_all_validations",
+    "run_formal_verification",
+    "check_qed_proofs",
 ]
