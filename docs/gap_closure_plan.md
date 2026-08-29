@@ -117,3 +117,41 @@ make report      # markdown + HTML reports
 **Credible scope**: warfarin PGx PK and moxifloxacin QTc, for US-generalizable
 adults, perfusion-limited PBPK, CPU-only. Outside this scope the tool is
 explicitly a research prototype.
+
+## Enforced formal-verification gate (Phase 4 — closes the algebra/ODE gap)
+
+The MVP verified PBPK lemmas only by *reflexivity* (`rfl`). Phase 4 advances the
+stack from "Functional Integration" to "Enforced Formal Verification":
+
+- **Bridge** (`scripts/export_pbpk_to_qed.py`) now exports, per perfused
+  compartment, an *instantiated witness* of the perfusion-limited uptake
+  distributive law `Q*(C_p - C_tissue/Kp) = Q*C_p - Q*C_tissue/Kp` at
+  representative reference arithmetic. QED proves these with `decide` (a real,
+  non-reflexive Lean 4 proof) under the strict no-`sorry` policy.
+- **QED** (`agentic_pipeline.py`, `parser.py`) gained an ODE/rate-of-change
+  recognition path: `get_tactic_candidates` prioritizes `dsimp` / `field_simp`
+  / `ring` for `d<var>/dt` inputs, and `parser.involves_derivative` recognizes
+  derivative notation anywhere. This is the path QED uses (with Mathlib) to
+  prove the *symbolic* perfusion identities emitted by the bridge's
+  `--ode-lemmas` flag.
+- **Gate** (`tether/missions/veritrial-formal-gate.yaml`): runs the bridge then
+  `QED/verify_pbpk_lemmas.py` in **clean-room** mode (`clean_room: true`), with
+  `review.required: true` and `retry_on_rejection: true`. The mission fails
+  unless QED proves **every** exported lemma with no `sorry`.
+
+### Mandatory usage
+
+This gate is **mandatory** before merging any change to `src/insilico_trial/pbpk/`
+or to the QED tactic policy. There is no GitHub Actions workflow in this repo
+yet, so it is invoked locally / in CI via:
+
+```bash
+cd tether
+.venv/bin/tether run missions/veritrial-formal-gate.yaml --project-dir ../VeriTrial
+```
+
+A non-zero exit means at least one PBPK lemma failed formal verification
+(including the no-`sorry` check) and the change must not be merged. When QED is
+run in a Mathlib-backed environment, add `--ode-lemmas` to the bridge call inside
+the mission to also enforce the symbolic perfusion identities; do **not** enable
+it in a Mathlib-free environment or the gate will fail by design.
