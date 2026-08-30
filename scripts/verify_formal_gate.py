@@ -32,6 +32,77 @@ def qed_dir() -> Path:
     return (Path(__file__).resolve().parents[2] / "QED").resolve()
 
 
+def _veritrial_root() -> Path:
+    """This script lives at ``VeriTrial/scripts/verify_formal_gate.py``."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _live_model_lemmas() -> list[str]:
+    """The single source of truth: lemmas ``export_pbpk_to_qed.build_lemmas``
+    emits from the CURRENT PBPK model source (``src/insilico_trial/pbpk/model.py``).
+
+    Importing the bridge directly (rather than re-declaring a lemma list) is
+    what keeps this gate fail-closed against hand-edited / stale lemma files:
+    only what the live model actually produces is acceptable.
+    """
+    scripts_dir = _veritrial_root() / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+
+    model_path = (
+        _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
+    )
+    return ex.build_lemmas(model_path)
+
+
+def _check_single_source(lemmas_file: Path) -> list[str]:
+    """Fail-closed consistency check: the supplied lemma file MUST be exactly
+    the set of lemmas the live PBPK model emits. Any drift (a hand-maintained
+    duplicate, a stale capture, an injected/removed lemma) makes the gate fail
+    rather than certify against something other than the shipped model.
+
+    Returns the parsed lemma lines on success; never returns on drift.
+    """
+    try:
+        emitted = _live_model_lemmas()
+    except Exception as e:  # noqa: BLE001
+        print(
+            "FORMAL GATE FAILED (fail-closed): could not derive required "
+            f"lemmas from the live PBPK model: {e}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    file_lemmas = [
+        line.strip() for line in lemmas_file.read_text().splitlines()
+        if line.strip()
+    ]
+    if not emitted:
+        print(
+            "FORMAL GATE FAILED (fail-closed): the live PBPK model emits no "
+            "required lemmas; refusing to certify.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if set(file_lemmas) != set(emitted):
+        missing = sorted(set(emitted) - set(file_lemmas))
+        extra = sorted(set(file_lemmas) - set(emitted))
+        print(
+            "FORMAL GATE FAILED (fail-closed): lemma file is not the single "
+            "source of truth. The gate may only certify exactly what the live "
+            "PBPK model emits.",
+            file=sys.stderr,
+        )
+        if missing:
+            print(f"  missing from file: {missing}", file=sys.stderr)
+        if extra:
+            print(f"  not produced by live model: {extra}", file=sys.stderr)
+        raise SystemExit(1)
+    return file_lemmas
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 1:
@@ -42,6 +113,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not lemmas_file.is_file():
         print(f"lemmas file not found: {lemmas_file}", file=sys.stderr)
         return 1
+
+    # Single-source-of-truth guard: the file must equal exactly what the live
+    # PBPK model emits. Fail-closed on any drift.
+    file_lemmas = _check_single_source(lemmas_file)
+
+    # Extra cheap fail-closed guard: never certify a lemma file that already
+    # contains a sorry axiom placeholder (the model must be provable, not
+    # admitted). This catches a corrupted/tainted lemma file before QED runs.
+    for lemma in file_lemmas:
+        if "sorry" in lemma or "sorryAx" in lemma:
+            print(
+                "FORMAL GATE FAILED (fail-closed): lemma file contains a "
+                f"'sorry' placeholder: {lemma!r}",
+                file=sys.stderr,
+            )
+            return 1
 
     qed = qed_dir()
     verify_script = qed / "verify_pbpk_lemmas.py"
