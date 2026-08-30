@@ -6,18 +6,27 @@ path and drives ``QED/verify_pbpk_lemmas.py`` over a lemma file produced by
 ``scripts/export_pbpk_to_qed.py``. Exits non-zero (FAIL CLOSED) if:
 
   * the QED repository cannot be located, or
-  * ``verify_pbpk_lemmas.py`` itself exits non-zero (any lemma failed / sorry).
+  * ``verify_pbpk_lemmas.py`` itself exits non-zero (any lemma failed / sorry),
+  * any lemma contains ``sorry`` or ``sorryAx`` (pre-check before QED runs),
+  * (--strict) any Mathlib-dependent symbolic lemma is skipped in a non-Mathlib
+    environment (ensuring the gate never silently degrades).
 
 This is the entry point the Tether ``veritrial-formal-gate`` mission invokes,
 so the mission file never needs to hardcode a ``/Users/...`` QED path.
 
 Usage:
-    python3 scripts/verify_formal_gate.py <lemmas_file>
+    python3 scripts/verify_formal_gate.py [--strict] <lemmas_file>
+
+The ``--strict`` flag is ON by default.  When active it also fails if
+Mathlib-dependent symbolic lemmas (field_simp/ring) are present but the
+environment lacks Mathlib, preventing silent gate degradation.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +46,7 @@ def _veritrial_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _live_model_lemmas() -> list[str]:
+def _live_model_lemmas(include_ode: bool = False) -> list[str]:
     """The single source of truth: lemmas ``export_pbpk_to_qed.build_lemmas``
     emits from the CURRENT PBPK model source (``src/insilico_trial/pbpk/model.py``).
 
@@ -53,7 +62,7 @@ def _live_model_lemmas() -> list[str]:
     model_path = (
         _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
     )
-    return ex.build_lemmas(model_path)
+    return ex.build_lemmas(model_path, include_ode_lemmas=include_ode)
 
 
 def _check_single_source(lemmas_file: Path) -> list[str]:
@@ -103,13 +112,45 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     return file_lemmas
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) != 1:
-        print("usage: verify_formal_gate.py <lemmas_file>", file=sys.stderr)
-        return 2
+def _is_sorry_placeholder(lemma: str) -> bool:
+    """Check whether a lemma string contains a sorry axiom placeholder."""
+    return bool(re.search(r'\bsorry\b|\bsorryAx\b', lemma))
 
-    lemmas_file = Path(argv[0])
+
+def _is_mathlib_dependent(lemma: str) -> bool:
+    """Heuristic: a lemma requiring Mathlib (field_simp/ring) contains
+    division, subtraction inside a product, or the pattern ``/ Kp``."""
+    return bool(re.search(r'/\s*\w+|dA_\w+/dt', lemma))
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "lemmas_file",
+        type=Path,
+        help="Path to the lemma file produced by export_pbpk_to_qed.py",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=True,
+        help="Fail if Mathlib-dependent symbolic lemmas are skipped in a "
+             "non-Mathlib environment (default: ON).",
+    )
+    parser.add_argument(
+        "--no-strict",
+        action="store_false",
+        dest="strict",
+        help="Disable the --strict check (allows Mathlib-dependent lemmas to "
+             "be skipped without failing the gate).",
+    )
+    args = parser.parse_args(argv)
+    lemmas_file: Path = args.lemmas_file
+    strict: bool = args.strict
+
     if not lemmas_file.is_file():
         print(f"lemmas file not found: {lemmas_file}", file=sys.stderr)
         return 1
@@ -122,13 +163,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     # contains a sorry axiom placeholder (the model must be provable, not
     # admitted). This catches a corrupted/tainted lemma file before QED runs.
     for lemma in file_lemmas:
-        if "sorry" in lemma or "sorryAx" in lemma:
+        if _is_sorry_placeholder(lemma):
             print(
                 "FORMAL GATE FAILED (fail-closed): lemma file contains a "
                 f"'sorry' placeholder: {lemma!r}",
                 file=sys.stderr,
             )
             return 1
+
+    # --strict: if the environment lacks Mathlib, fail if any Mathlib-dependent
+    # symbolic lemma would be silently skipped (preventing gate degradation).
+    if strict:
+        has_mathlib_env = bool(os.environ.get("HAS_MATHLIB") or os.environ.get("MATHLIB"))
+        for lemma in file_lemmas:
+            if _is_mathlib_dependent(lemma) and "dA_" in lemma:
+                # This is a symbolic ODE lemma (e.g. dA_liver/dt = Q * (...))
+                # that requires Mathlib field_simp/ring.  In a non-Mathlib
+                # environment the gate would silently skip it.
+                if not has_mathlib_env:
+                    print(
+                        "FORMAL GATE FAILED (--strict): Mathlib-dependent "
+                        f"symbolic lemma detected in a non-Mathlib "
+                        f"environment: {lemma!r}.  Set HAS_MATHLIB=1 or "
+                        "remove --strict to allow skipping.",
+                        file=sys.stderr,
+                    )
+                    return 1
 
     qed = qed_dir()
     verify_script = qed / "verify_pbpk_lemmas.py"

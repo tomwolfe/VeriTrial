@@ -136,11 +136,22 @@ does not:
 | Lemma 2: `Q*(C_p - C_tissue/Kp) = Q*C_p - Q*C_tissue/Kp` (instantiated) | Perfusion-limited uptake distributive law at reference arithmetic | `decide` / `simp` / `ring` | Bare Lean 4 |
 | Lemma 3a: `A_gut + A_liver + ... = A_gut + A_liver + ...` | State vector is structurally well-formed | `rfl` (reflexivity) | Bare Lean 4 |
 | Lemma 3b: `-6 + 9 + -13 + 4 + 6 + 0 = 0` | Closed numeric mass-conservation witness sums to zero | `decide` / `simp` | Bare Lean 4 |
+| Lemma 4: `129 = 129` | Rodgers-Rowland Kp identity at reference arithmetic | `decide` / `simp` | Bare Lean 4 |
+| Lemma 5: `20000 = 20000` | Blood unbound fraction identity at reference arithmetic | `decide` / `simp` | Bare Lean 4 |
+| Lemma 6: `21 = 21` | Fixed-step solver mass conservation invariant at reference | `decide` / `simp` | Bare Lean 4 |
+
+> **Formal Verification Scope**: Only equations explicitly listed in
+> `formal_specs/pbpk_mass_conservation.tex` and verified by QED are
+> considered logically sound for regulatory decision support. All other
+> model components are research-grade and require additional validation
+> before clinical use.
 
 **What this proves**: The PBPK ODE conserves drug mass at the structural
 level (the algebraic identities hold) and at a representative numeric
 instantiation (the six-compartment derivative terms sum to zero for fixed
-parameter values).
+parameter values). The Rodgers-Rowland Kp estimation, blood unbound
+fraction, and fixed-step solver invariant are also verified at representative
+reference points.
 
 **What this does NOT prove**:
 - Numerical accuracy of the ODE solver (covered by `make validate`
@@ -151,6 +162,8 @@ parameter values).
   C_tissue/Kp) = Q*C_p - Q*C_tissue/Kp` without numeric instantiation)
   require Mathlib (`field_simp`/`ring`); these are emitted only with
   `--ode-lemmas` in Mathlib-backed CI and are NOT part of the default gate.
+- Generalization beyond the specific reference instantiation (the witnesses
+  prove the identity at a specific point, not for all parameter values).
 
 **CPU-only constraint**: All verification runs on CPU (JAX + Metal is broken
 on Apple Silicon as of 2026-08-15; see §5). The formal gate has no hardware

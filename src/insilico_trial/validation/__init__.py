@@ -828,6 +828,10 @@ def run_all_validations(
     # below includes the formal gate: if any required lemma has ``sorry`` or
     # fails to verify (or QED is unavailable), the gate is FAIL-CLOSED and the
     # whole validation set reports overall_pass = False.
+    #
+    # FAIL-CLOSED: formal verification is NOT advisory. A failed gate means
+    # the model is NOT formally certified under ASME V&V 40, and the entire
+    # validation suite must fail.
     formal_results = run_formal_verification()
     formal_results.setdefault("overall_pass", formal_results.get("qed_proofs_pass", False))
     all_results["formal_verification"] = formal_results
@@ -841,9 +845,21 @@ def run_all_validations(
         (out_dir / f"{name}.json").write_text(
             json.dumps(res, indent=2, default=str)
         )
+
+    overall = all(r.get("overall_pass", False) for r in all_results.values())
     (out_dir / "validation_summary.json").write_text(
-        json.dumps({"overall_pass": all(r.get("overall_pass", False) for r in all_results.values())}, indent=2)
+        json.dumps({"overall_pass": overall}, indent=2)
     )
+
+    # FAIL-CLOSED: if formal verification did not pass, the entire validation
+    # suite must fail.  Callers that only check the return value (or that
+    # invoke this via ``make validate``) will see a non-zero exit.
+    if not formal_results.get("qed_proofs_pass", False):
+        raise SystemExit(
+            "VALIDATION FAILED (fail-closed): formal verification gate did not "
+            "pass. At least one required PBPK lemma was not verified without "
+            "sorry; the model is NOT formally certified."
+        )
 
     return {
         "validation_results": all_results,
