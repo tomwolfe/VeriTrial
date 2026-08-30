@@ -185,6 +185,17 @@ def cmd_validate(args: argparse.Namespace) -> int:
     (out_dir / "versions.json").write_text(json.dumps(versions, indent=2))
     print(json.dumps(res["validation_results"], indent=2))
     print(f"Validation summary: {Path(out_dir) / 'validation' / 'validation_summary.json'}")
+
+    # Formal-verification gate is FAIL-CLOSED: a missing/failed QED proof must
+    # fail the whole `validate` command rather than silently passing.
+    formal = res.get("validation_results", {}).get("formal_verification", {})
+    if not formal.get("qed_proofs_pass", False):
+        print(
+            "FORMAL VERIFICATION GATE FAILED (fail-closed): "
+            f"{formal.get('trail_summary', 'unknown error')}",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

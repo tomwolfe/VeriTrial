@@ -823,8 +823,13 @@ def run_all_validations(
         "metformin_renal": metro_results,
     }
 
-    # Integrate formal verification from QED
+    # Integrate formal verification from QED. ``formal_results`` carries an
+    # explicit ``overall_pass`` flag so the aggregate ``validation_summary.json``
+    # below includes the formal gate: if any required lemma has ``sorry`` or
+    # fails to verify (or QED is unavailable), the gate is FAIL-CLOSED and the
+    # whole validation set reports overall_pass = False.
     formal_results = run_formal_verification()
+    formal_results.setdefault("overall_pass", formal_results.get("qed_proofs_pass", False))
     all_results["formal_verification"] = formal_results
 
     report_meta = generate_vvv40_report(all_results, "output/vvv40_report.html")
