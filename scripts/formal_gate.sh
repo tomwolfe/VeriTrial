@@ -25,13 +25,15 @@ echo "=== [3/3] QED formal verification (no sorry) ==="
 python3 "$SCRIPT_DIR/verify_formal_gate.py" "$LEMMA_FILE"
 echo ""
 
-# Record pass into validation output
+# Record pass into validation output (only reached if all steps above succeeded
+# thanks to set -euo pipefail; the explicit True is therefore correct here).
 mkdir -p "$VALIDATION_DIR"
+LEMMA_COUNT=$(wc -l < "$LEMMA_FILE" 2>/dev/null || echo 0)
 python3 -c "
 import json, sys
 from pathlib import Path
 path = Path('$VALIDATION_DIR/formal_gate_compound.json')
-data = {'overall_pass': True, 'lemmas_verified': 6, 'source': 'compound_loop'}
+data = {'overall_pass': True, 'lemmas_verified': int('$LEMMA_COUNT'), 'source': 'compound_loop'}
 path.write_text(json.dumps(data, indent=2))
 print(f'Recorded pass to {path}')
 "

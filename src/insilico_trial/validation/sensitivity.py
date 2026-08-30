@@ -13,11 +13,13 @@ NOTES
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import numpy as onp
 
 from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
+from insilico_trial.pbpk.model import build_pbpk_params
 from insilico_trial.schemas import Drug
 
 
@@ -29,6 +31,39 @@ def _compute_cmax_auc(t_eval: onp.ndarray, C_p: onp.ndarray) -> dict[str, float]
         dt = t_eval[i + 1] - t_eval[i]
         auc += 0.5 * (C_p[i] + C_p[i + 1]) * dt
     return {"cmax": cmax, "auc": float(auc)}
+
+
+def _build_batch_params(drug: Drug, overrides: dict[str, float]) -> dict[str, Any]:
+    """Build single-sample batched PBPK params (all arrays have leading dim 1).
+
+    ``overrides`` maps Drug attribute names (typical_cl_f, ka, fup, log_p,
+    typical_v_f) or patient covariates (weight_kg, age, genotype_scale) to
+    perturbed values.  Unset keys keep their baseline value.
+    """
+    weight = overrides.get("weight_kg", 70.0)
+    age = overrides.get("age", 40.0)
+    gs = overrides.get("genotype_scale", 1.0)
+
+    # Apply drug-level overrides via shallow copy so we don't mutate the
+    # original drug schema.
+    if any(k in overrides for k in ("typical_cl_f", "ka", "fup", "log_p",
+                                     "typical_v_f")):
+        d = copy.copy(drug)
+        for attr in ("typical_cl_f", "ka", "fup", "log_p", "typical_v_f"):
+            if attr in overrides:
+                setattr(d, attr, overrides[attr])
+    else:
+        d = drug
+
+    p = build_pbpk_params(weight, age, d, genotype_scale=gs)
+    # Add leading batch dim=1 for the fixed-step batch solver.
+    return {
+        "Q": p["Q"].reshape(1, -1),
+        "V": p["V"].reshape(1, -1),
+        "Kp": p["Kp"].reshape(1, -1),
+        "CL": onp.array([p["CL"]]),
+        "ka": onp.array([p["ka"]]),
+    }
 
 
 def sobol_sensitivity(
@@ -62,78 +97,47 @@ def sobol_sensitivity(
     # Ensure n_samples is even
     n_samples = n_samples - (n_samples % 2)
 
-    # Reference (baseline) simulation: 70 kg adult, 40 y, EM genotype
     t_eval = onp.linspace(0.0, 7.0 * 24.0, 24 * 7)  # 7 days, hourly
 
-    # Baseline simulation
-    baseline_C = onp.asarray(
-        solve_pbpk_batch_fixed_step(
-            t_eval,
-            10.0 * drug.bioavailability,
-            {"weight_kg": 70.0, "age": 40.0, "drug": drug, "genotype_scale": 1.0},
-        ),
-        dtype=onp.float64,
-    )
-    _ = _compute_cmax_auc(t_eval, baseline_C)  # baseline; used for consistency
+    # Baseline reference values for each parameter (drug attribute or fallback)
+    baseline_vals: dict[str, float] = {}
+    for name in param_names:
+        if hasattr(drug, name):
+            baseline_vals[name] = float(getattr(drug, name))
+        elif name == "weight_kg":
+            baseline_vals[name] = 70.0
+        elif name == "age":
+            baseline_vals[name] = 40.0
+        elif name == "genotype_scale":
+            baseline_vals[name] = 1.0
+        else:
+            baseline_vals[name] = 1.0
 
     np_rng = onp.random.RandomState(seed)
     n_params = len(param_names)
 
-    # Saltelli sampling: generate A and B matrices
-    # Simple +/-25% perturbation of each parameter's typical value
-    param_perturbations: dict[str, float] = {}
-    for name in param_names:
-        if hasattr(drug, name):
-            param_perturbations[name] = float(getattr(drug, name))
-        else:
-            if name == "typical_cl_f":
-                param_perturbations[name] = 0.15
-            elif name == "typical_v_f":
-                param_perturbations[name] = 8.4
-            elif name == "ka":
-                param_perturbations[name] = 1.0
-            elif name == "fup":
-                param_perturbations[name] = 0.008
-            elif name == "log_p":
-                param_perturbations[name] = 2.56
-            else:
-                param_perturbations[name] = 1.0
-
-    # Generate A and B matrices
+    # Saltelli sampling: +/-25% perturbation of each parameter's baseline
     A = onp.zeros((n_samples, n_params))
     B = onp.zeros((n_samples, n_params))
-
     for i, name in enumerate(param_names):
-        base_val = param_perturbations[name]
-        perturbation = base_val * 0.25 * np_rng.standard_normal(n_samples)
-        A[:, i] = base_val + perturbation
-        B[:, i] = base_val + base_val * 0.25 * np_rng.standard_normal(n_samples)
+        base = baseline_vals[name]
+        A[:, i] = base + base * 0.25 * np_rng.standard_normal(n_samples)
+        B[:, i] = base + base * 0.25 * np_rng.standard_normal(n_samples)
 
-    # Vectorized PBPK evaluation for each sample in A and B
-    def _run_pbpk(params: dict[str, Any]) -> dict[str, float]:
+    def _eval_row(row: onp.ndarray) -> dict[str, float]:
+        overrides = {name: float(row[j]) for j, name in enumerate(param_names)}
+        pb = _build_batch_params(drug, overrides)
         C_p = onp.asarray(
             solve_pbpk_batch_fixed_step(
-                t_eval, 10.0 * drug.bioavailability, params
+                t_eval, onp.array([10.0 * drug.bioavailability]), pb,
             ),
             dtype=onp.float64,
         )
-        return _compute_cmax_auc(t_eval, C_p)
+        return _compute_cmax_auc(t_eval, C_p[0])
 
-    A_results = [_run_pbpk({
-        "weight_kg": 70.0,
-        "age": 40.0,
-        "drug": drug,
-        "genotype_scale": 1.0,
-    }) for _ in range(n_samples)]
+    A_results = [_eval_row(A[i]) for i in range(n_samples)]
+    B_results = [_eval_row(B[i]) for i in range(n_samples)]
 
-    B_results = [_run_pbpk({
-        "weight_kg": 70.0,
-        "age": 40.0,
-        "drug": drug,
-        "genotype_scale": 1.0,
-    }) for _ in range(n_samples)]
-
-    # Compute first-order Sobol indices (Saltelli estimator)
     Y_A_auc = onp.array([r["auc"] for r in A_results])
     Y_B_auc = onp.array([r["auc"] for r in B_results])
     Y_A_cmax = onp.array([r["cmax"] for r in A_results])
@@ -145,15 +149,15 @@ def sobol_sensitivity(
     results: dict[str, dict[str, float]] = {}
 
     for _idx, name in enumerate(param_names):
-        # AUC first-order index
-        auc_diff = onp.array([B_results[k]["auc"] - A_results[k]["auc"] for k in range(n_samples)])
-        auc_A = onp.array([A_results[k]["auc"] for k in range(n_samples)])
-        S_auc = float((1.0 / (2.0 * n_samples)) * onp.sum(auc_diff * auc_A) / var_Y_auc) if var_Y_auc > 0 else 0.0
+        auc_diff = Y_B_auc - Y_A_auc
+        S_auc = float(
+            onp.sum(auc_diff * Y_A_auc) / (2.0 * n_samples * var_Y_auc)
+        ) if var_Y_auc > 0 else 0.0
 
-        # Cmax first-order index
-        cmax_diff = onp.array([B_results[k]["cmax"] - A_results[k]["cmax"] for k in range(n_samples)])
-        cmax_A = onp.array([A_results[k]["cmax"] for k in range(n_samples)])
-        S_cmax = float((1.0 / (2.0 * n_samples)) * onp.sum(cmax_diff * cmax_A) / var_Y_cmax) if var_Y_cmax > 0 else 0.0
+        cmax_diff = Y_B_cmax - Y_A_cmax
+        S_cmax = float(
+            onp.sum(cmax_diff * Y_A_cmax) / (2.0 * n_samples * var_Y_cmax)
+        ) if var_Y_cmax > 0 else 0.0
 
         results[name] = {"cmax": S_cmax, "auc": S_auc}
 

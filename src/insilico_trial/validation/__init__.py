@@ -498,20 +498,6 @@ METFORMIN_REFERENCE = {
 }
 
 
-
-# ---------------------------------------------------------------------------
-# Benchmark: Metformin Renal
-# ---------------------------------------------------------------------------
-
-# Metformin reference data (renal elimination via OCT2/MATE)
-# CL/F ~ 35 L/h at eGFR=90. Corr(eGFR, CL/F) > 0.5.
-METFORMIN_REFERENCE = {
-    "typical_cl_f_Lh_at_egfr90": 35.0,  # total CL/F (L/h) at eGFR=90
-    "cl_tolerance_pct": 30.0,
-    "egfr_cl_corr_min": 0.5,
-}
-
-
 def validate_metformin_renal(
     n_patients: int = 200,
     seed: int = 42,
