@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test test-cov clean help demo demo-small validate benchmark report check
+.PHONY: install lint typecheck test test-cov clean help demo demo-small validate benchmark report check formal-gate
 
 help:
 	@echo "Available targets:"
@@ -10,6 +10,7 @@ help:
 	@echo "  demo-small   - Run 100-patient fast validation demo"
 	@echo "  demo         - Run 1000-patient full SAD/MAD simulation"
 	@echo "  validate     - Run benchmark harness (Warfarin + Moxifloxacin)"
+	@echo "  formal-gate  - Run QED formal verification gate (portable)"
 	@echo "  benchmark    - Hardware acceleration comparison"
 	@echo "  report       - Generate HTML/Markdown validation report"
 	@echo "  clean        - Remove build artifacts"
@@ -37,6 +38,10 @@ demo:
 
 validate:
 	python -m insilico_trial.cli validate --warfarin-n 300
+
+formal-gate:
+	python3 scripts/export_pbpk_to_qed.py --out /tmp/pbpk_lemmas.txt
+	python3 scripts/verify_formal_gate.py /tmp/pbpk_lemmas.txt
 
 benchmark:
 	python -m insilico_trial.cli benchmark

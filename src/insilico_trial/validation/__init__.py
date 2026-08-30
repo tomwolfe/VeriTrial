@@ -618,7 +618,7 @@ def validate_metformin_renal(
 # ---------------------------------------------------------------------------
 
 def run_formal_verification(
-    formal_specs_dir: str = "VeriTrial/formal_specs",
+    formal_specs_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run formal verification and integrate results into V&V 40 report.
 
@@ -627,7 +627,7 @@ def run_formal_verification(
     and an audit trail of the verification process.
     """
     from .formal_verification import check_qed_proofs
-    return check_qed_proofs(formal_specs_dir)
+    return check_qed_proofs(formal_specs_dir=formal_specs_dir)
 
 
 # ---------------------------------------------------------------------------

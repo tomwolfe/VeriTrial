@@ -155,3 +155,20 @@ A non-zero exit means at least one PBPK lemma failed formal verification
 run in a Mathlib-backed environment, add `--ode-lemmas` to the bridge call inside
 the mission to also enforce the symbolic perfusion identities; do **not** enable
 it in a Mathlib-free environment or the gate will fail by design.
+
+## What formal verification DOES and DOES NOT prove
+
+The formal gate certifies **structural** properties of the PBPK ODE, not
+numerical solver accuracy or clinical relevance.
+
+| Proved by the formal gate | NOT proved by the formal gate |
+|---|---|
+| Algebraic identities hold (rfl: `ka*A_gut = ka*A_gut`) | ODE solver accuracy (<1e-7 mass balance → `make validate`) |
+| Closed numeric distributive law (`3*(5-4/2) = 3*5-3*4/2` → `decide`) | Correctness across patient population → `make test` |
+| Mass-conservation witness sums to zero (`-6+9+...=0` → `decide`) | Clinical relevance of PK outputs → V&V 40 benchmarks |
+| No `sorry` axioms anywhere in the proof chain | Safety assessment correctness → `make test` |
+| Lemma set is derived from the live `model.py` (single source, no drift) | General ODE stability properties |
+
+The formal gate closes the **algebraic/structural** gap. The numerical,
+population, and clinical gaps remain covered by the existing simulation
+validation suite (`make validate` + `make test`).
