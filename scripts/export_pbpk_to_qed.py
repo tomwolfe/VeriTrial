@@ -316,11 +316,11 @@ def check_mass_conservation(model_path: Path) -> bool:
     if gut is None or central is None or elim is None:
         return False
 
-    # dA_gut = -ka * A_gut
-    if "ka" not in gut or "A_gut" not in gut or "-" not in gut:
+    # dA_gut = -ka * A_gut (exact form; extra terms break mass conservation)
+    if gut not in ("-ka*A_gut", "-ka *A_gut", "-ka* A_gut", "-ka * A_gut"):
         return False
-    # dA_elim = CL * C_p
-    if "CL" not in elim or "C_p" not in elim:
+    # dA_elim = CL * C_p (exact form; extra terms break mass conservation)
+    if elim not in ("CL*C_p", "CL *C_p", "CL* C_p", "CL * C_p"):
         return False
     # dA_central must reference the gut influx, every perfused outflow, and CL.
     if "ka" not in central or "A_gut" not in central:
