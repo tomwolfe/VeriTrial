@@ -93,3 +93,99 @@ def test_required_lemmas_derived_from_bridge() -> None:
     assert len(lemmas) > 0
     # The bridge always emits at least the structural identity and numeric witness
     assert any("=" in lem for lem in lemmas)
+
+
+def test_classify_proof_type_rfl() -> None:
+    """Reflexive proofs are classified as 'rfl'."""
+    from insilico_trial.validation.formal_verification import _classify_proof_type
+    result = {"success": True, "tactic": "rfl"}
+    assert _classify_proof_type(result) == "rfl"
+
+
+def test_classify_proof_type_decide() -> None:
+    """Closed numeric proofs (decide/simp/norm_num) are classified as 'decide'."""
+    from insilico_trial.validation.formal_verification import _classify_proof_type
+    for tactic in ("decide", "simp", "norm_num"):
+        result = {"success": True, "tactic": tactic}
+        assert _classify_proof_type(result) == "decide"
+
+
+def test_classify_proof_type_field_simp_ring() -> None:
+    """Parametric field proofs are classified as 'field_simp; ring'."""
+    from insilico_trial.validation.formal_verification import _classify_proof_type
+    for tactic in ("field_simp", "ring", "linarith", "dsimp", "intro"):
+        result = {"success": True, "tactic": tactic}
+        assert _classify_proof_type(result) == "field_simp; ring"
+
+
+def test_classify_proof_type_unknown() -> None:
+    """Failed proofs are classified as 'unknown'."""
+    from insilico_trial.validation.formal_verification import _classify_proof_type
+    result = {"success": False, "tactic": "simp"}
+    assert _classify_proof_type(result) == "unknown"
+
+
+def test_export_parametric_lemma_emission() -> None:
+    """The parametric flag causes build_lemmas to emit the symbolic sum identity."""
+    from pathlib import Path
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+
+    model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+    lemmas_normal = ex.build_lemmas(model_path, parametric=False)
+    lemmas_parametric = ex.build_lemmas(model_path, parametric=True)
+    # Parametric mode should emit at least one additional lemma (the sum identity)
+    assert len(lemmas_parametric) > len(lemmas_normal)
+    # The parametric sum lemma should end with "= 0" and contain symbolic terms
+    parametric_lemmas = [l for l in lemmas_parametric if l.endswith("= 0") and "ka" in l]
+    assert len(parametric_lemmas) >= 1
+
+
+def test_extract_symbolic_derivatives() -> None:
+    """extract_symbolic_derivatives returns derivative names and RHS expressions."""
+    from pathlib import Path
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+
+    model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+    derivs = ex.extract_symbolic_derivatives(model_path)
+    assert "dA_gut" in derivs
+    assert "dA_central" in derivs
+    assert "dA_elim" in derivs
+    assert "ka" in derivs["dA_gut"]
+
+
+def test_verify_symbolic_cancellation() -> None:
+    """verify_symbolic_cancellation confirms the PBPK ODE conserves mass."""
+    from pathlib import Path
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+
+    model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+    derivs = ex.extract_symbolic_derivatives(model_path)
+    assert ex.verify_symbolic_cancellation(derivs) is True
+
+
+def test_build_parametric_sum_lemma() -> None:
+    """build_parametric_sum_lemma returns a valid Lean-parseable sum identity."""
+    from pathlib import Path
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+
+    model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+    lemma = ex.build_parametric_sum_lemma(model_path)
+    assert lemma.endswith("= 0")
+    assert "dA_gut" in lemma or "ka" in lemma
+    assert "+" in lemma

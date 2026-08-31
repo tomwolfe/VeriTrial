@@ -875,6 +875,17 @@ def run_all_validations(
     formal_results.setdefault("overall_pass", formal_results.get("qed_proofs_pass", False))
     all_results["formal_verification"] = formal_results
 
+    # Compute SHA-256 hashes of all verified lemma expressions for the
+    # audit trail.  These are embedded in the HTML report, the per-benchmark
+    # JSON, and the validation summary so that external auditors can
+    # independently verify the formal proof set.
+    verified_lemmas = formal_results.get("verified_lemmas", [])
+    proof_hashes = []
+    for lemma in verified_lemmas:
+        h = hashlib.sha256(lemma.encode()).hexdigest()[:16]
+        proof_hashes.append({"lemma": lemma, "proof_hash": h})
+    formal_results["proof_hashes"] = proof_hashes
+
     report_meta = generate_vvv40_report(all_results, "output/vvv40_report.html")
 
     # Also emit machine-readable JSON per benchmark.
@@ -887,7 +898,11 @@ def run_all_validations(
 
     overall = all(r.get("overall_pass", False) for r in all_results.values())
     (out_dir / "validation_summary.json").write_text(
-        json.dumps({"overall_pass": overall}, indent=2)
+        json.dumps({
+            "overall_pass": overall,
+            "formal_verification_pass": formal_results.get("qed_proofs_pass", False),
+            "proof_hashes": proof_hashes,
+        }, indent=2, default=str)
     )
 
     # FAIL-CLOSED: if formal verification did not pass, the entire validation

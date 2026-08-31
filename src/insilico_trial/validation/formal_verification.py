@@ -78,6 +78,27 @@ def _trace_path() -> Path:
     return (REPO_ROOT / "output" / "validation" / "qed_traces.json").resolve()
 
 
+def _classify_proof_type(result: dict[str, Any]) -> str:
+    """Classify the proof method used by the QED pipeline.
+
+    Returns one of:
+      - ``"rfl"``: reflexive equality (textual identity, trivially closed)
+      - ``"decide"``: closed numeric field identity (genuine, non-reflexive)
+      - ``"field_simp; ring"``: fully parametric field/algebraic proof (requires Mathlib)
+      - ``"unknown"``: tactic not recognized or proof failed
+    """
+    tactic = result.get("tactic", "")
+    if not result.get("success", False):
+        return "unknown"
+    if tactic == "rfl":
+        return "rfl"
+    if tactic in ("decide", "simp", "norm_num"):
+        return "decide"
+    if tactic in ("field_simp", "ring", "linarith", "dsimp", "intro"):
+        return "field_simp; ring"
+    return "unknown"
+
+
 def required_lemmas(model_path: Optional[Path] = None) -> List[str]:
     """Return the required lemma set emitted by the VeriTrial -> QED bridge.
 
@@ -171,6 +192,7 @@ def check_qed_proofs(
                 "success": result.get("success", False),
                 "tactic": result.get("tactic"),
                 "has_sorry": has_sorry,
+                "proof_type": _classify_proof_type(result),
             }
             attempts.append(attempt)
 
