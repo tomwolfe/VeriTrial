@@ -166,3 +166,110 @@ def solve_pbpk_batch_fixed_step(
 
     batch_fn = jax.jit(jax.vmap(_single, in_axes=(0, 0)))
     return batch_fn(A_gut_0s, params_batch)
+
+
+# ---------------------------------------------------------------------------
+# Multi-dose solver: discrete dosing events within a single JIT pass
+# ---------------------------------------------------------------------------
+
+
+def solve_pbpk_multi_dose_fixed_step(
+    t_eval: Any,
+    dose_times: Any,
+    dose_amounts: Any,
+    params: dict[str, Any],
+    dt: float = 0.01,
+) -> Any:
+    """Solve the PBPK ODE for a multiple-dose regimen using jax.lax.scan.
+
+    Handles discrete bolus dosing events within a single JIT-compiled pass
+    by segmenting the integration at each dose time. The state is carried
+    across segments; at each dose boundary the gut compartment receives the
+    bolus amount additively.
+
+    Parameters
+    ----------
+    t_eval : array (n_timepoints,)
+        Output time grid (h).
+    dose_times : array (n_doses,)
+        Times (h) at which doses are administered.
+    dose_amounts : array (n_doses,)
+        Absorbed dose amounts (mg) for each bolus.
+    params : dict
+        Patient parameters (see pbpk_ode).
+    dt : float
+        Fixed time step in hours (default 0.01 h).
+
+    Returns
+    -------
+    C_p : array (n_timepoints,)
+        Plasma concentration (mg/L) at each output time point.
+    """
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    dt_arr = onp.asarray(dose_times, dtype=onp.float64)
+    da_arr = onp.asarray(dose_amounts, dtype=onp.float64)
+    t0 = float(te[0])
+    t_end = float(te[-1])
+    te_j = jnp.asarray(te)
+
+    n_doses = len(dt_arr)
+
+    # If no doses, solve as single-dose with zero initial gut amount.
+    if n_doses == 0:
+        n_steps = int((t_end - t0) / dt) + 1
+        y0 = jnp.zeros(6, dtype=jnp.float64)
+        ys = _solve_on_grid_fixed(t0, t_end, dt, n_steps, te_j, y0, params)
+        return jnp.asarray(ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX])
+
+    # Build dose-time boundaries (including start and end of simulation).
+    boundaries = jnp.sort(jnp.concatenate([
+        jnp.array([t0]), jnp.asarray(dt_arr), jnp.array([t_end])
+    ]))
+
+    # Replay the multi-dose integration to build the full state trajectory
+    # within a single jax.lax.scan pass.
+    n_steps_full = int((t_end - t0) / dt) + 1
+    boundaries_j = jnp.asarray(boundaries, dtype=jnp.float64)
+    da_arr_j = jnp.asarray(da_arr, dtype=jnp.float64)
+
+    def _full_scan_step(
+        carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        _: jnp.ndarray,
+    ) -> tuple[tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+        y, t_cur, dose_idx = carry
+        # Check if we are at a dose boundary
+        at_dose = jnp.logical_and(
+            dose_idx < n_doses,
+            jnp.abs(t_cur - boundaries_j[dose_idx + 1]) < dt / 2.0,
+        )
+        # Apply bolus if at dose boundary
+        y_next = jnp.where(
+            at_dose,
+            y.at[0].add(da_arr_j[jnp.minimum(dose_idx, n_doses - 1)]),
+            y,
+        )
+        next_dose_idx = jnp.where(at_dose, dose_idx + 1, dose_idx)
+        # RK4 step
+        y_out = _rk4_step(float(t_cur), y_next, dt, params)
+        return (y_out, t_cur + dt, next_dose_idx), y_out
+
+    y0 = jnp.zeros(6, dtype=jnp.float64)
+    init_carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray] = (
+        y0, jnp.asarray(t0, dtype=jnp.float64), jnp.asarray(0, dtype=jnp.int32)
+    )
+    (_y_final, _, _), ys_full = jax.lax.scan(
+        _full_scan_step, init_carry, None, length=n_steps_full - 1
+    )
+    # Prepend initial state
+    ys_full = jnp.vstack([y0[None, :], ys_full])
+
+    t_internal = jnp.linspace(t0, t_end, n_steps_full)
+
+    # Interpolate onto requested output grid
+    interp_fn = jax.vmap(
+        lambda col: jnp.interp(te_j, t_internal, col),
+        in_axes=1,
+        out_axes=1,
+    )
+    ys_out = interp_fn(ys_full)  # type: ignore[no-untyped-call]
+    return jnp.asarray(ys_out[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX])

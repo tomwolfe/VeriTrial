@@ -665,6 +665,17 @@ def generate_vvv40_report(
     mq = validation_results.get("moxifloxacin_qtc", {})
     mm = validation_results.get("midazolam_cyp3a4", {})
     metro = validation_results.get("metformin_renal", {})
+    formal = validation_results.get("formal_verification", {})
+
+    # Compute per-lemma proof hashes for the audit trail.
+    verified_lemmas = formal.get("verified_lemmas", [])
+    proof_hashes: list[dict[str, str]] = []
+    for lemma in verified_lemmas:
+        h = hashlib.sha256(lemma.encode()).hexdigest()[:16]
+        proof_hashes.append({"lemma": lemma, "proof_hash": h})
+    formal_gate_pass = formal.get("qed_proofs_pass", False)
+    formal_n_verified = len(verified_lemmas)
+    formal_n_failed = len(formal.get("failed_lemmas", []))
 
     report: dict[str, Any] = {
         "title": "VeriTrial: InSilico Clinical Trial Simulator - V&V Report",
@@ -676,12 +687,14 @@ def generate_vvv40_report(
             "moxifloxacin_qtc_pass": mq.get("overall_pass", False),
             "midazolam_cyp3a4_pass": mm.get("overall_pass", False),
             "metformin_renal_pass": metro.get("overall_pass", False),
+            "formal_verification_pass": formal_gate_pass,
         },
         "provenance": {
             "run_hash": run_hash,
             "software": "insilico-trial",
             "version": "0.2.0",
             "generated": datetime.now(UTC).isoformat(),
+            "formal_proof_hashes": proof_hashes,
         },
     }
 
@@ -757,11 +770,12 @@ def generate_vvv40_report(
         th {{background-color: #f2f2f2}}
         .pass {{color: green}}
         .fail {{color: red}}
+        .proof-hash {{font-family: monospace; font-size: 0.9em; color: #555;}}
     </style>
 </head>
 <body>
     <h1>VeriTrial InSilico Clinical Trial Simulator</h1>
-    <h2>ASME V&V 40 Validation Report</p>
+    <h2>ASME V&V 40 Validation Report</h2>
     <p><strong>Version:</strong> {report['version']}</p>
     <p><strong>Date:</strong> {report['date']}</p>
     <p><strong>Run Hash:</strong> {report['provenance']['run_hash']}</p>
@@ -790,12 +804,20 @@ def generate_vvv40_report(
         {mq_rows}
     </table>
 
+    <h3>Formal Verification (QED / Lean 4)</h3>
+    <p><strong>Status:</strong> <span class="{"pass" if formal_gate_pass else "fail"}">{"PASS" if formal_gate_pass else "FAIL"}</span></p>
+    <p><strong>Lemmas verified:</strong> {formal_n_verified}</p>
+    <p><strong>Lemmas failed:</strong> {formal_n_failed}</p>
+    {"<p><strong>Trail:</strong> " + formal.get("trail_summary", "") + "</p>" if formal.get("trail_summary") else ""}
+    {"".join(f'<p class="proof-hash">Lemma: {ph["lemma"]}<br/>Proof hash: {ph["proof_hash"]}</p>' for ph in proof_hashes) if proof_hashes else "<p>No verified lemmas.</p>"}
+
     <h3>Summary</h3>
     <ul>
         <li>Warfarin PGx Validation: {'PASS' if wf.get('overall_pass') else 'FAIL'}</li>
         <li>Midazolam CYP3A4 Validation: {'PASS' if mm.get('overall_pass') else 'FAIL'}</li>
         <li>Metformin Renal Validation: {'PASS' if metro.get('overall_pass') else 'FAIL'}</li>
         <li>Moxifloxacin QTc Validation: {'PASS' if mq.get('overall_pass') else 'FAIL'}</li>
+        <li>Formal Verification: {'PASS' if formal_gate_pass else 'FAIL'}</li>
     </ul>
 
     <h3>Provenance</h3>
@@ -804,6 +826,7 @@ def generate_vvv40_report(
         <li>Version: 0.2.0</li>
         <li>Generated: {datetime.now(UTC).isoformat()}</li>
         <li>Run Hash: {report['provenance']['run_hash']}</li>
+        <li>Formal Proof Hashes: {len(proof_hashes)} lemma(s) certified</li>
     </ul>
 </body>
 </html>"""

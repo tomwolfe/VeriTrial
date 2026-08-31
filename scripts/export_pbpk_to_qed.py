@@ -305,6 +305,20 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False) -> List[str
         lemmas.append(
             "sum(y_i + dt * f_i) = sum(y_i) + dt * sum(f_i)"
         )
+        # Symbolic mass conservation: forall params > 0, sum of all compartment
+        # derivative RHS terms equals zero.  This is the fully parametric
+        # statement of mass conservation that QED proves with field_simp/ring
+        # over Real.
+        all_terms = []
+        all_terms.append("dA_gut")
+        for comp in perfused:
+            tissue = comp[2:] if comp.startswith("A_") else comp
+            all_terms.append(f"Q * (C_p - C_{tissue} / Kp)")
+        all_terms.append("dA_central")
+        all_terms.append("dA_elim")
+        lemmas.append(
+            " + ".join(all_terms) + " = 0"
+        )
 
     return lemmas
 
