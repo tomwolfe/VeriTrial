@@ -9,7 +9,7 @@ help:
 	@echo "  test-cov     - Run tests with coverage"
 	@echo "  demo-small   - Run 100-patient fast validation demo"
 	@echo "  demo         - Run 1000-patient full SAD/MAD simulation"
-	@echo "  validate     - Run benchmark harness (Warfarin + Moxifloxacin)"
+	@echo "  validate     - Run benchmark harness (Warfarin + Moxifloxacin + Midazolam + Metformin)"
 	@echo "  formal-gate  - Run QED formal verification gate (portable)"
 	@echo "  benchmark    - Hardware acceleration comparison"
 	@echo "  report       - Generate HTML/Markdown validation report"

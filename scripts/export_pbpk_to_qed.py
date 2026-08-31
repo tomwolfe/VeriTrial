@@ -486,7 +486,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "require Mathlib (field_simp/ring). Do NOT enable in "
                              "a Mathlib-free environment: QED cannot prove them "
                              "there, which would fail the enforced gate.")
+    parser.add_argument("--symbolic", action="store_true", default=False,
+                        help="Alias for --ode-lemmas. Emit symbolic lemmas "
+                             "(requires Mathlib) in addition to numeric witnesses.")
     args = parser.parse_args(argv)
+
+    # --symbolic is an alias for --ode-lemmas
+    include_ode = args.ode_lemmas or args.symbolic
 
     model_path = args.model or _default_model_path()
     if not model_path.is_file():
@@ -504,7 +510,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     try:
-        lemmas = build_lemmas(model_path, include_ode_lemmas=args.ode_lemmas)
+        lemmas = build_lemmas(model_path, include_ode_lemmas=include_ode)
     except Exception as e:  # noqa: BLE001
         print(f"failed to export lemmas: {e}", file=sys.stderr)
         return 1

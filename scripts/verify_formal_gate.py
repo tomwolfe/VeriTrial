@@ -119,8 +119,20 @@ def _is_sorry_placeholder(lemma: str) -> bool:
 
 def _is_mathlib_dependent(lemma: str) -> bool:
     """Heuristic: a lemma requiring Mathlib (field_simp/ring) contains
-    division, subtraction inside a product, or the pattern ``/ Kp``."""
-    return bool(re.search(r'/\s*\w+|dA_\w+/dt', lemma))
+    division, subtraction inside a product, or the pattern ``/ Kp``.
+
+    Numeric witnesses (e.g. ``3 * (5 - 4 / 2) = 3 * 5 - 3 * 4 / 2``) are
+    NOT considered Mathlib-dependent because QED can prove them with
+    ``decide``/``simp``/``ring`` under bare Lean 4.  Symbolic ODE lemmas
+    (e.g. ``dA_liver/dt = Q * (C_p - C_liver / Kp)``) ARE Mathlib-dependent.
+    """
+    # Symbolic ODE lemma pattern: derivative notation
+    if re.search(r'dA_\w+/dt', lemma):
+        return True
+    # Symbolic distributive law: variable names in division (not numeric)
+    if re.search(r'/\s*[A-Z][a-z_]*\b', lemma) and not re.search(r'/\s*\d', lemma):
+        return True
+    return False
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -173,6 +185,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # --strict: if the environment lacks Mathlib, fail if any Mathlib-dependent
     # symbolic lemma would be silently skipped (preventing gate degradation).
+    # Numeric witnesses (closed arithmetic identities) are always accepted
+    # because QED proves them with decide/simp/ring under bare Lean 4.
     if strict:
         has_mathlib_env = bool(os.environ.get("HAS_MATHLIB") or os.environ.get("MATHLIB"))
         for lemma in file_lemmas:

@@ -16,6 +16,8 @@ tool does **not** yet support.
 | CYP2C9 genotype → AUC ordering reproduced (EM > IM > PM) | corr(activity_score, log AUCinf) = −0.84; IM/EM AUC ratio = 1.49 |
 | Reference-subject warfarin t½ reproduced | 37 h vs 38 h reference (±25%) |
 | Moxifloxacin QTc exposure-response reproduced | ΔQTc 15.0 / 25.0 ms at 400 / 800 mg (±3 ms) |
+| Midazolam CYP3A4: EM CL/F ≈ 12 L/h, PM/EM AUC ratio > 2 | `validate_midazolam_cyp3a4` — within ±30% CL/F, ratio ≥ 2.0 |
+| Metformin renal: CL/F at eGFR≈90 ≈ 35 L/h, eGFR–CL corr > 0.5 | `validate_metformin_renal` — within ±30% CL/F, corr confirmed |
 | PBPK mass balance | < 1e-7 error across patient cohorts |
 
 ## Known limitations & gaps
@@ -64,14 +66,14 @@ tool does **not** yet support.
 - **Gap closure**: Integrate a mechanistic mitochondrial-toxicity prior when
   compound-specific in vitro data (e.g., Seahorse stress test) is available.
 
-### G5. No true Bayesian posterior in the trial run
-- **Status**: `stats.calibrate_pk_1comp` runs a NumPyro NUTS fit, but the
-  trial engine uses deterministic NCA + normal-approx uncertainty, not a
-  full Bayesian posterior predictive over PK parameters.
-- **Mitigation**: Per-cohort credible intervals are normal-approx on observed
-  CL/F/AUC.
-- **Gap closure**: Swap the NCA point estimates with a pre-calibrated posterior
-  (from `calibrate_pk_1comp`) propagated through the cohort generator.
+### G5. No true Bayesian posterior in the trial run (CLOSED)
+- **Status**: `stats.calibrate_pk_1comp` runs a NumPyro NUTS fit, and the
+  trial engine now propagates posterior CL/V samples via
+  `stats.posterior_predictive_pk` when `posterior_samples` is provided.
+  Falls back to empirical percentiles when no posterior is available.
+- **Evidence**: `test_bayesian_ci_wider_than_normal` in `tests/test_engine.py`
+  verifies that Bayesian credible intervals are produced and are at least as
+  wide as normal-approx intervals.
 
 ### G6. Population: US generalizable, not disease-specific
 - **Status**: Cohorts are drawn from NHANES-style age/weight/BMI/eGFR priors
@@ -80,10 +82,13 @@ tool does **not** yet support.
 - **Gap closure**: Add disease cohort configs (e.g., moderate hepatic
   impairment Child-Pugh B) with corresponding `egfr_scale`/CL scaling rules.
 
-### G7. Limited validation set
-- **Status**: Two benchmarks (warfarin PGx, moxifloxacin QTc).
-- **Gap closure**: Add midazolam (CYP3A4 probe), metformin (renal), and a
-  small molecule with known DDI to broaden the V&V envelope.
+### G7. Limited validation set (CLOSED)
+- **Status**: Four benchmarks (warfarin PGx, moxifloxacin QTc, midazolam
+  CYP3A4, metformin renal) — validated 2026-08-30.
+- **Evidence**: `validate_midazolam_cyp3a4` verifies CL/F within ±30% of 12 L/h
+  and PM/EM AUC ratio ≥ 2.0. `validate_metformin_renal` verifies CL/F at
+  eGFR≈90 within ±30% of 35 L/h and eGFR–CL/F correlation > 0.5. Both are
+  called in `run_all_validations()` and emitted by `make validate`.
 
 ## Credibility argument mapping (ASME V&V 40)
 
@@ -96,8 +101,8 @@ tool does **not** yet support.
 | Data & calibration | Reference subjects + public benchmarks (warfarin, moxifloxacin); Emax/EC50 calibrated (`configs/`) |
 | Verification | `make test` (unit), `make typecheck`, `make lint`; NCA + escalation + safety tests |
 | Validation | `make validate` produces `output/validation/` benchmarks with pass/fail |
-| Uncertainty quantification | Per-cohort normal-approx CIs on CL/F & AUC; sensitivity via `benchmark` |
-| Propagating uncertainty | Cohort-level → summary-level means/std; full posterior pending (§G5) |
+| Uncertainty quantification | Per-cohort Bayesian posterior-predictive CIs on CL/F & AUC (or normal-approx fallback) |
+| Propagating uncertainty | Posterior CL/V → cohort generator → credible intervals; full posterior propagated (§G5 closed) |
 
 ## Definition of Done (current)
 
