@@ -92,6 +92,16 @@ class Drug(BaseModel):
     dili_emax_bili: float = Field(default=1.2, description="Max bilirubin multiple over baseline", ge=0.0)
     dili_ec50_bili: float = Field(default=12.0, description="Liver exposure (AUC, mg*h/L) for half-max bilirubin")
 
+    # QSP DILI parameters (optional; when absent, assess_dili uses empirical proxy)
+    vmax_metabolic: float = Field(default=0.0, description="Max metabolic rate for QSP DILI model (mg/h)", ge=0.0)
+    km_metabolic: float = Field(default=0.0, description="Michaelis constant for metabolic activation (mg/L)", ge=0.0)
+    gsh_depletion_rate: float = Field(default=0.0, description="GSH depletion rate constant for QSP model (L/mg/h)", ge=0.0)
+
+    @property
+    def has_qsp_dili_params(self) -> bool:
+        """True if QSP DILI parameters are set (non-zero)."""
+        return self.vmax_metabolic > 0.0 or self.km_metabolic > 0.0 or self.gsh_depletion_rate > 0.0
+
     @field_validator("pka", mode="before")
     @classmethod
     def validate_pka(cls, v: Any) -> list[float]:

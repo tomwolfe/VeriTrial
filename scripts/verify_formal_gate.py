@@ -46,7 +46,7 @@ def _veritrial_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _live_model_lemmas(include_ode: bool = False) -> list[str]:
+def _live_model_lemmas(include_ode: bool = False, parametric: bool = False) -> list[str]:
     """The single source of truth: lemmas ``export_pbpk_to_qed.build_lemmas``
     emits from the CURRENT PBPK model source (``src/insilico_trial/pbpk/model.py``).
 
@@ -62,7 +62,8 @@ def _live_model_lemmas(include_ode: bool = False) -> list[str]:
     model_path = (
         _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
     )
-    return ex.build_lemmas(model_path, include_ode_lemmas=include_ode)
+    return ex.build_lemmas(model_path, include_ode_lemmas=include_ode,
+                           parametric=parametric)
 
 
 def _check_single_source(lemmas_file: Path) -> list[str]:
@@ -73,8 +74,27 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
 
     Returns the parsed lemma lines on success; never returns on drift.
     """
+    file_lemmas = [
+        line.strip() for line in lemmas_file.read_text().splitlines()
+        if line.strip()
+    ]
+
+    # Detect if the file contains a parametric lemma.  The parametric
+    # mass-conservation sum is identified by containing a division with a
+    # symbolic denominator (e.g. "/ Kp") that is NOT a numeric witness.
+    # Simple numeric witnesses like "3 * (5 - 4 / 2) = 3 * 5 - 3 * 4 / 2"
+    # have only integer operands in the division.
+    has_parametric = False
+    for lemma in file_lemmas:
+        # Parametric lemma: symbolic division (variable denominator)
+        if re.search(r'/\s*[A-Za-z_]\w*\b', lemma) and not re.search(r'/\s*\d', lemma):
+            # Check it's not already a numeric witness (all tokens are numbers/operators)
+            if re.search(r'[A-Za-z_]\w*\b', re.sub(r'=.*', '', lemma)):
+                has_parametric = True
+                break
+
     try:
-        emitted = _live_model_lemmas()
+        emitted = _live_model_lemmas(parametric=has_parametric)
     except Exception as e:  # noqa: BLE001
         print(
             "FORMAL GATE FAILED (fail-closed): could not derive required "
@@ -83,10 +103,6 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
         )
         raise SystemExit(1)
 
-    file_lemmas = [
-        line.strip() for line in lemmas_file.read_text().splitlines()
-        if line.strip()
-    ]
     if not emitted:
         print(
             "FORMAL GATE FAILED (fail-closed): the live PBPK model emits no "
