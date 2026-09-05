@@ -25,6 +25,8 @@ environment lacks Mathlib, preventing silent gate degradation.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -46,7 +48,7 @@ def _veritrial_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _live_model_lemmas(include_ode: bool = False, parametric: bool = False) -> list[str]:
+def _live_model_lemmas(include_ode: bool = False, parametric: bool = True) -> list[str]:
     """The single source of truth: lemmas ``export_pbpk_to_qed.build_lemmas``
     emits from the CURRENT PBPK model source (``src/insilico_trial/pbpk/model.py``).
 
@@ -271,6 +273,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Record SHA-256 hashes of the verified lemma content into qed_traces.json
+    traces_path = _veritrial_root() / "output" / "validation" / "qed_traces.json"
+    traces_path.parent.mkdir(parents=True, exist_ok=True)
+    lemma_hashes = {}
+    for lemma in file_lemmas:
+        h = hashlib.sha256(lemma.encode("utf-8")).hexdigest()
+        lemma_hashes[h[:16]] = {
+            "lemma": lemma,
+            "sha256": h,
+            "verified": True,
+        }
+    traces = {
+        "lemmas_file": str(lemmas_file),
+        "n_lemmas": len(file_lemmas),
+        "verified": True,
+        "strict": strict,
+        "traces": lemma_hashes,
+    }
+    traces_path.write_text(json.dumps(traces, indent=2) + "\n", encoding="utf-8")
+    print(f"SHA-256 traces written to {traces_path}")
 
     print("FORMAL GATE PASSED: all required PBPK lemmas verified by QED (no sorry).")
     return 0

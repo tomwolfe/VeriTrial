@@ -1,6 +1,13 @@
 % VeriTrial PBPK Mass Conservation Theorems (QED-compatible)
 % These theorems verify that the pbpk_ode system satisfies
 % mass conservation and correct perfusion-limited kinetics.
+%
+% PRIMARY FORMAL GATE: Lemma 3c (Parametric mass-conservation identity)
+% Lemma 3c supersedes the numeric witnesses of Lemma 3b as the PRIMARY
+% formal verification criterion. The parametric identity is proved by
+% field_simp/ring over [Field R] in Lean 4 with Mathlib, making it a
+% fully general proof that holds for ALL positive parameter values,
+% not just a single reference point.
 
 % ---------------------------------------------------------------------------
 % Lemma 1: Gut compartment first-order absorption
@@ -76,6 +83,7 @@ A_gut + A_liver + A_central + A_periph + A_effect + A_elim
 
 % ---------------------------------------------------------------------------
 % Lemma 3c: PARAMETRIC mass-conservation identity (requires Mathlib)
+% *** PRIMARY FORMAL GATE CRITERION ***
 % The sum of all compartment derivative RHS terms equals zero, expressed
 % with symbolic kinetic parameters (ka_rate, Q_liver, Kp_liver, etc.)
 % extracted directly from the PBPK ODE source via AST analysis.

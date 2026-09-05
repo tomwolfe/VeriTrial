@@ -414,6 +414,20 @@ class TrialEngine:
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
+        elif solver == "sdirk2":
+            # SDIRK2 implicit solver (pure JAX, no lineax): batch-solve
+            # via solve_implicit_batch which returns full state trajectories.
+            from insilico_trial.pbpk.solvers import solve_implicit_batch
+            from insilico_trial.pbpk.model import pbpk_ode as _pbpk_ode
+            from insilico_trial.pbpk.model import _LIVER_IDX as _LI
+
+            y0_batch = jnp.zeros((len(cohort_patients), 6), dtype=jnp.float64)
+            y0_batch = y0_batch.at[:, 0].set(jnp.asarray(A_gut_0s, dtype=jnp.float64))
+            t_eval_j = jnp.asarray(t_eval_hours, dtype=jnp.float64)
+            params_jax = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in params_batch.items()}
+            ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=0.01)
+            C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2], dtype=onp.float64)
+            C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI], dtype=onp.float64)
         else:
             # Diffrax Tsit5 (default): only returns C_p; derive C_liver via
             # single-patient re-solve when QSP DILI params are present.
@@ -498,6 +512,11 @@ class TrialEngine:
 
         if solver == "fixed_step":
             return self._solve_mad_batch_fixed_step(
+                t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list
+            )
+        elif solver == "sdirk2":
+            # SDIRK2 MAD: reuse fixed-step segment approach (event-driven dosing)
+            return self._solve_mad_segments_fixed_step(
                 t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list
             )
         else:
