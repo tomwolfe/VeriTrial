@@ -280,6 +280,7 @@ def determine_dlt(
     drug: Drug,
     thresholds: SafetyThresholds,
     patient_id: str,
+    qsp_params: dict[str, Any] | None = None,
 ) -> bool:
     """Determine whether a single patient experiences a DLT.
 
@@ -302,6 +303,7 @@ def determine_dlt(
         drug,
         alt_uln_mult=thresholds.alt_threshold,
         bili_uln_mult=thresholds.bilirubin_threshold,
+        qsp_params=qsp_params,
     )
 
     if qtc_results:
@@ -338,6 +340,7 @@ def run_safety_assessment(
     observations: list[Observation],
     drug: Drug,
     thresholds: SafetyThresholds | None = None,
+    qsp_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run full safety assessment (QTc + DILI) on a population."""
     from insilico_trial.schemas import SafetyThresholds as _ST
@@ -352,6 +355,7 @@ def run_safety_assessment(
         observations, drug,
         alt_uln_mult=thresh.alt_threshold,
         bili_uln_mult=thresh.bilirubin_threshold,
+        qsp_params=qsp_params,
     )
 
     n_qtc_60ms = sum(1 for r in qtc_results if r.flag_qtc_60ms_delta)

@@ -133,6 +133,30 @@ def _is_sorry_placeholder(lemma: str) -> bool:
     return bool(re.search(r'\bsorry\b|\bsorryAx\b', lemma))
 
 
+def _detect_mathlib_env() -> bool:
+    """Detect whether the QED environment has Mathlib available.
+
+    Checks (in order):
+      1. HAS_MATHLIB / MATHLIB environment variables (explicit override).
+      2. Presence of QED/lakefile.lean (hermetic Lake build).
+      3. QED's agentic_pipeline reports use_mathlib=True.
+    """
+    if os.environ.get("HAS_MATHLIB") or os.environ.get("MATHLIB"):
+        return True
+    qed = qed_dir()
+    if (qed / "lakefile.lean").exists():
+        return True
+    # Fallback: try importing the pipeline and checking use_mathlib.
+    try:
+        if str(qed) not in sys.path:
+            sys.path.insert(0, str(qed))
+        from agentic_pipeline import LeanAgenticPipeline  # type: ignore
+        p = LeanAgenticPipeline(use_mathlib=True)
+        return p.use_mathlib
+    except Exception:
+        return False
+
+
 def _is_mathlib_dependent(lemma: str) -> bool:
     """Heuristic: a lemma requiring Mathlib (field_simp/ring) contains
     division, subtraction inside a product, or the pattern ``/ Kp``.
@@ -204,7 +228,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Numeric witnesses (closed arithmetic identities) are always accepted
     # because QED proves them with decide/simp/ring under bare Lean 4.
     if strict:
-        has_mathlib_env = bool(os.environ.get("HAS_MATHLIB") or os.environ.get("MATHLIB"))
+        has_mathlib_env = _detect_mathlib_env()
         for lemma in file_lemmas:
             if _is_mathlib_dependent(lemma) and "dA_" in lemma:
                 # This is a symbolic ODE lemma (e.g. dA_liver/dt = Q * (...))

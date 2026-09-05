@@ -20,6 +20,7 @@ Design guarantees (mission requirement C -- FAIL CLOSED):
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -94,9 +95,18 @@ def _classify_proof_type(result: dict[str, Any]) -> str:
         return "rfl"
     if tactic in ("decide", "simp", "norm_num"):
         return "decide"
-    if tactic in ("field_simp", "ring", "linarith", "dsimp", "intro"):
+    if tactic in ("field_simp", "ring", "ring_nf", "linarith", "dsimp", "intro"):
+        return "field_simp; ring"
+    # Parameterized simp (e.g. "simp [mul_sub, mul_div_assoc]") is a
+    # Mathlib-backed field/algebraic proof.
+    if tactic.startswith("simp ["):
         return "field_simp; ring"
     return "unknown"
+
+
+def _lean_code_sha256(lean_code: str) -> str:
+    """Compute SHA-256 hash of verified Lean proof source code."""
+    return hashlib.sha256(lean_code.encode("utf-8")).hexdigest()
 
 
 def required_lemmas(model_path: Optional[Path] = None) -> List[str]:
@@ -245,10 +255,22 @@ def _write_trail(
     lemmas: list[str],
     attempts: Optional[list[dict[str, Any]]] = None,
 ) -> None:
-    """Write the audit trail to a portable path (never a machine-specific one)."""
+    """Write the audit trail to a portable path (never a machine-specific one).
+
+    Includes SHA-256 hashes of verified Lean proof source code for
+    tamper-evident certification under ASME V&V 40.
+    """
     trail_path = _trace_path()
     try:
         trail_path.parent.mkdir(parents=True, exist_ok=True)
+        # Compute SHA-256 hashes for each verified lemma's Lean code
+        lean_hashes: dict[str, str] = {}
+        if attempts:
+            for attempt in attempts:
+                if attempt.get("success") and attempt.get("lean_code"):
+                    lemma = attempt.get("lemma", "")
+                    lean_hashes[lemma] = _lean_code_sha256(attempt["lean_code"])
+
         trail_data = {
             "formal_verification": {
                 "qed_dir": str(_qed_dir()),
@@ -256,6 +278,7 @@ def _write_trail(
                 "verified": results.get("verified_lemmas", []),
                 "failed": results.get("failed_lemmas", []),
                 "attempts": attempts or [],
+                "lean_code_sha256": lean_hashes,
                 "trail_summary": results.get("trail_summary", ""),
             }
         }

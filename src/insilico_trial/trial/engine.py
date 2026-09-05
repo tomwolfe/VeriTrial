@@ -247,10 +247,11 @@ class TrialEngine:
                     cohort_patients, administered_doses,
                     solver=self.protocol.solver,
                 )
+                C_liver_batch = onp.zeros_like(C_batch)
             else:
                 # SAD: single dose
                 absorbed_doses = administered_doses * self.drug.bioavailability
-                t_eval_hours, C_batch = self._solve_cohort_batch(
+                t_eval_hours, C_batch, C_liver_batch = self._solve_cohort_batch(
                     cohort_patients, absorbed_doses,
                     solver=self.protocol.solver,
                 )
@@ -262,6 +263,7 @@ class TrialEngine:
                 patient_result = self._evaluate_patient(
                     patient, rng, t_eval_hours, C_batch[pi],
                     float(administered_doses[pi]), gs,
+                    C_liver=C_liver_batch[pi] if C_liver_batch is not None else None,
                 )
                 all_observations.extend(patient_result["observations"])
                 all_patient_pk[patient.id] = patient_result["pk_summary"]
@@ -374,13 +376,14 @@ class TrialEngine:
     def _solve_cohort_batch(
         self, cohort_patients: list[Patient], administered_doses: onp.ndarray,
         solver: str = "diffrax",
-    ) -> tuple[onp.ndarray, onp.ndarray]:
+    ) -> tuple[onp.ndarray, onp.ndarray, onp.ndarray]:
         """Batch-solve the dense PK profiles for a whole cohort at once.
 
         Returns
         -------
         t_eval_hours : ndarray (n_time,)
         C_batch : ndarray (n_patients, n_time)   plasma concentrations (mg/L)
+        C_liver_batch : ndarray (n_patients, n_time)  liver concentrations (mg/L)
         """
         t_end_h = float(self.protocol.observation_period_days * 24)
         t_eval_hours = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
@@ -395,34 +398,50 @@ class TrialEngine:
             for p in cohort_patients
         ]
 
+        params_batch = {
+            "Q": onp.stack([p["Q"] for p in params_list]),
+            "V": onp.stack([p["V"] for p in params_list]),
+            "Kp": onp.stack([p["Kp"] for p in params_list]),
+            "CL": onp.array([p["CL"] for p in params_list]),
+            "ka": onp.array([p["ka"] for p in params_list]),
+        }
+        A_gut_0s = administered_doses * self.drug.bioavailability
+
         if solver == "fixed_step":
-            # Fixed-step RK4 batch solve: vmap over solve_pbpk_batch_fixed_step
-            params_batch = {
-                "Q": onp.stack([p["Q"] for p in params_list]),
-                "V": onp.stack([p["V"] for p in params_list]),
-                "Kp": onp.stack([p["Kp"] for p in params_list]),
-                "CL": onp.array([p["CL"] for p in params_list]),
-                "ka": onp.array([p["ka"] for p in params_list]),
-            }
-            A_gut_0s = administered_doses * self.drug.bioavailability
-            C_batch = onp.asarray(
-                solve_pbpk_batch_fixed_step(t_eval_hours, A_gut_0s, params_batch, dt=0.01),
-                dtype=onp.float64,
+            # Fixed-step RK4: return both plasma and liver concentrations
+            C_batch, C_liver_batch = solve_pbpk_batch_with_compartments(
+                t_eval_hours, A_gut_0s, params_batch, dt=0.01,
             )
+            C_batch = onp.asarray(C_batch, dtype=onp.float64)
+            C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
         else:
-            # Diffrax Tsit5 (default)
-            params_batch = {
-                "Q": onp.stack([p["Q"] for p in params_list]),
-                "V": onp.stack([p["V"] for p in params_list]),
-                "Kp": onp.stack([p["Kp"] for p in params_list]),
-                "CL": onp.array([p["CL"] for p in params_list]),
-                "ka": onp.array([p["ka"] for p in params_list]),
-            }
+            # Diffrax Tsit5 (default): only returns C_p; derive C_liver via
+            # single-patient re-solve when QSP DILI params are present.
             C_batch = onp.asarray(
                 solve_pbpk_batch(t_eval_hours, administered_doses, params_batch),
                 dtype=onp.float64,
             )
-        return t_eval_hours, C_batch
+            if self.drug.has_qsp_dili_params:
+                # Re-solve per patient to extract liver concentrations
+                C_liver_list = []
+                for pi, patient in enumerate(cohort_patients):
+                    from insilico_trial.pbpk.model import _LIVER_IDX, build_pbpk_params as _bpp
+                    p = _bpp(
+                        weight_kg=patient.biometrics.weight,
+                        age=patient.biometrics.age,
+                        drug=self.drug,
+                        genotype_scale=self._genotype_scale(patient),
+                    )
+                    from insilico_trial.pbpk.fixed_step import solve_pbpk_fixed_step as _sfp
+                    y_traj = _sfp(t_eval_hours, float(A_gut_0s[pi]), p, dt=0.01)
+                    # y_traj is (n_time, n_state); liver is index 1
+                    v_liver = p["V"][_LIVER_IDX]
+                    c_liver = onp.asarray(y_traj[:, _LIVER_IDX] / v_liver, dtype=onp.float64)
+                    C_liver_list.append(c_liver)
+                C_liver_batch = onp.stack(C_liver_list)
+            else:
+                C_liver_batch = onp.zeros_like(C_batch)
+        return t_eval_hours, C_batch, C_liver_batch
 
     def _get_dosing_events(self) -> list[DosingEvent]:
         """Get dosing events for MAD, auto-generating if not provided."""
@@ -509,8 +528,6 @@ class TrialEngine:
         params_list: list[dict[str, Any]],
     ) -> tuple[onp.ndarray, onp.ndarray]:
         """Solve MAD by chaining fixed-step segments between dosing events."""
-        from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
-
         n_patients = len(cohort_patients)
         dt = 0.01
 
@@ -634,6 +651,7 @@ class TrialEngine:
         self, patient: Patient, rng: onp.random.Generator,
         t_eval_hours: onp.ndarray, C_p: onp.ndarray,
         administered_dose: float, genotype_scale: float,
+        C_liver: onp.ndarray | None = None,
     ) -> dict[str, Any]:
         """NCA + visit noise + DIL/DLT for a single patient's profile."""
         # Smooth-profile NCA on the dense grid.
@@ -645,8 +663,20 @@ class TrialEngine:
             patient.id, t_eval_hours, C_p, rng, administered_dose, pk_summary
         )
 
+        # Construct QSP DILI params from liver concentration profile
+        # when the drug has mechanistic DILI parameters.
+        qsp_params: dict[str, Any] | None = None
+        if self.drug.has_qsp_dili_params and C_liver is not None:
+            qsp_params = {
+                "t_eval": t_eval_hours.tolist(),
+                "C_liver_profile": C_liver.tolist(),
+            }
+
         # DLT determination integrates QTc, DILI, and CTCAE.
-        has_dlt = determine_dlt(observations, self.drug, self.protocol.safety, patient.id)
+        has_dlt = determine_dlt(
+            observations, self.drug, self.protocol.safety, patient.id,
+            qsp_params=qsp_params,
+        )
 
         return {
             "observations": observations,
