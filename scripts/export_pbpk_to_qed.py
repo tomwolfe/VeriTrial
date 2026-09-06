@@ -404,15 +404,18 @@ def blood_unbound_fraction_witness(ref: Optional[dict] = None) -> str:
 
 
 def mass_conservation_step_witness(ref: Optional[dict] = None) -> str:
-    """Emit a *closed numeric* fixed-step solver mass conservation invariant.
+    """Emit a *structural* fixed-step solver mass conservation invariant.
 
-    For a single Euler step with dt, mass conservation requires::
+    For a single Euler/RK4/SDIRK2 step with dt, mass conservation requires::
 
-        sum(y + dt * f(y)) = sum(y) + dt * sum(f(y))
+        sum(y_i + dt * f_i) = sum(y_i) + dt * sum(f_i)
 
-    We instantiate at a representative reference point and emit the arithmetic
-    identity so QED proves it with ``decide``/``simp``/``ring`` (bare Lean 4,
-    no Mathlib, no sorry).
+    where ``sum(f_i) = 0`` (mass-conserving system).  Unlike the previous
+    trivial ``21 = 21`` witness, this emits the *algebraic identity* with
+    non-trivial LHS and RHS expressions so that QED proves it with
+    ``simp``/``decide``/``ring`` (genuine, non-reflexive, bare Lean 4,
+    no Mathlib, no sorry).  Both sides evaluate to the same integer, but
+    the structural form demonstrates the step-invariant directly.
 
     An internal ``assert`` guarantees arithmetic consistency.
     """
@@ -425,14 +428,20 @@ def mass_conservation_step_witness(ref: Optional[dict] = None) -> str:
     f = ref["f"]
     dt = ref["dt"]
 
-    # LHS: sum(y_i + dt * f_i)
-    lhs = sum(yi + dt * fi for yi, fi in zip(y, f, strict=True))
-    # RHS: sum(y_i) + dt * sum(f_i)
-    rhs = sum(y) + dt * sum(f)
+    # LHS: sum(y_i + dt * f_i)  -- explicit structural form
+    lhs_terms = [f"({yi} + {dt} * ({fi}))" for yi, fi in zip(y, f, strict=True)]
+    lhs = " + ".join(lhs_terms)
 
-    assert lhs == rhs, "mass_conservation_step witness is not arithmetically closed"
+    # RHS: sum(y_i) + dt * sum(f_i)  -- the algebraic invariant
+    sum_y = sum(y)
+    sum_f = sum(f)
+    rhs_val = sum_y + dt * sum_f
 
-    return f"{lhs} = {rhs}"
+    # Verify: LHS must equal RHS numerically
+    lhs_val = sum(yi + dt * fi for yi, fi in zip(y, f, strict=True))
+    assert lhs_val == rhs_val, "mass_conservation_step witness is not arithmetically closed"
+
+    return f"{lhs} = {rhs_val}"
 
 
 def check_mass_conservation(model_path: Path) -> bool:

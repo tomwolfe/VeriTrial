@@ -407,14 +407,21 @@ class TrialEngine:
         }
         A_gut_0s = administered_doses * self.drug.bioavailability
 
-        if solver == "fixed_step":
+        # When QSP DILI params are present, force fixed_step or sdirk2 solver
+        # to get liver concentrations directly from the batch solve (avoids
+        # expensive per-patient diffrax re-solve for C_liver extraction).
+        effective_solver = solver
+        if self.drug.has_qsp_dili_params and solver == "diffrax":
+            effective_solver = "fixed_step"
+
+        if effective_solver == "fixed_step":
             # Fixed-step RK4: return both plasma and liver concentrations
             C_batch, C_liver_batch = solve_pbpk_batch_with_compartments(
                 t_eval_hours, A_gut_0s, params_batch, dt=0.01,
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
-        elif solver == "sdirk2":
+        elif effective_solver == "sdirk2":
             # SDIRK2 implicit solver (pure JAX, no lineax): batch-solve
             # via solve_implicit_batch which returns full state trajectories.
             from insilico_trial.pbpk.solvers import solve_implicit_batch
@@ -431,6 +438,8 @@ class TrialEngine:
         else:
             # Diffrax Tsit5 (default): only returns C_p; derive C_liver via
             # single-patient re-solve when QSP DILI params are present.
+            # NOTE: this path is avoided when drug.has_qsp_dili_params is True
+            # (effective_solver is overridden to fixed_step above).
             C_batch = onp.asarray(
                 solve_pbpk_batch(t_eval_hours, administered_doses, params_batch),
                 dtype=onp.float64,
