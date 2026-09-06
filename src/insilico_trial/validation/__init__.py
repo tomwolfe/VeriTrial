@@ -665,6 +665,7 @@ def generate_vvv40_report(
     mq = validation_results.get("moxifloxacin_qtc", {})
     mm = validation_results.get("midazolam_cyp3a4", {})
     metro = validation_results.get("metformin_renal", {})
+    hepatic = validation_results.get("hepatic_impairment", {})
     formal = validation_results.get("formal_verification", {})
 
     # Compute per-lemma proof hashes for the audit trail.
@@ -687,6 +688,7 @@ def generate_vvv40_report(
             "moxifloxacin_qtc_pass": mq.get("overall_pass", False),
             "midazolam_cyp3a4_pass": mm.get("overall_pass", False),
             "metformin_renal_pass": metro.get("overall_pass", False),
+            "hepatic_impairment_pass": hepatic.get("overall_pass", False),
             "formal_verification_pass": formal_gate_pass,
         },
         "provenance": {
@@ -756,6 +758,21 @@ def generate_vvv40_report(
         ]
     )
 
+    hepatic_rows = "".join(
+        f"""<tr><td>{label}</td><td>{ref}</td><td>{obs}</td>{_pass_cell(pass_)}</tr>"""
+        for label, ref, obs, pass_ in [
+            ("CL/F reduction (%)", f"{HEPATIC_IMPAIRMENT_REFERENCE['expected_cl_reduction_pct']:.1f}%",
+             f"{hepatic.get('observed_cl_reduction_pct', 'N/A'):.1f}%" if hepatic.get("observed_cl_reduction_pct") is not None else "N/A",
+             hepatic.get("cl_within_tolerance", False)),
+            ("Normal CL/F (L/h)", "reference",
+             f"{hepatic.get('normal_CL_F_mean_Lh', 'N/A'):.4f}" if hepatic.get("normal_CL_F_mean_Lh") is not None else "N/A",
+             True),
+            ("Hepatic CL/F (L/h)", "reduced",
+             f"{hepatic.get('hepatic_CL_F_mean_Lh', 'N/A'):.4f}" if hepatic.get("hepatic_CL_F_mean_Lh") is not None else "N/A",
+             hepatic.get("cl_within_tolerance", False)),
+        ]
+    )
+
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -804,6 +821,12 @@ def generate_vvv40_report(
         {mq_rows}
     </table>
 
+    <h3>Hepatic Impairment Validation</h3>
+    <table>
+        <tr><th>Metric</th><th>Reference</th><th>Observed</th><th>Status</th></tr>
+        {hepatic_rows}
+    </table>
+
     <h3>Formal Verification (QED / Lean 4)</h3>
     <p><strong>Status:</strong> <span class="{"pass" if formal_gate_pass else "fail"}">{"PASS" if formal_gate_pass else "FAIL"}</span></p>
     <p><strong>Lemmas verified:</strong> {formal_n_verified}</p>
@@ -817,6 +840,7 @@ def generate_vvv40_report(
         <li>Midazolam CYP3A4 Validation: {'PASS' if mm.get('overall_pass') else 'FAIL'}</li>
         <li>Metformin Renal Validation: {'PASS' if metro.get('overall_pass') else 'FAIL'}</li>
         <li>Moxifloxacin QTc Validation: {'PASS' if mq.get('overall_pass') else 'FAIL'}</li>
+        <li>Hepatic Impairment Validation: {'PASS' if hepatic.get('overall_pass') else 'FAIL'}</li>
         <li>Formal Verification: {'PASS' if formal_gate_pass else 'FAIL'}</li>
     </ul>
 
@@ -839,6 +863,156 @@ def generate_vvv40_report(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark: Hepatic Impairment (Warfarin)
+# ---------------------------------------------------------------------------
+
+# Hepatic impairment reference: moderate (Child-Pugh B) reduces CL/F by ~40%.
+# The population_hepatic_impairment.yaml uses egfr_scale=0.6 which scales
+# clearance to ~60% of normal.  We validate that simulated CL/F in the
+# hepatic-impaired population is within ±30% of the expected reduction.
+HEPATIC_IMPAIRMENT_REFERENCE = {
+    "expected_cl_reduction_pct": 40.0,  # expected ~40% decrease vs normal
+    "cl_tolerance_pct": 30.0,           # within ±30% of expected reduction
+}
+
+
+def validate_hepatic_impairment(
+    n_patients: int = 100,
+    seed: int = 42,
+    dose_mg: float = 10.0,
+) -> dict[str, Any]:
+    """Validate hepatic impairment simulation against normal-population reference.
+
+    Generates a hepatic-impaired virtual population (Child-Pugh B), simulates
+    a single oral dose of warfarin, and verifies that CL/F is reduced by
+    approximately 40% compared to the normal-population CL/F.
+
+    Validation criteria:
+    - Mean CL/F in hepatic-impaired population within ±30% of expected reduction
+      (~40% decrease vs normal, i.e. CL/F_hepatic ≈ 0.6 * CL/F_normal).
+    """
+    drug = load_drug_config("configs/drug_warfarin.yaml")
+
+    # --- Normal population reference CL/F ---
+    pop_normal = load_population_config("configs/population_default.yaml")
+    pop_normal["name"] = "hepatic_reference_normal"
+    pop_normal["n_subjects"] = n_patients
+    pop_normal["seed"] = seed
+    df_normal, _ = generate_population(pop_normal)
+
+    t_eval = onp.linspace(0.0, 7.0 * 24.0, 7 * 24)
+    n_normal = len(df_normal)
+    absorbed_dose_normal = dose_mg * drug.bioavailability
+
+    params_normal = []
+    for _, row in df_normal.iterrows():
+        params_normal.append(
+            build_pbpk_params(
+                weight_kg=float(row["weight_kg"]),
+                age=float(row["age"]),
+                drug=drug,
+                genotype_scale=1.0,
+            )
+        )
+    batch_normal = {
+        "Q": onp.stack([p["Q"] for p in params_normal], axis=0),
+        "V": onp.stack([p["V"] for p in params_normal], axis=0),
+        "Kp": onp.stack([p["Kp"] for p in params_normal], axis=0),
+        "CL": onp.array([p["CL"] for p in params_normal]),
+        "ka": onp.array([p["ka"] for p in params_normal]),
+    }
+    C_normal = onp.asarray(
+        solve_pbpk_batch(t_eval, onp.full(n_normal, absorbed_dose_normal), batch_normal)
+    )
+
+    cl_normal_vals = []
+    for i in range(n_normal):
+        obs = [
+            Observation(patient_id=str(i), time=float(t), compartment="plasma", concentration=float(c))
+            for t, c in zip(t_eval, C_normal[i], strict=True)
+        ]
+        pk = compute_nca(obs, dose=absorbed_dose_normal)
+        if pk["cl_f"] is not None:
+            cl_normal_vals.append(pk["cl_f"])
+    cl_normal_mean = float(onp.nanmean(cl_normal_vals)) if cl_normal_vals else float("nan")
+
+    # --- Hepatic-impaired population ---
+    pop_hepatic = load_population_config("configs/population_hepatic_impairment.yaml")
+    pop_hepatic["name"] = "hepatic_impairment"
+    pop_hepatic["n_subjects"] = n_patients
+    pop_hepatic["seed"] = seed
+    df_hepatic, _ = generate_population(pop_hepatic)
+
+    n_hepatic = len(df_hepatic)
+    absorbed_dose_hepatic = dose_mg * drug.bioavailability
+
+    params_hepatic = []
+    for _, row in df_hepatic.iterrows():
+        # Hepatic impairment uses egfr_scale from population config to reduce CL
+        egfr_scale = float(pop_hepatic.get("egfr_scale", 1.0))
+        params_hepatic.append(
+            build_pbpk_params(
+                weight_kg=float(row["weight_kg"]),
+                age=float(row["age"]),
+                drug=drug,
+                genotype_scale=1.0,
+                egfr_scale=egfr_scale,
+            )
+        )
+    batch_hepatic = {
+        "Q": onp.stack([p["Q"] for p in params_hepatic], axis=0),
+        "V": onp.stack([p["V"] for p in params_hepatic], axis=0),
+        "Kp": onp.stack([p["Kp"] for p in params_hepatic], axis=0),
+        "CL": onp.array([p["CL"] for p in params_hepatic]),
+        "ka": onp.array([p["ka"] for p in params_hepatic]),
+    }
+    C_hepatic = onp.asarray(
+        solve_pbpk_batch(t_eval, onp.full(n_hepatic, absorbed_dose_hepatic), batch_hepatic)
+    )
+
+    cl_hepatic_vals = []
+    for i in range(n_hepatic):
+        obs = [
+            Observation(patient_id=str(i), time=float(t), compartment="plasma", concentration=float(c))
+            for t, c in zip(t_eval, C_hepatic[i], strict=True)
+        ]
+        pk = compute_nca(obs, dose=absorbed_dose_hepatic)
+        if pk["cl_f"] is not None:
+            cl_hepatic_vals.append(pk["cl_f"])
+    cl_hepatic_mean = float(onp.nanmean(cl_hepatic_vals)) if cl_hepatic_vals else float("nan")
+
+    # --- Validation check ---
+    expected_reduction = HEPATIC_IMPAIRMENT_REFERENCE["expected_cl_reduction_pct"] / 100.0
+    expected_cl_hepatic = cl_normal_mean * (1.0 - expected_reduction)
+    tolerance = HEPATIC_IMPAIRMENT_REFERENCE["cl_tolerance_pct"] / 100.0
+
+    if expected_cl_hepatic > 0:
+        cl_reduction_pct = (cl_normal_mean - cl_hepatic_mean) / cl_normal_mean * 100.0
+        cl_pass = abs(cl_hepatic_mean - expected_cl_hepatic) / expected_cl_hepatic <= tolerance
+    else:
+        cl_reduction_pct = float("nan")
+        cl_pass = False
+
+    return {
+        "benchmark": "hepatic_impairment",
+        "n_patients": n_patients,
+        "seed": seed,
+        "dose_mg": dose_mg,
+        "normal_CL_F_mean_Lh": cl_normal_mean,
+        "hepatic_CL_F_mean_Lh": cl_hepatic_mean,
+        "observed_cl_reduction_pct": cl_reduction_pct,
+        "expected_cl_reduction_pct": HEPATIC_IMPAIRMENT_REFERENCE["expected_cl_reduction_pct"],
+        "cl_within_tolerance": cl_pass,
+        "overall_pass": bool(cl_pass),
+        "details": {
+            "egfr_scale": float(pop_hepatic.get("egfr_scale", 1.0)),
+            "n_normal": n_normal,
+            "n_hepatic": n_hepatic,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Convenience: run all validations
 # ---------------------------------------------------------------------------
 
@@ -854,12 +1028,14 @@ def run_all_validations(
     moxi_results = validate_moxifloxacin_qtc(n_patients=moxi_n, seed=moxi_seed)
     midaz_results = validate_midazolam_cyp3a4(n_patients=200, seed=warfarin_seed)
     metro_results = validate_metformin_renal(n_patients=200, seed=warfarin_seed)
+    hepatic_results = validate_hepatic_impairment(n_patients=100, seed=warfarin_seed)
 
     all_results = {
         "warfarin_pgx": warfarin_results,
         "moxifloxacin_qtc": moxi_results,
         "midazolam_cyp3a4": midaz_results,
         "metformin_renal": metro_results,
+        "hepatic_impairment": hepatic_results,
     }
 
     # Integrate formal verification from QED. ``formal_results`` carries an
@@ -926,10 +1102,12 @@ __all__ = [
     "MOXIFLOXACIN_REFERENCE",
     "MIDAZOLAM_REFERENCE",
     "METFORMIN_REFERENCE",
+    "HEPATIC_IMPAIRMENT_REFERENCE",
     "validate_warfarin_pgx",
     "validate_moxifloxacin_qtc",
     "validate_midazolam_cyp3a4",
     "validate_metformin_renal",
+    "validate_hepatic_impairment",
     "generate_vvv40_report",
     "run_all_validations",
     "run_formal_verification",

@@ -135,6 +135,17 @@ def _is_sorry_placeholder(lemma: str) -> bool:
     return bool(re.search(r'\bsorry\b|\bsorryAx\b', lemma))
 
 
+def _is_metzler_positivity(lemma: str) -> bool:
+    """Check whether a lemma is a Metzler off-diagonal positivity statement.
+
+    Metzler positivity lemmas assert that the off-diagonal flow coefficient
+    Q / (V * Kp) > 0 (or equivalently Q / Kp > 0) for each perfused
+    compartment.  These are REQUIRED for dynamical invariants and must not
+    be skipped or treated as optional.
+    """
+    return bool(re.search(r'Q\s*/\s*Kp\s*>\s*0', lemma))
+
+
 def _detect_mathlib_env() -> bool:
     """Detect whether the QED environment has Mathlib available.
 
@@ -212,6 +223,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Single-source-of-truth guard: the file must equal exactly what the live
     # PBPK model emits. Fail-closed on any drift.
     file_lemmas = _check_single_source(lemmas_file)
+
+    # Metzler positivity enforcement: the set of required lemmas MUST include
+    # at least one Metzler off-diagonal positivity assertion (Q / Kp > 0) for
+    # each perfused compartment.  These encode the dynamical invariant that
+    # the Jacobian of the PBPK ODE is a Metzler matrix, which is required
+    # for positivity preservation.  Their absence is a fail-closed error.
+    metzler_lemmas = [l for l in file_lemmas if _is_metzler_positivity(l)]
+    perfused = [
+        "liver", "periph", "effect",
+    ]  # compartments with perfusion-limited uptake
+    if len(metzler_lemmas) < len(perfused):
+        print(
+            "FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas "
+            f"are REQUIRED but only {len(metzler_lemmas)} found "
+            f"(expected >= {len(perfused)} for perfused compartments).",
+            file=sys.stderr,
+        )
+        return 1
 
     # Extra cheap fail-closed guard: never certify a lemma file that already
     # contains a sorry axiom placeholder (the model must be provable, not

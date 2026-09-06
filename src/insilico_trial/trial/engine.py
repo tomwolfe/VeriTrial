@@ -17,7 +17,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 
-from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
+from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step, solve_pbpk_batch_with_compartments
 from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single
 from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
@@ -426,8 +426,8 @@ class TrialEngine:
             t_eval_j = jnp.asarray(t_eval_hours, dtype=jnp.float64)
             params_jax = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in params_batch.items()}
             ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=0.01)
-            C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2], dtype=onp.float64)
-            C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI], dtype=onp.float64)
+            C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2:3], dtype=onp.float64)
+            C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI+1], dtype=onp.float64)
         else:
             # Diffrax Tsit5 (default): only returns C_p; derive C_liver via
             # single-patient re-solve when QSP DILI params are present.

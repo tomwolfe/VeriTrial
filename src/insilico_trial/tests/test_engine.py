@@ -320,3 +320,47 @@ def test_bayesian_ci_wider_than_normal():
         assert bayes_interval["median"] is not None
         assert normal_interval["median"] is not None
 
+
+def test_cohort_batch_returns_liver_fixed_step():
+    """_solve_cohort_batch with fixed_step must return C_liver_batch (no Diffrax fallback)."""
+    from insilico_trial.pbpk.model import build_pbpk_params
+    from insilico_trial.trial.engine import TrialEngine
+
+    drug = _make_drug()
+    protocol = _make_protocol(n_cohorts=1, cohort_size=5)
+    population = _make_population(5, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+
+    cohort_patients = population.patients[:5]
+    administered_doses = onp.array([10.0] * 5, dtype=onp.float64)
+
+    t_eval, C_batch, C_liver_batch = engine._solve_cohort_batch(
+        cohort_patients, administered_doses, solver="fixed_step",
+    )
+
+    assert C_batch.shape == (5, len(t_eval))
+    assert C_liver_batch.shape == (5, len(t_eval))
+    # Liver concentrations must not be all zeros for a non-Diffrax solver
+    assert onp.any(C_liver_batch > 0), "C_liver_batch should be non-zero for fixed_step solver"
+
+
+def test_cohort_batch_returns_liver_sdirk2():
+    """_solve_cohort_batch with sdirk2 must return C_liver_batch (no Diffrax fallback)."""
+    from insilico_trial.trial.engine import TrialEngine
+
+    drug = _make_drug()
+    protocol = _make_protocol(n_cohorts=1, cohort_size=5)
+    population = _make_population(5, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+
+    cohort_patients = population.patients[:5]
+    administered_doses = onp.array([10.0] * 5, dtype=onp.float64)
+
+    t_eval, C_batch, C_liver_batch = engine._solve_cohort_batch(
+        cohort_patients, administered_doses, solver="sdirk2",
+    )
+
+    assert C_batch.shape == (5, len(t_eval))
+    assert C_liver_batch.shape == (5, len(t_eval))
+    assert onp.any(C_liver_batch > 0), "C_liver_batch should be non-zero for sdirk2 solver"
+

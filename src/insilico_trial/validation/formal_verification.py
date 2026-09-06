@@ -181,72 +181,80 @@ def check_qed_proofs(
         return results
 
     # --- Verify each required lemma ------------------------------------------
+    # The QED pipeline detects its Lake build environment by walking up from
+    # CWD to find lakefile.lean.  We must temporarily set CWD to the QED
+    # directory so that `lake env lean` resolves Mathlib imports correctly.
     from agentic_pipeline import LeanAgenticPipeline
 
+    saved_cwd = os.getcwd()
     verified: list[str] = []
     failed: list[str] = []
     attempts: list[dict[str, Any]] = []
 
-    for lemma_expr in lemmas:
-        try:
-            pipeline = LeanAgenticPipeline(use_mathlib=True)
-            result = pipeline.run(lemma_expr)
+    try:
+        os.chdir(str(_qed_dir()))
+        for lemma_expr in lemmas:
+            try:
+                pipeline = LeanAgenticPipeline(use_mathlib=True)
+                result = pipeline.run(lemma_expr)
 
-            has_sorry = not result.get("success", False) or bool(
-                "sorry" in result.get("lean_code", "")
-                or "sorryAx" in result.get("lean_code", "")
-            )
-            attempt = {
-                "lemma": lemma_expr,
-                "expression": lemma_expr,
-                "success": result.get("success", False),
-                "tactic": result.get("tactic"),
-                "has_sorry": has_sorry,
-                "proof_type": _classify_proof_type(result),
-            }
-            attempts.append(attempt)
+                has_sorry = not result.get("success", False) or bool(
+                    "sorry" in result.get("lean_code", "")
+                    or "sorryAx" in result.get("lean_code", "")
+                )
+                attempt = {
+                    "lemma": lemma_expr,
+                    "expression": lemma_expr,
+                    "success": result.get("success", False),
+                    "tactic": result.get("tactic"),
+                    "has_sorry": has_sorry,
+                    "proof_type": _classify_proof_type(result),
+                }
+                attempts.append(attempt)
 
-            if result.get("success") and not has_sorry:
-                verified.append(lemma_expr)
-                attempt["status"] = "verified"
-            else:
+                if result.get("success") and not has_sorry:
+                    verified.append(lemma_expr)
+                    attempt["status"] = "verified"
+                else:
+                    failed.append(lemma_expr)
+                    attempt["status"] = "failed"
+                    if not result.get("success"):
+                        attempt["error"] = result.get("error", "Unknown error")
+            except Exception as e:  # noqa: BLE001
                 failed.append(lemma_expr)
-                attempt["status"] = "failed"
-                if not result.get("success"):
-                    attempt["error"] = result.get("error", "Unknown error")
-        except Exception as e:  # noqa: BLE001
-            failed.append(lemma_expr)
-            attempts.append({
-                "lemma": lemma_expr,
-                "expression": lemma_expr,
-                "success": False,
-                "error": str(e),
-                "status": "exception",
-            })
+                attempts.append({
+                    "lemma": lemma_expr,
+                    "expression": lemma_expr,
+                    "success": False,
+                    "error": str(e),
+                    "status": "exception",
+                })
 
-    total = len(lemmas)
-    pass_count = len(verified)
-    all_pass = pass_count == total and not any(
-        a.get("has_sorry") for a in attempts
-    )
-
-    results["qed_proofs_pass"] = all_pass
-    results["overall_pass"] = all_pass
-    results["verified_lemmas"] = verified
-    results["failed_lemmas"] = failed
-    results["trail_summary"] = (
-        f"QED Formal Verification Results: {pass_count}/{total} lemmas verified. "
-        f"Passed: {', '.join(verified) if verified else 'none'}. "
-        f"Failed: {', '.join(failed) if failed else 'none'}. "
-    )
-    if not all_pass:
-        results["trail_summary"] += (
-            " FORMAL GATE FAILED (fail-closed): at least one required PBPK "
-            "lemma was not verified without sorry; the model is NOT formally "
-            "certified under ASME V&V 40."
+        total = len(lemmas)
+        pass_count = len(verified)
+        all_pass = pass_count == total and not any(
+            a.get("has_sorry") for a in attempts
         )
 
-    _write_trail(results, lemmas=lemmas, attempts=attempts)
+        results["qed_proofs_pass"] = all_pass
+        results["overall_pass"] = all_pass
+        results["verified_lemmas"] = verified
+        results["failed_lemmas"] = failed
+        results["trail_summary"] = (
+            f"QED Formal Verification Results: {pass_count}/{total} lemmas verified. "
+            f"Passed: {', '.join(verified) if verified else 'none'}. "
+            f"Failed: {', '.join(failed) if failed else 'none'}. "
+        )
+        if not all_pass:
+            results["trail_summary"] += (
+                " FORMAL GATE FAILED (fail-closed): at least one required PBPK "
+                "lemma was not verified without sorry; the model is NOT formally "
+                "certified under ASME V&V 40."
+            )
+
+        _write_trail(results, lemmas=lemmas, attempts=attempts)
+    finally:
+        os.chdir(saved_cwd)
     return results
 
 

@@ -340,6 +340,7 @@ def build_pbpk_params(
     age: float,
     drug: Drug,
     genotype_scale: float = 1.0,
+    egfr_scale: float = 1.0,
 ) -> dict[str, Any]:
     """Build the parameter dict for a single patient.
 
@@ -353,6 +354,9 @@ def build_pbpk_params(
         Drug schema with PK parameters
     genotype_scale : float
         Metabolizer activity scale applied to metabolic clearance (>=0)
+    egfr_scale : float
+        Renal/hepatic function scale applied to clearance (>=0).  For hepatic
+        impairment, this is typically 0.6 (Child-Pugh B, ~40% reduction).
 
     Returns
     -------
@@ -370,7 +374,8 @@ def build_pbpk_params(
     kp_arr = onp.array([kp[c] for c in COMPARTMENT_ORDER])
 
     # Genotype scales metabolic clearance, not tissue partitioning.
-    cl = max(drug.typical_cl_f * w_scaling * age_factor * genotype_scale, 1e-6)
+    # egfr_scale scales overall clearance (renal/hepatic function).
+    cl = max(drug.typical_cl_f * w_scaling * age_factor * genotype_scale * egfr_scale, 1e-6)
 
     return {
         "Q": Q,

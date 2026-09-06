@@ -42,6 +42,7 @@ population:
     cyp2d6:
       alleles: [CYP2D6*1, CYP2D6*10, CYP2D6*4, CYP2D6*5]
       frequencies: [0.71, 0.12, 0.08, 0.09]
+      activity_scores: [1.0, 0.5, 0.0, 0.0]
     cyp3a4:
       alleles: [CYP3A4*1, CYP3A4*1B, CYP3A4*22]
       frequencies: [0.80, 0.07, 0.13]
