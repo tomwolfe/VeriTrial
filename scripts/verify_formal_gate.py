@@ -160,6 +160,31 @@ def _is_metzler_positivity(lemma: str) -> bool:
     return bool(re.search(r'Q\w*\s*/\s*(\(?V\w*\s*\*\s*)?Kp\w*\s*\)?\s*>\s*0', lemma))
 
 
+def _is_boundary_flow_positivity(lemma: str) -> bool:
+    """Check whether a lemma is a compartmental boundary inflow invariant (Lemma 4).
+
+    Boundary flow lemmas assert that the perfusion inflow term
+    (Q_i / (V_c * Kp_i)) * A_c >= 0 is non-negative when the source
+    compartment amount is non-negative.  These are REQUIRED and must not
+    be skipped.
+    """
+    return bool(re.search(
+        r'\(\s*Q\w*\s*/\s*\(?\s*V\w*\s*\*\s*Kp\w*\s*\)?\s*\)\s*\*\s*A\w*\s*>=\s*0',
+        lemma,
+    ))
+
+
+def _is_mass_dissipation(lemma: str) -> bool:
+    """Check whether a lemma is a monotonic mass dissipation inequality (Lemma 5).
+
+    Mass dissipation lemmas assert that the total system outflow is
+    strictly positive when clearance is positive:
+    ``CL * C_p > 0`` (equivalent to -CL * C_p < 0).  This is REQUIRED
+    and must not be skipped.
+    """
+    return bool(re.search(r'CL\s*\*\s*C_p\s*>\s*0', lemma))
+
+
 def _detect_mathlib_env() -> bool:
     """Detect whether the QED environment has Mathlib available.
 
@@ -248,6 +273,29 @@ def main(argv: list[str] | None = None) -> int:
             "FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas "
             f"are REQUIRED but only {len(metzler_lemmas)} found "
             f"(expected >= {len(perfused)} for perfused compartments).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Boundary flow positivity enforcement (Lemma 4): each perfused
+    # compartment must have a non-negative inflow invariant.
+    bflow_lemmas = [lm for lm in file_lemmas if _is_boundary_flow_positivity(lm)]
+    if len(bflow_lemmas) < len(perfused):
+        print(
+            "FORMAL GATE FAILED (fail-closed): boundary flow positivity "
+            f"lemmas (Lemma 4) REQUIRED but only {len(bflow_lemmas)} found "
+            f"(expected >= {len(perfused)} for perfused compartments).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Monotonic mass dissipation enforcement (Lemma 5): at least one
+    # dissipation inequality must be present when parametric mode is on.
+    dissipation_lemmas = [lm for lm in file_lemmas if _is_mass_dissipation(lm)]
+    if not dissipation_lemmas:
+        print(
+            "FORMAL GATE FAILED (fail-closed): monotonic mass dissipation "
+            "lemma (Lemma 5) is REQUIRED but none found.",
             file=sys.stderr,
         )
         return 1
