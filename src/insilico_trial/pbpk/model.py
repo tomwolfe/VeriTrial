@@ -176,6 +176,41 @@ _PERIPHERAL_IDX = 3
 _EFFECT_SITE_IDX = 4
 _ELIM_IDX = 5  # bookkeeping state: cumulative eliminated amount (mg)
 _STATE_COUNT = 6
+# Unified mechanistic (PBPK + DILI-QSP) 9-state system:
+# [A_gut, A_liver, A_central, A_periph, A_effect, A_elim, GSH, S_mito, ALT]
+_GSH_IDX = 6
+_S_MITO_IDX = 7
+_ALT_IDX = 8
+_UNIFIED_STATE_COUNT = 9
+_QSP_DEFAULTS: dict[str, float] = {
+    "k_synth": 0.1, "k_deplete": 0.5, "IC50": 5.0,
+    "k_leak": 0.05, "k_elim": 0.2, "ALT_base": 22.0,
+}
+
+
+def pbpk_dili_ode(t: float, y: Any, args: dict[str, Any]) -> Array:
+    """Unified 9-state PBPK + DILI-QSP ODE (pure JAX).
+
+    First 6 states are the standard ``pbpk_ode`` amounts; the last 3 are
+    ``(GSH, S_mito, ALT)`` driven by the liver concentration
+    ``C_liver = A_liver / V_liver``. QSP rate constants are read from
+    ``args`` with literature defaults when absent.
+    """
+    d6 = pbpk_ode(t, y[:6], args)
+    V = args["V"]
+    C_liver = y[_LIVER_IDX] / V[_LIVER_IDX]
+    GSH = y[_GSH_IDX]
+    ALT = y[_ALT_IDX]
+    k_synth = float(args.get("k_synth", _QSP_DEFAULTS["k_synth"]))
+    k_dep = float(args.get("k_deplete", _QSP_DEFAULTS["k_deplete"]))
+    ic50 = float(args.get("IC50", _QSP_DEFAULTS["IC50"]))
+    k_leak = float(args.get("k_leak", _QSP_DEFAULTS["k_leak"]))
+    k_elim = float(args.get("k_elim", _QSP_DEFAULTS["k_elim"]))
+    alt_base = float(args.get("ALT_base", _QSP_DEFAULTS["ALT_base"]))
+    dGSH = k_synth * (1.0 - GSH) - k_dep * C_liver * GSH
+    S_mito = C_liver / (ic50 + C_liver)
+    dALT = k_leak * (1.0 - GSH) * S_mito - k_elim * (ALT - alt_base)
+    return jnp.concatenate([d6, jnp.array([dGSH, 0.0, dALT])])
 
 
 def pbpk_ode(

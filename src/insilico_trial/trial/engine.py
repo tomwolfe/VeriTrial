@@ -375,7 +375,7 @@ class TrialEngine:
 
     def _solve_cohort_batch(
         self, cohort_patients: list[Patient], administered_doses: onp.ndarray,
-        solver: str = "diffrax",
+        solver: str = "fixed_step",
     ) -> tuple[onp.ndarray, onp.ndarray, onp.ndarray]:
         """Batch-solve the dense PK profiles for a whole cohort at once.
 
@@ -407,11 +407,10 @@ class TrialEngine:
         }
         A_gut_0s = administered_doses * self.drug.bioavailability
 
-        # When QSP DILI params are present, force fixed_step or sdirk2 solver
-        # to get liver concentrations directly from the batch solve (avoids
-        # expensive per-patient diffrax re-solve for C_liver extraction).
+        # Unified mechanistic solver: pure-JAX paths only (fixed_step /
+        # sdirk2 on the 9-state system). No diffrax fallback exists.
         effective_solver = solver
-        if self.drug.has_qsp_dili_params and solver == "diffrax":
+        if effective_solver == "diffrax":
             effective_solver = "fixed_step"
 
         if effective_solver == "fixed_step":
@@ -436,34 +435,12 @@ class TrialEngine:
             C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2:3], dtype=onp.float64)
             C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI+1], dtype=onp.float64)
         else:
-            # Diffrax Tsit5 (default): only returns C_p; derive C_liver via
-            # single-patient re-solve when QSP DILI params are present.
-            # NOTE: this path is avoided when drug.has_qsp_dili_params is True
-            # (effective_solver is overridden to fixed_step above).
-            C_batch = onp.asarray(
-                solve_pbpk_batch(t_eval_hours, administered_doses, params_batch),
-                dtype=onp.float64,
+            # Legacy solver names map to the unified fixed-step 9-state path.
+            C_batch, C_liver_batch = solve_pbpk_batch_with_compartments(
+                t_eval_hours, A_gut_0s, params_batch, dt=0.01,
             )
-            if self.drug.has_qsp_dili_params:
-                # Re-solve per patient to extract liver concentrations
-                C_liver_list = []
-                for pi, patient in enumerate(cohort_patients):
-                    from insilico_trial.pbpk.model import _LIVER_IDX, build_pbpk_params as _bpp
-                    p = _bpp(
-                        weight_kg=patient.biometrics.weight,
-                        age=patient.biometrics.age,
-                        drug=self.drug,
-                        genotype_scale=self._genotype_scale(patient),
-                    )
-                    from insilico_trial.pbpk.fixed_step import solve_pbpk_fixed_step as _sfp
-                    y_traj = _sfp(t_eval_hours, float(A_gut_0s[pi]), p, dt=0.01)
-                    # y_traj is (n_time, n_state); liver is index 1
-                    v_liver = p["V"][_LIVER_IDX]
-                    c_liver = onp.asarray(y_traj[:, _LIVER_IDX] / v_liver, dtype=onp.float64)
-                    C_liver_list.append(c_liver)
-                C_liver_batch = onp.stack(C_liver_list)
-            else:
-                C_liver_batch = onp.zeros_like(C_batch)
+            C_batch = onp.asarray(C_batch, dtype=onp.float64)
+            C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
         return t_eval_hours, C_batch, C_liver_batch
 
     def _get_dosing_events(self) -> list[DosingEvent]:

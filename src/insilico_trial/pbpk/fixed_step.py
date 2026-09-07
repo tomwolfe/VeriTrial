@@ -22,18 +22,39 @@ import jax.numpy as jnp
 import numpy as onp
 
 from insilico_trial.pbpk.model import (
+    _ALT_IDX,
     _CENTRAL_IDX,
+    _QSP_DEFAULTS,
+    pbpk_dili_ode,
     pbpk_ode,
 )
 
 
+def _ode_fn(t: float, y: jnp.ndarray, args: dict[str, Any]) -> jnp.ndarray:
+    """Dispatch to the 9-state unified ODE when QSP keys present, else 6-state."""
+    if y.shape[0] == 9 or any(k in args for k in _QSP_DEFAULTS):
+        return pbpk_dili_ode(t, y, args)
+    return pbpk_ode(t, y, args)
+
+
 def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.ndarray:
-    """Single RK4 step for the PBPK ODE system."""
-    k1 = pbpk_ode(t, y, args)
-    k2 = pbpk_ode(t + dt / 2.0, y + dt / 2.0 * k1, args)
-    k3 = pbpk_ode(t + dt / 2.0, y + dt / 2.0 * k2, args)
-    k4 = pbpk_ode(t + dt, y + dt * k3, args)
+    """Single RK4 step for the PBPK (6- or 9-state unified) ODE system."""
+    k1 = _ode_fn(t, y, args)
+    k2 = _ode_fn(t + dt / 2.0, y + dt / 2.0 * k1, args)
+    k3 = _ode_fn(t + dt / 2.0, y + dt / 2.0 * k2, args)
+    k4 = _ode_fn(t + dt, y + dt * k3, args)
     return y + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+def _initial_state(a0: float, n_state: int = 6) -> jnp.ndarray:
+    """Initial state vector: gut dose + QSP defaults (GSH=1, ALT=ALT_base)."""
+    if n_state == 9:
+        return jnp.array(
+            [a0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+             float(_QSP_DEFAULTS["ALT_base"])],
+            dtype=jnp.float64,
+        )
+    return jnp.array([a0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
 
 
 def _solve_on_grid_fixed(
@@ -159,7 +180,8 @@ def solve_pbpk_batch_fixed_step(
     te_j = jnp.asarray(te)
 
     def _single(a0: float, p: dict[str, Any]) -> jnp.ndarray:
-        y0 = jnp.array([a0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+        n_state = 9 if any(k in p for k in ("k_synth", "k_deplete", "IC50")) else 6
+        y0 = _initial_state(a0, n_state)
         ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, p)
         c_p = ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX]
         return c_p  # type: ignore[no-any-return]
@@ -194,7 +216,8 @@ def solve_pbpk_batch_with_compartments(
     te_j = jnp.asarray(te)
 
     def _single(a0: float, p: dict[str, Any]) -> tuple[jnp.ndarray, jnp.ndarray]:
-        y0 = jnp.array([a0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+        n_state = 9 if any(k in p for k in ("k_synth", "k_deplete", "IC50")) else 6
+        y0 = _initial_state(a0, n_state)
         ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, p)
         c_p = ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX]
         c_liver = ys[:, _LIVER_IDX] / p["V"][_LIVER_IDX]
