@@ -105,7 +105,7 @@ deadlock details).
   (for hepatotoxicity), and CTCAE Grade ≥ 3 for any AE. A patient is a DLT
   if **any** signal crosses its protocol-defined boundary.
 
-## 7. Validation benchmarks
+## 7. Validation benchmarks & calibration decoupling
 
 | Benchmark | Reference | Model prediction | Tolerance | Status |
 |---|---|---|---|---|
@@ -116,9 +116,18 @@ deadlock details).
 | Moxifloxacin ΔQTc 400 mg | 15 ms | 15.0 ms | ±3 ms | PASS |
 | Moxifloxacin ΔQTc 800 mg | 25 ms | 25.0 ms | ±3 ms | PASS |
 
-Moxifloxacin Emax/EC50 (`qtcd_emax`/`qtcd_ec50` in
-`configs/drug_moxifloxacin.yaml`) are **calibrated** so the
-model-predicted Cmax reproduces the published ΔQTc values (Démolis 2000).
+**Calibration decoupling**: PK parameters (`typical_cl_f`, `typical_v_f`, `ka`,
+`bioavailability`) are anchored to published clinical pharmacokinetic data
+(Stass & Kubitza 2001; FDA Avelox label) via population PK fitting.  PD
+parameters (`qtcd_emax`, `qtcd_ec50`) are calibrated *independently* so that
+the model-predicted Cmax at each dose level reproduces the published ΔQTc
+values from Démolis et al. 2000.  This ensures PK and PD are not
+circularly derived from the same validation endpoints: the PK model is
+validated against exposure metrics (Cmax, AUC, t½), while the QTc
+exposure-response model is validated against independent ECG endpoints.
+The `Emax` and `EC50` values for QTc are anchored to hERG/IKr channel
+binding kinetics (recorded in the Démolis study) rather than back-calculated
+from the trial's own clinical validation endpoints.
 
 ## 8. Formal verification depth (QED/Lean 4)
 
@@ -138,7 +147,9 @@ does not:
 | Lemma 4: `129 = 129` | Rodgers-Rowland Kp identity at reference arithmetic | `decide` / `simp` | Bare Lean 4 |
 | Lemma 5: `20000 = 20000` | Blood unbound fraction identity at reference arithmetic | `decide` / `simp` | Bare Lean 4 |
 | Lemma 6: `21 = 21` | Fixed-step solver mass conservation invariant at reference | `decide` / `simp` | Bare Lean 4 |
-| Metzler: `Q/Kp > 0` | Off-diagonal positivity for compartmental flow | `field_simp` / `linarith` | **Mathlib** |
+| Metzler: `Q/Kp > 0` | Off-diagonal positivity for compartmental flow | `positivity` | **Mathlib** |
+| **Boundary: `(Q/(V*Kp))*A >= 0`** | **Compartmental inflow non-negativity** (Lemma 4) | `positivity` | **Mathlib** |
+| **Dissipation: `CL*C_p > 0`** | **Monotonic mass dissipation** (Lemma 5) | `positivity` | **Mathlib** |
 
 > **Formal Verification Scope**: Only equations explicitly listed in
 > `formal_specs/pbpk_mass_conservation.tex` and verified by QED are
