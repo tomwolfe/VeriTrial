@@ -31,7 +31,7 @@ import argparse
 import ast
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any
 
 
 def _default_model_path() -> Path:
@@ -40,7 +40,7 @@ def _default_model_path() -> Path:
     return here.parent / "src" / "insilico_trial" / "pbpk" / "model.py"
 
 
-def extract_state_variables(model_path: Path) -> List[str]:
+def extract_state_variables(model_path: Path) -> list[str]:
     """Read the PBPK state variable names from ``pbpk_ode`` via AST.
 
     The model returns ``jnp.array([dA_gut, dA_liver, dA_central, dA_periph,
@@ -49,15 +49,16 @@ def extract_state_variables(model_path: Path) -> List[str]:
     source = model_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    pbpk_ode = None
+    pbpk_ode2: ast.FunctionDef | None = None
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
-            pbpk_ode = node
+            pbpk_ode2 = node
             break
-    if pbpk_ode is None:
+    if pbpk_ode2 is None:
         raise ValueError(f"pbpk_ode not found in {model_path}")
+    pbpk_ode = pbpk_ode2
 
-    deriv_names: List[str] = []
+    deriv_names: list[str] = []
     for node in ast.walk(pbpk_ode):
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
             func = node.value.func
@@ -69,7 +70,7 @@ def extract_state_variables(model_path: Path) -> List[str]:
             if not node.value.args:
                 continue
             arg0 = node.value.args[0]
-            if not isinstance(arg0, (ast.List, ast.Tuple)):
+            if not isinstance(arg0, ast.List | ast.Tuple):
                 continue
             for elt in arg0.elts:
                 if isinstance(elt, ast.Name):
@@ -87,7 +88,7 @@ def extract_state_variables(model_path: Path) -> List[str]:
 
 
 def extract_perfused_compartments(model_path: Path,
-                                  state_vars: List[str]) -> List[str]:
+                                  state_vars: list[str]) -> list[str]:
     """Identify perfused compartments from the ODE source.
 
     A compartment is perfused when its derivative assignment references the
@@ -97,13 +98,15 @@ def extract_perfused_compartments(model_path: Path,
     source = model_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    pbpk_ode = None
+    pbpk_ode: ast.FunctionDef | None = None
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
             pbpk_ode = node
             break
+    if pbpk_ode is None:
+        raise ValueError(f"pbpk_ode not found in {model_path}")
 
-    perfused: List[str] = []
+    perfused: list[str] = []
     for node in pbpk_ode.body:
         if not isinstance(node, ast.Assign):
             continue
@@ -126,7 +129,7 @@ def extract_perfused_compartments(model_path: Path,
     return perfused
 
 
-def mass_conservation_witness(ref: Optional[dict] = None) -> str:
+def mass_conservation_witness(ref: dict[str, Any] | None = None) -> str:
     """Build a *closed numeric* mass-conservation witness from the model ODE.
 
     The PBPK ODE is mass-conserving by construction: the sum of every
@@ -164,7 +167,10 @@ def mass_conservation_witness(ref: Optional[dict] = None) -> str:
             "effect": (2, 6, 3),
         }
 
-    ka = ref["ka"]; A_gut = ref["A_gut"]; C_p = ref["C_p"]; CL = ref["CL"]
+    ka = ref["ka"]
+    A_gut = ref["A_gut"]
+    C_p = ref["C_p"]
+    CL = ref["CL"]
     q_liver, c_liver, kp_liver = ref["liver"]
     q_periph, c_periph, kp_periph = ref["periph"]
     q_effect, c_effect, kp_effect = ref["effect"]
@@ -188,260 +194,22 @@ def mass_conservation_witness(ref: Optional[dict] = None) -> str:
 
 
 def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
-                 parametric: bool = True) -> List[str]:
-    """Build the deterministic list of QED-parseable mass-conservation lemmas.
+                 parametric: bool = True) -> list[str]:
+    """Build the deterministic list of NON-TRIVIAL QED lemmas.
 
-    The enforced formal-verification gate requires QED to prove *at least one*
-    non-trivial PBPK lemma (i.e. something it cannot close by ``rfl`` alone).
-    Because this environment runs bare Lean 4 without Mathlib, the only tactic
-    available for a genuine proof is ``decide`` on a *closed numeric* identity.
-    We therefore export, for every perfused compartment, an *instantiated*
-    witness of the perfusion-limited uptake distributive law:
-
-        Q * (C_p - C_tissue / Kp) = Q * C_p - Q * C_tissue / Kp
-
-    evaluated at representative reference numbers (e.g. Q=3, C_p=5, C_tissue=4,
-    Kp=2) so that both sides reduce to the same concrete field value. ``decide``
-    proves the equality without ``sorry`` and without Mathlib -- this is the
-    "formal ODE verification" QED performs here, going beyond mere reflexivity.
-
-    The lemmas exported are:
-
-      * Lemma 1 (gut first-order absorption): ``ka * A_gut = ka * A_gut`` (rfl).
-      * Lemma 2 (perfusion-limited uptake, instantiated): the distributive-law
-        witness above for each perfused compartment (proved by ``decide``).
-      * Lemma 3a (total mass conservation): the sum of all compartment amounts
-        equals itself (rfl identity; the bridge's coefficient check guarantees
-        the actual pairwise cancellation).
-      * Lemma 3b (mass-conservation witness): a *closed numeric* identity --
-        the sum of the six compartment derivative RHS terms equals 0 at a
-        representative reference point. QED proves this with decide/simp/ring
-        (genuine, non-reflexive, no Mathlib, no sorry). This is the formal
-        verification of Lemma 3 and goes beyond reflexivity.
-      * Lemma 4 (Rodgers-Rowland Kp identity): ``log10(Kp) = 0.5*logP - 0.01*
-        (MW/300) + log10(fu_blood) + 0.6`` at a representative reference point
-        (proved by ``decide``).
-      * Lemma 5 (blood unbound fraction): ``fu_blood * denominator = fu_plasma``
-        at a representative reference point (proved by ``decide``).
-      * Lemma 6 (fixed-step solver invariant): mass conservation check for a
-        single Euler step, ``sum(y + dt*f) = sum(y) + dt*sum(f)`` at a
-        representative reference point (proved by ``decide``).
-
-    When ``include_ode_lemmas`` is True, the *symbolic* forms are also emitted:
-    the ODE statement ``dA_<c>/dt = Q * (C_p - C_<c>/Kp)`` and the symbolic
-    distributive identity. These require Mathlib (``field_simp``/``ring``) and
-    are emitted only in Mathlib-backed CI so the enforced gate never fails in a
-    Mathlib-free environment. The general symbolic target is documented in
-    ``formal_specs/pbpk_mass_conservation.tex``.
+    Retains ONLY:
+      * Metzler positivity lemmas (one per perfused compartment) via
+        ``extract_metzler_lemmas()``: ``Q_i / (V_i * Kp_i) > 0``.
+      * Parametric mass-conservation sum (Lemma 3c) via
+        ``build_parametric_sum_lemma()``.
     """
-    state_vars = extract_state_variables(model_path)
-
-    lemmas: List[str] = []
-
-    # Lemma 1: gut first-order absorption term (reflexive identity).
-    lemmas.append("ka * A_gut = ka * A_gut")
-
-    # Lemma 2: perfusion-limited uptake distributive law, instantiated at
-    # representative reference arithmetic so QED proves it with `decide`
-    # (closed numeric field identity) -- a genuine, non-reflexive proof.
-    # Each perfused compartment contributes one witness; the right-hand side
-    # is Q*C_p - Q*C_tissue/Kp = the same field value as the left.
-    perfused = extract_perfused_compartments(model_path, state_vars)
-    # Representative (Q, C_p, C_tissue, Kp) instances, one per perfused comp.
-    _instances = [
-        (3, 5, 4, 2),    # liver   -> 3*(5 - 4/2)   = 3*5 - 3*4/2   (= 9)
-        (4, 6, 8, 2),    # peripheral -> 4*(6 - 8/2) = 4*6 - 4*8/2 (= 8)
-        (2, 7, 6, 3),    # effect-site -> 2*(7 - 6/3) = 2*7 - 2*6/3 (= 10)
-    ]
-    for i, comp in enumerate(perfused):
-        q, cp, ct, kp = _instances[i % len(_instances)]
-        lemmas.append(
-            f"{q} * ({cp} - {ct} / {kp}) = {q} * {cp} - {q} * {ct} / {kp}"
-        )
-
-    # Lemma 3a: total mass conservation (structural identity over all states).
-    lhs = " + ".join(state_vars)
-    lemmas.append(f"{lhs} = {lhs}")
-
-    # Lemma 3b: closed numeric mass-conservation witness (Lemma 3 of the formal
-    # spec). This is a genuine, non-reflexive QED target: the sum of the six
-    # compartment derivative RHS terms equals zero at a representative reference
-    # point. QED proves it with decide/simp/ring (bare Lean 4, no sorry).
-    lemmas.append(mass_conservation_witness())
-
-    # Lemma 4: Rodgers-Rowland Kp identity (closed numeric witness).
-    # Verifies log10(Kp) = 0.5*logP - 0.01*(MW/300) + log10(fu_blood) + 0.6
-    # at a representative reference point. Proved by decide (no sorry).
-    lemmas.append(rodgers_rowland_kp_witness())
-
-    # Lemma 5: Blood unbound fraction identity (closed numeric witness).
-    # Verifies fu_blood * denominator = fu_plasma at a representative reference
-    # point. Proved by decide (no sorry).
-    lemmas.append(blood_unbound_fraction_witness())
-
-    # Lemma 6: Fixed-step solver mass conservation invariant (closed numeric).
-    # Verifies sum(y + dt*f(y)) = sum(y) + dt*sum(f(y)) at a representative
-    # point where sum(f(y)) = 0. Proved by decide (no sorry).
-    lemmas.append(mass_conservation_step_witness())
-
+    lemmas: list[str] = []
     if include_ode_lemmas:
-        # Symbolic, Mathlib-backed targets (field_simp/ring). Emitted only when
-        # QED has Mathlib so the enforced gate never fails in a Mathlib-free env.
-        for comp in perfused:
-            tissue = comp[2:] if comp.startswith("A_") else comp
-            lemmas.append(f"d{comp}/dt = Q * (C_p - C_{tissue} / Kp)")
-            lemmas.append(
-                f"Q * (C_p - C_{tissue} / Kp) = Q * C_p - Q * C_{tissue} / Kp"
-            )
-        # Lemma 4 symbolic: Rodgers-Rowland Kp identity
-        lemmas.append(
-            "log10(Kp) = 0.5 * logP - 0.01 * (MW / 300) + log10(fu_blood) + 0.6"
-        )
-        # Lemma 5 symbolic: blood unbound fraction identity
-        lemmas.append(
-            "fu_blood * (fu_plasma + (1 - fu_plasma) * (1 - hct) / hct * bp_ratio)"
-            " = fu_plasma"
-        )
-        # Lemma 6 symbolic: fixed-step mass conservation invariant
-        lemmas.append(
-            "sum(y_i + dt * f_i) = sum(y_i) + dt * sum(f_i)"
-        )
-        # Symbolic mass conservation: forall params > 0, sum of all compartment
-        # derivative RHS terms equals zero.  This is the fully parametric
-        # statement of mass conservation that QED proves with field_simp/ring
-        # over Real.
-        all_terms = []
-        all_terms.append("dA_gut")
-        for comp in perfused:
-            tissue = comp[2:] if comp.startswith("A_") else comp
-            all_terms.append(f"Q * (C_p - C_{tissue} / Kp)")
-        all_terms.append("dA_central")
-        all_terms.append("dA_elim")
-        lemmas.append(
-            " + ".join(all_terms) + " = 0"
-        )
-
+        pass  # symbolic ODE targets removed: verification theater.
+    lemmas.extend(extract_metzler_lemmas(model_path))
     if parametric:
-        # Fully parametric mass-conservation identity: the sum of all
-        # compartment derivative RHS terms (symbolic, from AST extraction)
-        # equals zero.  This requires Mathlib (field_simp/ring over ℝ).
         lemmas.append(build_parametric_sum_lemma(model_path))
-        # Metzler off-diagonal positivity lemmas: for each perfused
-        # compartment, the off-diagonal flow coefficient Q/(V*Kp) > 0.
-        lemmas.extend(metzler_positivity_lemmas(model_path))
-
     return lemmas
-
-
-def rodgers_rowland_kp_witness(ref: Optional[dict] = None) -> str:
-    """Emit a *closed numeric* Rodgers-Rowland Kp identity witness.
-
-    The identity is::
-
-        log10(Kp) = 0.5*logP - 0.01*(MW/300) + log10(fu_blood) + 0.6
-
-    We instantiate at a representative reference point and emit the arithmetic
-    identity so QED proves it with ``decide``/``simp``/``ring`` (bare Lean 4,
-    no Mathlib, no sorry).  Both the numeric witness and the symbolic form are
-    emitted when ``include_ode_lemmas`` is True.
-
-    An internal ``assert`` guarantees arithmetic consistency.
-    """
-    if ref is None:
-        ref = {"log_p": 2.0, "mw": 300.0, "fu_blood": 0.5}
-
-    log_p = ref["log_p"]
-    mw = ref["mw"]
-    fu_blood = ref["fu_blood"]
-
-    import math
-    log_kp_expected = 0.5 * log_p - 0.01 * (mw / 300.0) + math.log10(fu_blood) + 0.6
-
-    # Round to integer for Lean decide (both sides must be concrete integers).
-    lhs = round(log_kp_expected * 100)
-    rhs = round((0.5 * log_p - 0.01 * (mw / 300.0) + math.log10(fu_blood) + 0.6) * 100)
-    assert lhs == rhs, "rodgers_rowland_kp witness is not arithmetically closed"
-
-    return f"{lhs} = {rhs}"
-
-
-def blood_unbound_fraction_witness(ref: Optional[dict] = None) -> str:
-    """Emit a *closed numeric* blood unbound fraction identity witness.
-
-    The algebraic identity is::
-
-        fu_blood * (fu_plasma + (1 - fu_plasma) * (1 - hct) / hct * bp_ratio)
-            = fu_plasma
-
-    We instantiate at a representative reference point and emit the arithmetic
-    identity so QED proves it with ``decide``/``simp``/``ring`` (bare Lean 4,
-    no Mathlib, no sorry).
-
-    An internal ``assert`` guarantees arithmetic consistency.
-    """
-    if ref is None:
-        ref = {"fu_plasma": 0.02, "bp_ratio": 1.0, "hct": 0.45}
-
-    fu_plasma = ref["fu_plasma"]
-    bp_ratio = ref["bp_ratio"]
-    hct = ref["hct"]
-
-    # fu_blood = fu_plasma / (fu_plasma + (1 - fu_plasma) * (1 - hct) / hct * bp_ratio)
-    denominator = fu_plasma + (1.0 - fu_plasma) * (1.0 - hct) / hct * bp_ratio
-    fu_blood = fu_plasma / denominator
-
-    # LHS: fu_blood * denominator = fu_plasma  (the identity)
-    lhs_val = fu_blood * denominator
-    rhs_val = fu_plasma
-
-    # Scale to integers for Lean decide
-    scale = 10**6
-    lhs_int = round(lhs_val * scale)
-    rhs_int = round(rhs_val * scale)
-    assert lhs_int == rhs_int, "blood_unbound_fraction witness is not arithmetically closed"
-
-    return f"{lhs_int} = {rhs_int}"
-
-
-def mass_conservation_step_witness(ref: Optional[dict] = None) -> str:
-    """Emit a *structural* fixed-step solver mass conservation invariant.
-
-    For a single Euler/RK4/SDIRK2 step with dt, mass conservation requires::
-
-        sum(y_i + dt * f_i) = sum(y_i) + dt * sum(f_i)
-
-    where ``sum(f_i) = 0`` (mass-conserving system).  Unlike the previous
-    trivial ``21 = 21`` witness, this emits the *algebraic identity* with
-    non-trivial LHS and RHS expressions so that QED proves it with
-    ``simp``/``decide``/``ring`` (genuine, non-reflexive, bare Lean 4,
-    no Mathlib, no sorry).  Both sides evaluate to the same integer, but
-    the structural form demonstrates the step-invariant directly.
-
-    An internal ``assert`` guarantees arithmetic consistency.
-    """
-    if ref is None:
-        # Representative: y = [3, 5, 10, 2, 1, 0], derivatives sum to 0
-        # (mass-conserving system), dt = 1
-        ref = {"y": [3, 5, 10, 2, 1, 0], "f": [-6, 9, -13, 4, 6, 0], "dt": 1}
-
-    y = ref["y"]
-    f = ref["f"]
-    dt = ref["dt"]
-
-    # LHS: sum(y_i + dt * f_i)  -- explicit structural form
-    lhs_terms = [f"({yi} + {dt} * ({fi}))" for yi, fi in zip(y, f, strict=True)]
-    lhs = " + ".join(lhs_terms)
-
-    # RHS: sum(y_i) + dt * sum(f_i)  -- the algebraic invariant
-    sum_y = sum(y)
-    sum_f = sum(f)
-    rhs_val = sum_y + dt * sum_f
-
-    # Verify: LHS must equal RHS numerically
-    lhs_val = sum(yi + dt * fi for yi, fi in zip(y, f, strict=True))
-    assert lhs_val == rhs_val, "mass_conservation_step witness is not arithmetically closed"
-
-    return f"{lhs} = {rhs_val}"
 
 
 def check_mass_conservation(model_path: Path) -> bool:
@@ -496,8 +264,6 @@ def check_mass_conservation(model_path: Path) -> bool:
     # dA_central must reference the gut influx, every perfused outflow, and CL.
     if "ka" not in central or "A_gut" not in central:
         return False
-    if "CL" not in central or "C_p" not in central:
-        return False
     for comp in extract_perfused_compartments(model_path,
                                               extract_state_variables(model_path)):
         if comp in ("A_gut", "A_central", "A_elim"):
@@ -505,7 +271,7 @@ def check_mass_conservation(model_path: Path) -> bool:
         deriv = "d" + comp  # e.g. dA_liver
         if deriv not in central:
             return False
-    return True
+    return "CL" in central and "C_p" in central
 
 
 def extract_symbolic_derivatives(model_path: Path,
@@ -546,7 +312,7 @@ def extract_symbolic_derivatives(model_path: Path,
 
     # Recursively expand intermediate derivative references so that each
     # RHS is expressed only in terms of state variables and parameters.
-    def _expand(expr: str, seen: set) -> str:
+    def _expand(expr: str, seen: set[str]) -> str:
         for name, rhs in derivs.items():
             if name in expr and name not in seen:
                 seen_new = seen | {name}
@@ -572,12 +338,10 @@ def verify_symbolic_cancellation(derivs: dict[str, str]) -> bool:
     Returns True only when the algebraic cancellation is confirmed.
     """
     central = derivs.get("dA_central", "")
-    elim = derivs.get("dA_elim", "")
-    gut = derivs.get("dA_gut", "")
 
     # dA_central must explicitly subtract each perfused compartment's derivative
     # (the perfusion terms cancel pairwise via the central balance).
-    for deriv_name, rhs in derivs.items():
+    for deriv_name in derivs:
         if deriv_name in ("dA_central", "dA_gut", "dA_elim"):
             continue
         # The perfused derivative appears as a subtracted term in dA_central.
@@ -587,52 +351,31 @@ def verify_symbolic_cancellation(derivs: dict[str, str]) -> bool:
 
     # dA_elim = CL * C_p; the clearance term CL * C_p must appear in dA_central
     # so that the elimination accumulator cancels with the central outflow.
-    if "CL" not in central or "C_p" not in central:
-        return False
-
-    # dA_gut = -ka * A_gut; the absorption term ka * A_gut must appear in
-    # dA_central as a positive influx so the gut compartment cancels.
-    if "ka" not in central or "A_gut" not in central:
-        return False
-
-    return True
+    return "CL" in central and "C_p" in central and "ka" in central and "A_gut" in central
 
 
-def metzler_positivity_lemmas(model_path: Path) -> List[str]:
-    """Emit Metzler off-diagonal positivity lemmas for each perfusion flow.
 
-    In compartmental ODE theory, the Jacobian matrix of a mass-conserving
-    system must be a Metzler matrix (off-diagonal entries >= 0) for
-    positivity preservation.  For each perfusion-limited compartment the
-    off-diagonal flow term is ``Q / (V_tissue * Kp)``, which is positive
-    when Q, V, and Kp are all positive.
+def extract_metzler_lemmas(model_path: Path) -> list[str]:
+    """Emit Metzler off-diagonal positivity lemmas, one per perfused compartment.
 
-    We emit parametric positivity identities of the form::
-
-        Q * (C_p - C_tissue / Kp) = Q * C_p - Q * C_tissue / Kp
-
-    together with the Metzler off-diagonal lemma that the negative
-    coefficient ``-Q / (V_tissue * Kp)`` is bounded::
-
-        Q / (V_tissue * Kp) > 0
-
-    These require Mathlib (field_simp/ring over ℝ) and are emitted
-    only in parametric mode.
+    Parses ``pbpk_ode`` via AST; for each perfusion term
+    ``Q[i] * (C_p - C_tissue / Kp[i])`` emits ``Q_i / (V_i * Kp_i) > 0``
+    with positivity hypotheses ``(hQ_i : 0 < Q_i) (hV_i : 0 < V_i)``
+    ``(hKp_i : 0 < Kp_i)`` auto-generated by QED's ``generate_lean_code()``.
+    Requires Mathlib (``positivity`` over R); parametric mode only.
     """
     state_vars = extract_state_variables(model_path)
     perfused = extract_perfused_compartments(model_path, state_vars)
-
-    lemmas: List[str] = []
+    lemmas: list[str] = []
     for comp in perfused:
         tissue = comp[2:] if comp.startswith("A_") else comp
-        # Distributive identity (Metzler off-diagonal form)
-        lemmas.append(
-            f"Q * (C_p - C_{tissue} / Kp) = Q * C_p - Q * C_{tissue} / Kp"
-        )
-        # Positivity: the off-diagonal coefficient is positive when Q, V, Kp > 0
-        lemmas.append(f"Q / Kp > 0")
-
+        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) > 0")
     return lemmas
+
+
+def metzler_positivity_lemmas(model_path: Path) -> list[str]:
+    """Backward-compatible alias for :func:`extract_metzler_lemmas`."""
+    return extract_metzler_lemmas(model_path)
 
 
 def build_parametric_sum_lemma(model_path: Path) -> str:
@@ -646,7 +389,7 @@ def build_parametric_sum_lemma(model_path: Path) -> str:
 
     Each perfused compartment uses its own symbolic Q_liver/Kp_liver etc.
     so that all variables are distinct and the cancellation is verifiable by
-    ``field_simp``/``ring`` over ℝ.
+    ``field_simp``/``ring`` over R.
 
     The positivity hypotheses (``∀ ... > 0``) are auto-generated by the QED
     pipeline's ``generate_lean_code()`` when it detects division denominators.
@@ -655,7 +398,7 @@ def build_parametric_sum_lemma(model_path: Path) -> str:
     emission; a broken model (missing or extra terms) causes the export
     to abort rather than ship an unsound lemma.
 
-    The emitted lemma requires Mathlib (``field_simp``/``ring`` over ℝ)
+    The emitted lemma requires Mathlib (``field_simp``/``ring`` over R)
     and is only used in ``--parametric`` mode.
     """
     # Verify on raw (unexpanded) forms so substring checks work correctly.
@@ -708,7 +451,7 @@ def build_parametric_sum_lemma(model_path: Path) -> str:
     return sum_expr
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, default=None,
                         help="Path to the PBPK model.py (default: auto-detect)")
@@ -753,7 +496,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         lemmas = build_lemmas(model_path, include_ode_lemmas=include_ode,
                               parametric=args.parametric)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"failed to export lemmas: {e}", file=sys.stderr)
         return 1
 

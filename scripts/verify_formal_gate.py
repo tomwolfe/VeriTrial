@@ -32,7 +32,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 
 def qed_dir() -> Path:
@@ -59,7 +58,7 @@ def _live_model_lemmas(include_ode: bool = False, parametric: bool = True) -> li
     scripts_dir = _veritrial_root() / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
 
     model_path = (
         _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
@@ -89,15 +88,14 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     has_parametric = False
     for lemma in file_lemmas:
         # Parametric lemma: symbolic division (variable denominator)
-        if re.search(r'/\s*[A-Za-z_]\w*\b', lemma) and not re.search(r'/\s*\d', lemma):
-            # Check it's not already a numeric witness (all tokens are numbers/operators)
-            if re.search(r'[A-Za-z_]\w*\b', re.sub(r'=.*', '', lemma)):
-                has_parametric = True
-                break
+        if (re.search(r'/\s*[A-Za-z_]\w*\b', lemma) and not re.search(r'/\s*\d', lemma)
+                and re.search(r'[A-Za-z_]\w*\b', re.sub(r'=.*', '', lemma))):
+            has_parametric = True
+            break
 
     try:
         emitted = _live_model_lemmas(parametric=has_parametric)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(
             "FORMAL GATE FAILED (fail-closed): could not derive required "
             f"lemmas from the live PBPK model: {e}",
@@ -135,6 +133,22 @@ def _is_sorry_placeholder(lemma: str) -> bool:
     return bool(re.search(r'\bsorry\b|\bsorryAx\b', lemma))
 
 
+def _is_trivial_lemma(lemma: str) -> bool:
+    """Reject verification-theater lemmas (reflexive or closed numeric)."""
+    if "=" in lemma and ">" not in lemma and "<" not in lemma:
+        parts = lemma.split("=")
+        if len(parts) == 2:
+            lhs, rhs = parts
+            if lhs.strip() == rhs.strip():
+                return True
+            import re as _re
+            if _re.match(r"^\d+(\.\d+)?$", lhs.strip()) and _re.match(r"^\d+(\.\d+)?$", rhs.strip()):
+                return True
+            if _re.match(r"^\d+(\.\d+)?\s*=\s*\d+(\.\d+)?$", lemma.strip()):
+                return True
+    return False
+
+
 def _is_metzler_positivity(lemma: str) -> bool:
     """Check whether a lemma is a Metzler off-diagonal positivity statement.
 
@@ -143,7 +157,7 @@ def _is_metzler_positivity(lemma: str) -> bool:
     compartment.  These are REQUIRED for dynamical invariants and must not
     be skipped or treated as optional.
     """
-    return bool(re.search(r'Q\s*/\s*Kp\s*>\s*0', lemma))
+    return bool(re.search(r'Q\w*\s*/\s*(\(?V\w*\s*\*\s*)?Kp\w*\s*\)?\s*>\s*0', lemma))
 
 
 def _detect_mathlib_env() -> bool:
@@ -163,9 +177,9 @@ def _detect_mathlib_env() -> bool:
     try:
         if str(qed) not in sys.path:
             sys.path.insert(0, str(qed))
-        from agentic_pipeline import LeanAgenticPipeline  # type: ignore
-        p = LeanAgenticPipeline(use_mathlib=True)
-        return p.use_mathlib
+        from agentic_pipeline import LeanAgenticPipeline  # type: ignore[import-not-found]
+        pl = LeanAgenticPipeline(use_mathlib=True)
+        return bool(pl.use_mathlib)
     except Exception:
         return False
 
@@ -179,16 +193,12 @@ def _is_mathlib_dependent(lemma: str) -> bool:
     ``decide``/``simp``/``ring`` under bare Lean 4.  Symbolic ODE lemmas
     (e.g. ``dA_liver/dt = Q * (C_p - C_liver / Kp)``) ARE Mathlib-dependent.
     """
-    # Symbolic ODE lemma pattern: derivative notation
     if re.search(r'dA_\w+/dt', lemma):
         return True
-    # Symbolic distributive law: variable names in division (not numeric)
-    if re.search(r'/\s*[A-Z][a-z_]*\b', lemma) and not re.search(r'/\s*\d', lemma):
-        return True
-    return False
+    return bool(re.search(r'/\s*[A-Z][a-z_]*\b', lemma) and not re.search(r'/\s*\d', lemma))
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -229,7 +239,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # each perfused compartment.  These encode the dynamical invariant that
     # the Jacobian of the PBPK ODE is a Metzler matrix, which is required
     # for positivity preservation.  Their absence is a fail-closed error.
-    metzler_lemmas = [l for l in file_lemmas if _is_metzler_positivity(l)]
+    metzler_lemmas = [lm for lm in file_lemmas if _is_metzler_positivity(lm)]
     perfused = [
         "liver", "periph", "effect",
     ]  # compartments with perfusion-limited uptake
@@ -254,6 +264,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 1
 
+    for lemma in file_lemmas:
+        if _is_trivial_lemma(lemma):
+            print(
+                "FORMAL GATE FAILED (fail-closed): trivial lemma detected: "
+                f"{lemma!r}",
+                file=sys.stderr,
+            )
+            return 1
+
     # --strict: if the environment lacks Mathlib, fail if any Mathlib-dependent
     # symbolic lemma would be silently skipped (preventing gate degradation).
     # Numeric witnesses (closed arithmetic identities) are always accepted
@@ -261,19 +280,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     if strict:
         has_mathlib_env = _detect_mathlib_env()
         for lemma in file_lemmas:
-            if _is_mathlib_dependent(lemma) and "dA_" in lemma:
-                # This is a symbolic ODE lemma (e.g. dA_liver/dt = Q * (...))
-                # that requires Mathlib field_simp/ring.  In a non-Mathlib
-                # environment the gate would silently skip it.
-                if not has_mathlib_env:
-                    print(
-                        "FORMAL GATE FAILED (--strict): Mathlib-dependent "
-                        f"symbolic lemma detected in a non-Mathlib "
-                        f"environment: {lemma!r}.  Set HAS_MATHLIB=1 or "
-                        "remove --strict to allow skipping.",
-                        file=sys.stderr,
-                    )
-                    return 1
+            # Symbolic ODE lemma (e.g. dA_liver/dt = Q * (...)) requiring
+            # Mathlib field_simp/ring; must not be silently skipped.
+            if (_is_mathlib_dependent(lemma) and "dA_" in lemma
+                    and not has_mathlib_env):
+                print(
+                    "FORMAL GATE FAILED (--strict): Mathlib-dependent "
+                    f"symbolic lemma detected in a non-Mathlib "
+                    f"environment: {lemma!r}.  Set HAS_MATHLIB=1 or "
+                    "remove --strict to allow skipping.",
+                    file=sys.stderr,
+                )
+                return 1
 
     qed = qed_dir()
     verify_script = qed / "verify_pbpk_lemmas.py"
