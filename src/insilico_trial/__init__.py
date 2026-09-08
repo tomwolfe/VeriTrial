@@ -19,3 +19,6 @@ if sys.platform == "darwin" and os.environ.get("VERITRIAL_ALLOW_METAL") != "1":
     # Must be set before JAX is imported anywhere.
     os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+# Enable 64-bit precision for mass conservation monitors.
+os.environ.setdefault("JAX_ENABLE_X64", "1")
