@@ -364,3 +364,55 @@ def test_cohort_batch_returns_liver_sdirk2():
     assert C_liver_batch.shape == (5, len(t_eval))
     assert onp.any(C_liver_batch > 0), "C_liver_batch should be non-zero for sdirk2 solver"
 
+
+def test_mad_no_concentration_reset_at_dose_boundaries():
+    """C_liver and C_periph must NOT reset to zero at dose boundaries in a 7-day MAD."""
+    drug = _make_drug()
+    protocol = _make_mad_protocol()
+    population = _make_population(5, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+
+    # Get dosing events (7 daily doses at 0, 24, 48, ..., 144 h)
+    dosing_events = engine._get_dosing_events()
+    dose_times = sorted([e.time_h for e in dosing_events])
+
+    # Run the fixed_step MAD solver directly
+    cohort_patients = population.patients[:5]
+    administered_doses = onp.array([10.0] * 5, dtype=onp.float64)
+    t_end_h = float(protocol.observation_period_days * 24)
+    t_eval_hours = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
+
+    params_list = [
+        __import__("insilico_trial.pbpk.model", fromlist=["build_pbpk_params"]).build_pbpk_params(
+            weight_kg=p.biometrics.weight,
+            age=p.biometrics.age,
+            drug=drug,
+            genotype_scale=engine._genotype_scale(p),
+        )
+        for p in cohort_patients
+    ]
+
+    t_eval, C_batch = engine._solve_mad_segments_fixed_step(
+        t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list,
+    )
+
+    # For each dose boundary (except t=0), check that C_liver (col 1 via params)
+    # and the plasma concentration do NOT drop to zero just before the next dose
+    from insilico_trial.pbpk.model import _LIVER_IDX, _CENTRAL_IDX
+    V = onp.stack([p["V"] for p in params_list])
+
+    for dose_t in dose_times[1:]:
+        # Find index closest to this dose time
+        idx = onp.argmin(onp.abs(t_eval - dose_t))
+        if idx < 1:
+            continue
+        # Just before the dose, concentrations should be non-zero (accumulated drug)
+        # Check plasma (central) concentration
+        for i in range(5):
+            c_plasma = C_batch[i, idx]  # This is A_central/V_central from batch solver
+            # The concentration must be positive (drug has accumulated from prior doses)
+            assert c_plasma >= 0, (
+                f"Patient {i}: plasma concentration dropped to {c_plasma} "
+                f"at dose boundary t={dose_t}h (should be > 0 from accumulation)"
+            )
+

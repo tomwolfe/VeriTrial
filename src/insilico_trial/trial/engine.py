@@ -17,8 +17,12 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 
-from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step, solve_pbpk_batch_with_compartments
-from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single
+from insilico_trial.pbpk.fixed_step import (
+    solve_pbpk_batch_fixed_step,
+    solve_pbpk_batch_multi_dose_fixed_step,
+    solve_pbpk_batch_with_compartments,
+)
+from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single, _QSP_DEFAULTS
 from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
     DosingEvent,
@@ -532,71 +536,41 @@ class TrialEngine:
         dosing_events: list[DosingEvent],
         params_list: list[dict[str, Any]],
     ) -> tuple[onp.ndarray, onp.ndarray]:
-        """Solve MAD by chaining fixed-step segments between dosing events."""
+        """Solve MAD by chaining fixed-step segments between dosing events.
+
+        Uses ``solve_pbpk_batch_multi_dose_fixed_step`` which carries the
+        full 9-state vector continuously across bolus events, preserving
+        mass conservation and non-zero concentrations at dose boundaries.
+        """
         n_patients = len(cohort_patients)
-        dt = 0.01
 
-        # Sort events
         events = sorted(dosing_events, key=lambda e: e.time_h)
+        dose_times = onp.array([float(e.time_h) for e in events], dtype=onp.float64)
 
-        # Initial state: all zero, then add first dose
-        y_current = jnp.zeros((n_patients, 6), dtype=jnp.float32)
+        # Build dose_amounts (n_patients, n_doses) - each patient's absorbed dose
+        dose_amounts = onp.zeros((n_patients, len(events)), dtype=onp.float64)
         for i in range(n_patients):
-            y_current = y_current.at[i, 0].set(float(administered_doses[i] * self.drug.bioavailability))
+            for j, event in enumerate(events):
+                dose_amounts[i, j] = administered_doses[i] * self.drug.bioavailability
 
-        # Accumulate concentrations on the full output grid
-        C_accum = onp.zeros((n_patients, len(t_eval_hours)), dtype=onp.float64)
+        # Build batched params, including QSP keys for 9-state ODE
+        params_batch = {
+            "Q": onp.stack([p["Q"] for p in params_list]),
+            "V": onp.stack([p["V"] for p in params_list]),
+            "Kp": onp.stack([p["Kp"] for p in params_list]),
+            "CL": onp.array([p["CL"] for p in params_list]),
+            "ka": onp.array([p["ka"] for p in params_list]),
+        }
+        # Add QSP keys so the 9-state unified ODE is used
+        for key, default_val in _QSP_DEFAULTS.items():
+            if key not in params_batch:
+                params_batch[key] = onp.full(n_patients, default_val, dtype=onp.float64)
 
-        prev_time = 0.0
-        for event_idx, event in enumerate(events):
-            event_time = float(event.time_h)
-            if event_idx > 0:
-                # Add dose at event time
-                for i in range(n_patients):
-                    y_current = y_current.at[i, 0].add(float(administered_doses[i] * self.drug.bioavailability))
+        C_batch, C_liver_batch = solve_pbpk_batch_multi_dose_fixed_step(
+            t_eval_hours, dose_times, dose_amounts, params_batch, dt=0.01,
+        )
 
-            # Integrate from prev_time to event_time (or t_end for last segment)
-            t_end_segment = event_time if event_idx < len(events) else float(t_eval_hours[-1])
-
-            if t_end_segment <= prev_time + dt:
-                continue
-
-            # Create time grid for this segment
-            t_segment = onp.linspace(prev_time, t_end_segment, max(int((t_end_segment - prev_time) / dt) + 1, 2))
-
-            # Build params batch
-            params_batch = {
-                "Q": onp.stack([p["Q"] for p in params_list]),
-                "V": onp.stack([p["V"] for p in params_list]),
-                "Kp": onp.stack([p["Kp"] for p in params_list]),
-                "CL": onp.array([p["CL"] for p in params_list]),
-                "ka": onp.array([p["ka"] for p in params_list]),
-            }
-
-            # Initial gut amounts for this segment
-            A_gut_0s = onp.array([float(y_current[i, 0]) for i in range(n_patients)])
-
-            # Solve segment
-            C_segment = solve_pbpk_batch_fixed_step(t_segment, A_gut_0s, params_batch, dt=dt)
-
-            # Interpolate onto full grid and add to accumulator
-            for i in range(n_patients):
-                C_interp = onp.interp(t_eval_hours, t_segment, C_segment[i])
-                # Only add contribution from this segment (mask by time)
-                mask = (t_eval_hours >= prev_time) & (t_eval_hours <= t_end_segment + dt)
-                C_accum[i, mask] += C_interp[mask]
-
-            # Update state to end of segment
-            # The last state is approximately the state at t_end_segment
-            # We use the final y from the segment - but fixed_step doesn't return full state
-            # For simplicity, estimate remaining gut amount
-            for i in range(n_patients):
-                # Gut amount decays exponentially: A_gut * exp(-ka * dt)
-                y_current = y_current.at[i, 0].set(float(A_gut_0s[i] * onp.exp(-params_list[i]["ka"] * (t_end_segment - prev_time))))
-
-            prev_time = t_end_segment
-
-        return t_eval_hours, C_accum
+        return t_eval_hours, onp.asarray(C_batch, dtype=onp.float64)
 
     def _solve_mad_batch_diffrax(
         self,

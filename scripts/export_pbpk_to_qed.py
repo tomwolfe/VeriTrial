@@ -215,6 +215,7 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
     if parametric:
         lemmas.append(build_parametric_sum_lemma(model_path))
         lemmas.extend(extract_mass_dissipation_lemma(model_path))
+        lemmas.extend(extract_metzler_system_matrix_lemmas(model_path))
     return lemmas
 
 
@@ -471,6 +472,34 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
     # hypotheses 0 < CL and 0 < C_p.
     dissipation = "CL * C_p > 0"
     lemmas.append(dissipation)
+    return lemmas
+
+
+def extract_metzler_system_matrix_lemmas(model_path: Path) -> list[str]:
+    """Emit off-diagonal entries of the PBPK system matrix K as positivity lemmas.
+
+    The system matrix K for the PBPK ODE has off-diagonal entries
+    corresponding to inter-compartmental flows.  For a Metzler system,
+    all off-diagonal entries must be non-negative.  This function emits
+    one lemma per off-diagonal entry asserting its positivity::
+
+        Q_liver / (V_liver * Kp_liver) > 0
+        ka_rate > 0
+        ...
+
+    These lemmas, combined with the ``IsMetzler`` definition in
+    ``Compartmental.lean``, formally establish that the PBPK system is Metzler.
+    """
+    state_vars = extract_state_variables(model_path)
+    perfused = extract_perfused_compartments(model_path, state_vars)
+    lemmas: list[str] = []
+
+    # Off-diagonal entries from perfusion terms (liver, peripheral, effect-site)
+    for comp in perfused:
+        tissue = comp[2:] if comp.startswith("A_") else comp
+        # K[liver, central] = Q_liver / (V_liver * Kp_liver)
+        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) > 0")
+
     return lemmas
 
 

@@ -24,6 +24,7 @@ import numpy as onp
 from insilico_trial.pbpk.model import (
     _ALT_IDX,
     _CENTRAL_IDX,
+    _LIVER_IDX,
     _QSP_DEFAULTS,
     pbpk_dili_ode,
     pbpk_ode,
@@ -351,3 +352,106 @@ def solve_pbpk_multi_dose_fixed_step(
     )
     ys_out = interp_fn(ys_full)  # type: ignore[no-untyped-call]
     return jnp.asarray(ys_out[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX])
+
+
+# ---------------------------------------------------------------------------
+# Batch multi-dose solver: continuous 9-state carry across bolus events
+# ---------------------------------------------------------------------------
+
+
+def solve_pbpk_batch_multi_dose_fixed_step(
+    t_eval: Any,
+    dose_times: Any,
+    dose_amounts: Any,
+    params_batch: dict[str, Any],
+    dt: float = 0.01,
+) -> Any:
+    """Solve the PBPK ODE for a batch of patients with multiple doses.
+
+    Like ``solve_pbpk_multi_dose_fixed_step`` but vmapped over a patient
+    batch.  The full 9-state vector is carried continuously across dose
+    boundaries; at each bolus event the gut compartment receives the
+    absorbed dose amount additively.
+
+    Parameters
+    ----------
+    t_eval : array (n_timepoints,)
+        Output time grid (h).
+    dose_times : array (n_doses,)
+        Times (h) at which doses are administered.
+    dose_amounts : array (n_patients, n_doses,)
+        Absorbed dose amounts (mg) for each patient at each bolus.
+    params_batch : dict with batched parameter arrays
+    dt : float
+        Fixed time step in hours (default 0.01 h).
+
+    Returns
+    -------
+    C_p_batch : array (n_patients, n_timepoints)
+        Plasma concentration (mg/L) at each output time point.
+    C_liver_batch : array (n_patients, n_timepoints)
+        Liver concentration (mg/L) at each output time point.
+    """
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    dt_arr = onp.asarray(dose_times, dtype=onp.float64)
+    da_arr = onp.asarray(dose_amounts, dtype=onp.float64)
+    t0 = float(te[0])
+    t_end = float(te[-1])
+    te_j = jnp.asarray(te)
+
+    n_doses = len(dt_arr)
+
+    # Determine 6- or 9-state from first patient params
+    sample_params = {k: v[0] if hasattr(v, '__len__') else v
+                     for k, v in params_batch.items()}
+    n_state = 9 if any(k in sample_params for k in ("k_synth", "k_deplete", "IC50")) else 6
+
+    boundaries = jnp.sort(jnp.concatenate([
+        jnp.array([t0]), jnp.asarray(dt_arr), jnp.array([t_end])
+    ]))
+
+    n_steps_full = int((t_end - t0) / dt) + 1
+    boundaries_j = jnp.asarray(boundaries, dtype=jnp.float64)
+    da_arr_j = jnp.asarray(da_arr, dtype=jnp.float64)
+
+    def _single(a0: float, p: dict[str, Any], doses: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Single-patient multi-dose solve returning (C_p, C_liver)."""
+        y0 = jnp.zeros(n_state, dtype=jnp.float64).at[0].set(a0)
+        n_doses_local = doses.shape[0]
+
+        def _scan_step(
+            carry: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+            _: jnp.ndarray,
+        ) -> tuple[tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+            y, t_cur, dose_idx = carry
+            at_dose = jnp.logical_and(
+                dose_idx < n_doses_local,
+                jnp.abs(t_cur - boundaries_j[dose_idx + 1]) < dt / 2.0,
+            )
+            y_with_dose = jnp.where(
+                at_dose,
+                y.at[0].add(doses[jnp.minimum(dose_idx, n_doses_local - 1)]),
+                y,
+            )
+            next_dose_idx = jnp.where(at_dose, dose_idx + 1, dose_idx)
+            y_out = _rk4_step(t_cur, y_with_dose, dt, p)
+            return (y_out, t_cur + dt, next_dose_idx), y_out
+
+        init_carry = (y0, jnp.asarray(t0, dtype=jnp.float64), jnp.asarray(0, dtype=jnp.int32))
+        (_, _, _), ys_full = jax.lax.scan(_scan_step, init_carry, None, length=n_steps_full - 1)
+        ys_full = jnp.vstack([y0[None, :], ys_full])
+
+        t_internal = jnp.linspace(t0, t_end, n_steps_full)
+        interp_fn = jax.vmap(
+            lambda col: jnp.interp(te_j, t_internal, col),
+            in_axes=1, out_axes=1,
+        )
+        ys_out = interp_fn(ys_full)
+
+        c_p = jnp.asarray(ys_out[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX])
+        c_liver = jnp.asarray(ys_out[:, _LIVER_IDX] / p["V"][_LIVER_IDX])
+        return c_p, c_liver
+
+    # vmap over patients: each patient gets its own initial dose, params, and dose amounts
+    batch_fn = jax.jit(jax.vmap(_single, in_axes=(0, 0, 0)))
+    return batch_fn(da_arr_j[:, 0], params_batch, da_arr_j)
