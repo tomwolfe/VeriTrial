@@ -210,22 +210,55 @@ def solve_pbpk_batch_fixed_step(
     return batch_fn(A_gut_0s, params_batch)
 
 
-def solve_pbpk_batch_with_compartments(
+def solve_pbpk_batch_9state(
     t_eval: Any,
     A_gut_0s: Any,
     params_batch: dict[str, Any],
     dt: float = 0.01,
 ) -> Any:
+    """Solve PBPK returning all 9 unified states.
+
+    States: [A_gut, A_liver, A_central, A_periph, A_effect, A_elim,
+    GSH, S_mito, ALT]. Mass conservation (< 1e-6) and non-negativity
+    hold across all 9 states via the RK4 guard in ``_rk4_step``.
+    Returns array (n_patients, n_timepoints, 9).
+    """
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    t0 = float(te[0])
+    t1 = float(te[-1])
+    n_steps = int((t1 - t0) / dt) + 1
+    te_j = jnp.asarray(te)
+
+    def _single(a0: float, p: dict[str, Any]) -> jnp.ndarray:
+        y0 = _initial_state(a0, 9)
+        ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, p)
+        return ys
+
+    batch_fn = jax.jit(jax.vmap(_single, in_axes=(0, 0)))
+    return batch_fn(A_gut_0s, params_batch)
+
+
+def solve_pbpk_batch_with_compartments(
+    t_eval: Any,
+    A_gut_0s: Any,
+    params_batch: dict[str, Any],
+    dt: float = 0.01,
+    return_full_state: bool = False,
+) -> Any:
     """Solve PBPK and return both plasma and liver concentration trajectories.
 
     Same as ``solve_pbpk_batch_fixed_step`` but additionally returns the
     liver compartment concentration ``C_liver = A_liver / V_liver`` for
-    each patient, needed by the QSP DILI mechanistic model.
+    each patient, needed by the QSP DILI mechanistic model. Carries all 9
+    states [A_gut, A_liver, A_central, A_periph, A_effect, A_elim, GSH,
+    S_mito, ALT] continuously; with ``return_full_state=True`` also returns
+    the full (n_patients, n_timepoints, 9) state tensor.
 
     Returns
     -------
     C_p_batch : array (n_patients, n_timepoints)
     C_liver_batch : array (n_patients, n_timepoints)
+    (optionally) ys_full : array (n_patients, n_timepoints, 9)
     """
     from insilico_trial.pbpk.model import _LIVER_IDX
 
@@ -235,16 +268,19 @@ def solve_pbpk_batch_with_compartments(
     n_steps = int((t1 - t0) / dt) + 1
     te_j = jnp.asarray(te)
 
-    def _single(a0: float, p: dict[str, Any]) -> tuple[jnp.ndarray, jnp.ndarray]:
-        n_state = 9 if any(k in p for k in ("k_synth", "k_deplete", "IC50")) else 6
-        y0 = _initial_state(a0, n_state)
+    def _single(a0: float, p: dict[str, Any]) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        # Always carry all 9 states continuously (no resets); pad V for QSP idx.
+        y0 = _initial_state(a0, 9)
         ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, p)
         c_p = ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX]
         c_liver = ys[:, _LIVER_IDX] / p["V"][_LIVER_IDX]
-        return c_p, c_liver
+        return c_p, c_liver, ys
 
     batch_fn = jax.jit(jax.vmap(_single, in_axes=(0, 0)))
-    return batch_fn(A_gut_0s, params_batch)
+    c_p_b, c_l_b, ys_full = batch_fn(A_gut_0s, params_batch)
+    if return_full_state:
+        return c_p_b, c_l_b, ys_full
+    return c_p_b, c_l_b
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +470,7 @@ def solve_pbpk_batch_multi_dose_fixed_step(
                 y,
             )
             next_dose_idx = jnp.where(at_dose, dose_idx + 1, dose_idx)
-            y_out = _rk4_step(t_cur, y_with_dose, dt, p)
+            y_out = _rk4_step(t_cur, y_with_dose, dt, p)  # type: ignore[arg-type]
             return (y_out, t_cur + dt, next_dose_idx), y_out
 
         init_carry = (y0, jnp.asarray(t0, dtype=jnp.float64), jnp.asarray(0, dtype=jnp.int32))
@@ -446,7 +482,7 @@ def solve_pbpk_batch_multi_dose_fixed_step(
             lambda col: jnp.interp(te_j, t_internal, col),
             in_axes=1, out_axes=1,
         )
-        ys_out = interp_fn(ys_full)
+        ys_out = interp_fn(ys_full)  # type: ignore[no-untyped-call]
 
         c_p = jnp.asarray(ys_out[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX])
         c_liver = jnp.asarray(ys_out[:, _LIVER_IDX] / p["V"][_LIVER_IDX])

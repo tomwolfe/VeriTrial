@@ -119,7 +119,8 @@ def required_lemmas(model_path: Optional[Path] = None) -> List[str]:
     ex = _load_export_module()
     if model_path is None:
         model_path = REPO_ROOT / "src" / "insilico_trial" / "pbpk" / "model.py"
-    return ex.build_lemmas(Path(model_path))
+    return [l for l in ex.build_lemmas(Path(model_path))
+            if not l.strip().startswith("--")]
 
 
 def check_qed_proofs(

@@ -69,9 +69,11 @@ Central  ⇄  Peripheral (Q_peripheral, V_peripheral)
 ODE solved with **diffrax `Tsit5`** (Dormand-Prince) adaptive stepper,
 `PIDController(rtol=1e-4, atol=1e-6)`. Mass balance holds to < 1e-7.
 
-## 5. Solver backend
+## 5. Solver backend (Metal deadlock permanently mitigated)
 
-Three ODE solvers are available, decoupled from diffrax/lineax:
+Three ODE solvers are available, decoupled from diffrax/lineax. The Metal
+deadlock is permanently mitigated by pure-JAX CPU vectorization (`jax.lax.scan`
+RK4/SDIRK2, no diffrax/lineax in the hot path):
 
 - **fixed_step** (default): Pure-JAX RK4 using `jax.lax.scan` — no diffrax,
   no lineax dependency. Metal-compatible once upstream StableHLO mismatch is

@@ -1,7 +1,7 @@
 """Perfusion-limited PBPK model with Rodgers-Rowland Kp estimation.
 
 Implements a multi-compartment PBPK model for oral small molecule simulation.
-Uses JAX + diffrax for vectorized ODE solving across patient batches.
+Uses pure-JAX fixed-step vectorized ODE solving across patient batches.
 
 Compartments: Gut, Liver, Central, Peripheral, Effect-site
 An additional bookkeeping state ``A_elim`` tracks cumulative eliminated amount so
@@ -33,8 +33,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import diffrax
-import jax
 import jax.numpy as jnp
 import numpy as onp
 from jax import Array
@@ -432,38 +430,18 @@ def _solve_on_grid(
     params: dict[str, Any],
     t1: float,
 ) -> Array:
-    """Solve the PBPK ODE returning the full state matrix.
+    """Solve the PBPK ODE returning the full state matrix (pure-JAX CPU vectorization).
 
-    Parameters
-    ----------
-    t_eval : jnp array (n_timepoints,)
-        Output time grid (h). Passed via closure constant so it is concrete
-        inside JIT (diffrax requires the grid for SaveAt).
-    A_gut_0 : jnp scalar
-        Initial gut amount = absorbed oral dose (mg)
-    params : dict
-        Patient parameters (see pbpk_ode)
-    t1 : float
-        Final integration time (h) — concrete Python float
-
-    Returns
-    -------
-    ys : jnp array (n_timepoints, n_state)
+    Delegates to the fixed-step RK4 ``jax.lax.scan`` solver; no diffrax/lineax.
     """
-    y0 = jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    solution = diffrax.diffeqsolve(
-        diffrax.ODETerm(pbpk_ode),  # type: ignore[arg-type]
-        diffrax.Tsit5(),
-        t0=0.0,
-        t1=t1,
-        dt0=1e-3,
-        y0=y0,
-        args=params,
-        max_steps=_MAX_STEPS,
-        saveat=diffrax.SaveAt(ts=t_eval),
-        stepsize_controller=diffrax.PIDController(rtol=_RTOL, atol=_ATOL),
-    )
-    return jnp.asarray(solution.ys)  # (n_timepoints, n_state)
+    from insilico_trial.pbpk.fixed_step import _solve_on_grid_fixed
+
+    te = jnp.asarray(t_eval, dtype=jnp.float64)
+    t0 = float(te[0])
+    dt = 0.01
+    n_steps = int((t1 - t0) / dt) + 1
+    y0 = jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    return jnp.asarray(_solve_on_grid_fixed(t0, t1, dt, n_steps, te, y0, params))
 
 
 def solve_pbpk_single(
@@ -471,26 +449,10 @@ def solve_pbpk_single(
     A_gut_0: float,
     params: dict[str, Any],
 ) -> Any:
-    """Solve the PBPK ODE system for a single patient.
+    """Solve the PBPK ODE system for a single patient (pure-JAX fixed-step)."""
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_fixed_step
 
-    Parameters
-    ----------
-    t_eval : array (n_timepoints,)
-        Time points (h)
-    A_gut_0 : float
-        Initial gut amount = absorbed oral dose (mg)
-    params : dict
-        Patient parameters (see pbpk_ode)
-
-    Returns
-    -------
-    C_p : array (n_timepoints,)
-        Plasma concentration (mg/L)
-    """
-    te = onp.asarray(t_eval, dtype=onp.float64)
-    t1 = float(te[-1])
-    ys = _solve_on_grid(jnp.asarray(te), jnp.asarray(A_gut_0), params, t1)
-    return ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX]
+    return solve_pbpk_fixed_step(t_eval, A_gut_0, params)
 
 
 def solve_pbpk_full(
@@ -534,16 +496,9 @@ def solve_pbpk_batch(
     C_p_batch : array (n_patients, n_timepoints)
         Plasma concentrations (mg/L) for each patient
     """
-    te = onp.asarray(t_eval, dtype=onp.float64)
-    t1 = float(te[-1])
-    te_j = jnp.asarray(te)
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
 
-    def _single(a0: Any, p: dict[str, Any]) -> Array:
-        ys = _solve_on_grid(te_j, a0, p, t1)
-        return jnp.asarray(ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX])
-
-    batch_fn = jax.jit(jax.vmap(_single, in_axes=(0, 0)))
-    return batch_fn(A_gut_0s, params_batch)
+    return solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch)
 
 
 # ---------------------------------------------------------------------------

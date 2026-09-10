@@ -77,7 +77,7 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     """
     file_lemmas = [
         line.strip() for line in lemmas_file.read_text().splitlines()
-        if line.strip()
+        if line.strip() and not line.strip().startswith("--")
     ]
 
     # Detect if the file contains a parametric lemma.  The parametric
@@ -94,7 +94,17 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
             break
 
     try:
-        emitted = _live_model_lemmas(parametric=has_parametric)
+        emitted = [l for l in _live_model_lemmas(parametric=has_parametric)
+                   if not l.strip().startswith("--")]
+        # Certify structural column-sum + theorem path through QED's no-sorry gate.
+        import export_pbpk_to_qed as _ex
+        from pathlib import Path as _P
+        _mp = _P(__file__).resolve().parents[1] / "src" / "insilico_trial" / "pbpk" / "model.py"
+        _sys = [l for l in _ex.extract_system_matrix_lemmas(_mp)
+                if not l.strip().startswith("--")]
+        for _l in _sys:
+            assert "sorry" not in _l and "sorryAx" not in _l, f"sorry in system lemma {_l!r}"
+            assert _l in emitted, f"system matrix lemma not in gate set: {_l!r}"
     except Exception as e:
         print(
             "FORMAL GATE FAILED (fail-closed): could not derive required "

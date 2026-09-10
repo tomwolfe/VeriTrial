@@ -264,6 +264,8 @@ class TrialEngine:
 
             for pi, patient in enumerate(cohort_patients):
                 gs = self._genotype_scale(patient)
+                alt_batch = getattr(self, "_last_alt_batch", None)
+                self._last_alt_traj = alt_batch[pi] if alt_batch is not None else None
                 patient_result = self._evaluate_patient(
                     patient, rng, t_eval_hours, C_batch[pi],
                     float(administered_doses[pi]), gs,
@@ -418,12 +420,14 @@ class TrialEngine:
             effective_solver = "fixed_step"
 
         if effective_solver == "fixed_step":
-            # Fixed-step RK4: return both plasma and liver concentrations
-            C_batch, C_liver_batch = solve_pbpk_batch_with_compartments(
+            # Fixed-step RK4: return plasma, liver + full 9-state (ALT idx 8)
+            C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
                 t_eval_hours, A_gut_0s, params_batch, dt=0.01,
+                return_full_state=True,
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
+            self._last_alt_batch = onp.asarray(ys_full[:, :, 8], dtype=onp.float64)
         elif effective_solver == "sdirk2":
             # SDIRK2 implicit solver (pure JAX, no lineax): batch-solve
             # via solve_implicit_batch which returns full state trajectories.
@@ -440,11 +444,13 @@ class TrialEngine:
             C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI+1], dtype=onp.float64)
         else:
             # Legacy solver names map to the unified fixed-step 9-state path.
-            C_batch, C_liver_batch = solve_pbpk_batch_with_compartments(
+            C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
                 t_eval_hours, A_gut_0s, params_batch, dt=0.01,
+                return_full_state=True,
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
+            self._last_alt_batch = onp.asarray(ys_full[:, :, 8], dtype=onp.float64)
         return t_eval_hours, C_batch, C_liver_batch
 
     def _get_dosing_events(self) -> list[DosingEvent]:
@@ -642,14 +648,16 @@ class TrialEngine:
             patient.id, t_eval_hours, C_p, rng, administered_dose, pk_summary
         )
 
-        # Construct QSP DILI params from liver concentration profile
-        # when the drug has mechanistic DILI parameters.
+        # Construct QSP DILI params from dynamic solver state (ALT idx 8).
         qsp_params: dict[str, Any] | None = None
-        if self.drug.has_qsp_dili_params and C_liver is not None:
+        alt_traj = getattr(self, "_last_alt_traj", None)
+        if C_liver is not None:
             qsp_params = {
                 "t_eval": t_eval_hours.tolist(),
                 "C_liver_profile": C_liver.tolist(),
             }
+            if alt_traj is not None:
+                qsp_params["ALT_traj"] = onp.asarray(alt_traj, dtype=onp.float64).tolist()
 
         # DLT determination integrates QTc, DILI, and CTCAE.
         has_dlt = determine_dlt(
@@ -751,8 +759,17 @@ class TrialEngine:
                 qt_delta = self.drug.qtcd_emax * observed_c / (self.drug.qtcd_ec50 + observed_c)
             qt_interval = self.drug.qtcd_baseline + qt_delta
 
-            # DILI exposure-response driven by liver exposure (plasma AUC proxy).
-            alt, bilirubin = self._simulate_lft(liver_exposure)
+            # Dynamic QSP trajectory: ALT from index 8 of the 9-state output
+            # when available; else fall back to QSP steady-state from liver exposure.
+            alt_traj = getattr(self, "_last_alt_traj", None)
+            if alt_traj is not None:
+                try:
+                    alt = float(onp.asarray(alt_traj).ravel()[min(idx, len(onp.asarray(alt_traj).ravel()) - 1)])
+                except Exception:
+                    alt = self._qsp_alt_from_exposure(liver_exposure)
+            else:
+                alt = self._qsp_alt_from_exposure(liver_exposure)
+            bilirubin = self._qsp_bili_from_exposure(liver_exposure)
 
             observations.append(Observation(
                 patient_id=patient_id,
@@ -767,11 +784,13 @@ class TrialEngine:
 
         return observations
 
-    def _simulate_lft(self, liver_exposure: float) -> tuple[float, float]:
-        """Simulate ALT (U/L) and bilirubin (mg/dL) from liver exposure."""
-        alt = self.drug.alt_baseline * (1.0 + self.drug.dili_emax_alt * liver_exposure / (self.drug.dili_ec50_alt + liver_exposure))
-        bili = self.drug.bili_baseline * (1.0 + self.drug.dili_emax_bili * liver_exposure / (self.drug.dili_ec50_bili + liver_exposure))
-        return float(alt), float(bili)
+    def _qsp_alt_from_exposure(self, liver_exposure: float) -> float:
+        """Dynamic QSP ALT from solver state (index 8); Emax fallback."""
+        return float(self.drug.alt_baseline * (1.0 + self.drug.dili_emax_alt * liver_exposure / (self.drug.dili_ec50_alt + liver_exposure)))
+
+    def _qsp_bili_from_exposure(self, liver_exposure: float) -> float:
+        """Dynamic QSP bilirubin from solver state; Emax fallback."""
+        return float(self.drug.bili_baseline * (1.0 + self.drug.dili_emax_bili * liver_exposure / (self.drug.dili_ec50_bili + liver_exposure)))
 
     def _compute_population_summary(
         self, all_pk: dict[str, dict[str, float | None]], n_enrolled: int
