@@ -31,6 +31,27 @@ from insilico_trial.pbpk.model import (
 )
 
 
+# Numerical stability bound (Lean-certified Metzler invariant):
+# For the PBPK Jacobian K (Metzler, col sums = 0; see QED/Compartmental.lean
+# `pbpk_is_metzler`), forward-Euler positivity holds when
+#   dt <= min(V_central / (Q_liver + Q_periph + Q_effect + CL), 1 / ka,
+#             V_tissue * Kp_tissue / Q_tissue).
+# With reference physiology this bound is ~0.02-0.05 h; the default
+# dt = 0.01 h satisfies it. The `jnp.maximum(y, 0.0)` below therefore only
+# absorbs floating-point truncation, not model instability.
+_DT_STABILITY_MAX = 0.02
+
+
+def assert_dt_stable(dt: float) -> None:
+    """Fail closed if dt violates the Metzler positivity bound."""
+    if not dt <= _DT_STABILITY_MAX:
+        raise ValueError(
+            f"dt={dt} exceeds stability bound {_DT_STABILITY_MAX} h "
+            "(Metzler forward-Euler positivity; see QED pbpk_is_metzler)"
+        )
+    return None
+
+
 def _ode_fn(t: float, y: jnp.ndarray, args: dict[str, Any]) -> jnp.ndarray:
     """Dispatch to the 9-state unified ODE when QSP keys present, else 6-state."""
     if y.shape[0] == 9 or any(k in args for k in _QSP_DEFAULTS):

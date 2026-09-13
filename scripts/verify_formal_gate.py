@@ -233,6 +233,30 @@ def _is_mathlib_dependent(lemma: str) -> bool:
     return bool(re.search(r'/\s*[A-Z][a-z_]*\b', lemma) and not re.search(r'/\s*\d', lemma))
 
 
+def _is_numeric_shortcut(lemma: str) -> bool:
+    """Detect static numeric witnesses / arithmetic shortcuts (verification scaffolding).
+
+    Rejects closed numeric identities such as ``-6 + 9 + ... = 0``,
+    ``129 = 129``, ``21 = 21``, or any equality whose both sides contain
+    no free symbolic variables. Parametric theorems referencing
+    ``Compartmental.lean`` definitions must carry symbolic rate/state names.
+    """
+    s = lemma.strip()
+    if s.startswith("--"):
+        return False
+    if _is_sorry_placeholder(s):
+        return True
+    # No letters => pure numeric arithmetic shortcut.
+    if "=" in s and not re.search(r"[A-Za-z_]", s):
+        return True
+    # Reflexive identity: both sides textually equal.
+    if "=" in s and ">" not in s and "<" not in s:
+        parts = s.split("=")
+        if len(parts) == 2 and parts[0].strip() == parts[1].strip():
+            return True
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -330,6 +354,19 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    # --strict: fail closed on numeric arithmetic shortcuts / sorry scaffolding.
+    if strict:
+        for lemma in file_lemmas:
+            if _is_numeric_shortcut(lemma):
+                print(
+                    "FORMAL GATE FAILED (--strict): numeric arithmetic shortcut "
+                    f"or reflexive identity detected: {lemma!r}. Emit strictly "
+                    "non-trivial parametric theorems referencing "
+                    "Compartmental.lean.",
+                    file=sys.stderr,
+                )
+                return 1
 
     # --strict: if the environment lacks Mathlib, fail if any Mathlib-dependent
     # symbolic lemma would be silently skipped (preventing gate degradation).
