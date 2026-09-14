@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as onp
 
-from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step, solve_pbpk_fixed_step
+from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt, solve_pbpk_batch_fixed_step, solve_pbpk_fixed_step
 from insilico_trial.pbpk.model import (
     build_pbpk_params,
     run_pbpk,
@@ -56,7 +56,7 @@ def test_solver_equivalence_warfarin():
     C_p_diffrax = onp.asarray(solve_pbpk_single(t_eval, absorbed_dose, params), dtype=onp.float64)
 
     # Fixed-step RK4 (dt=0.01 h = 36 s)
-    C_p_fixed = onp.asarray(solve_pbpk_fixed_step(t_eval, absorbed_dose, params, dt=0.01), dtype=onp.float64)
+    C_p_fixed = onp.asarray(solve_pbpk_fixed_step(t_eval, absorbed_dose, params, dt=min(0.01, 0.9*calculate_max_stable_dt(params))), dtype=onp.float64)
 
     # PK metrics
     pk_diffrax = _compute_pk_metrics(t_eval, C_p_diffrax)
@@ -93,7 +93,7 @@ def test_solver_equivalence_warfarin():
 def test_fixed_step_non_negative():
     """All concentrations from fixed-step solver must be >= 0."""
     params, drug, t_eval, absorbed_dose = _build_warfarin_params()
-    C_p = onp.asarray(solve_pbpk_fixed_step(t_eval, absorbed_dose, params, dt=0.01), dtype=onp.float64)
+    C_p = onp.asarray(solve_pbpk_fixed_step(t_eval, absorbed_dose, params, dt=min(0.01, 0.9*calculate_max_stable_dt(params))), dtype=onp.float64)
     assert onp.all(C_p >= 0), f"Negative concentrations found: {C_p[C_p < 0]}"
 
 
@@ -128,7 +128,7 @@ def test_fixed_step_batch_shape():
 
     # Fixed-step batch
     C_batch_fixed = onp.asarray(
-        solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch, dt=0.01),
+        solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch, dt=min(0.01, 0.9*min(calculate_max_stable_dt({k: (v[i] if hasattr(v, "__len__") and len(v)==len(A_gut_0s) else v) for k, v in params_batch.items()}) for i in range(len(A_gut_0s))))),
         dtype=onp.float64,
     )
 

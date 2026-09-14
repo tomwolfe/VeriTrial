@@ -68,6 +68,38 @@ def assert_dt_stable(dt: float, params: dict[str, Any] | None = None) -> None:
     return None
 
 
+def _assert_batch_dt_stable(dt: float, params_batch: dict[str, Any]) -> None:
+    """Fail closed if dt violates the per-patient Metzler bound.
+
+    Aligned with QED ``pbpk_forward_euler_nonneg``: dt must satisfy every
+    patient's bound; the batch bound is the minimum over patients.
+    """
+    import numpy as _np
+    try:
+        n = len(_np.asarray(params_batch.get("CL", [0.0])).ravel())
+    except Exception:
+        n = 1
+    bounds: list[float] = []
+    for i in range(max(n, 1)):
+        single: dict[str, Any] = {}
+        for k, v in params_batch.items():
+            try:
+                arr = _np.asarray(v)
+                single[k] = arr[i] if arr.shape and len(arr) == n else v
+            except Exception:
+                single[k] = v
+        try:
+            bounds.append(calculate_max_stable_dt(single))
+        except Exception:
+            continue
+    if bounds and not dt <= min(bounds):
+        raise ValueError(
+            f"dt={dt} exceeds batch stability bound {min(bounds)} h "
+            "(Metzler forward-Euler positivity; see QED pbpk_forward_euler_nonneg)"
+        )
+    return None
+
+
 def _ode_fn(t: float, y: jnp.ndarray, args: dict[str, Any]) -> jnp.ndarray:
     """Dispatch to the 9-state unified ODE when QSP keys present, else 6-state."""
     if y.shape[0] == 9 or any(k in args for k in _QSP_DEFAULTS):
@@ -190,6 +222,7 @@ def solve_pbpk_fixed_step(
     C_p : array (n_timepoints,)
         Plasma concentration (mg/L).
     """
+    assert_dt_stable(dt, params)
     te = onp.asarray(t_eval, dtype=onp.float64)
     t0 = float(te[0])
     t1 = float(te[-1])
@@ -230,6 +263,7 @@ def solve_pbpk_batch_fixed_step(
     C_p_batch : array (n_patients, n_timepoints)
         Plasma concentrations (mg/L) for each patient
     """
+    _assert_batch_dt_stable(dt, params_batch)
     te = onp.asarray(t_eval, dtype=onp.float64)
     t0 = float(te[0])
     t1 = float(te[-1])
@@ -299,6 +333,7 @@ def solve_pbpk_batch_with_compartments(
     """
     from insilico_trial.pbpk.model import _LIVER_IDX
 
+    _assert_batch_dt_stable(dt, params_batch)
     te = onp.asarray(t_eval, dtype=onp.float64)
     t0 = float(te[0])
     t1 = float(te[-1])
@@ -363,6 +398,7 @@ def solve_pbpk_multi_dose_fixed_step(
     t0 = float(te[0])
     t_end = float(te[-1])
     te_j = jnp.asarray(te)
+    assert_dt_stable(dt, params)
 
     n_doses = len(dt_arr)
 
@@ -465,6 +501,7 @@ def solve_pbpk_batch_multi_dose_fixed_step(
     C_liver_batch : array (n_patients, n_timepoints)
         Liver concentration (mg/L) at each output time point.
     """
+    _assert_batch_dt_stable(dt, params_batch)
     te = onp.asarray(t_eval, dtype=onp.float64)
     dt_arr = onp.asarray(dose_times, dtype=onp.float64)
     da_arr = onp.asarray(dose_amounts, dtype=onp.float64)

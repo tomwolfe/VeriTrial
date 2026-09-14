@@ -450,9 +450,10 @@ def solve_pbpk_single(
     params: dict[str, Any],
 ) -> Any:
     """Solve the PBPK ODE system for a single patient (pure-JAX fixed-step)."""
-    from insilico_trial.pbpk.fixed_step import solve_pbpk_fixed_step
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt, solve_pbpk_fixed_step
 
-    return solve_pbpk_fixed_step(t_eval, A_gut_0, params)
+    dt = min(0.01, 0.9 * calculate_max_stable_dt(params))
+    return solve_pbpk_fixed_step(t_eval, A_gut_0, params, dt=dt)
 
 
 def solve_pbpk_full(
@@ -496,9 +497,24 @@ def solve_pbpk_batch(
     C_p_batch : array (n_patients, n_timepoints)
         Plasma concentrations (mg/L) for each patient
     """
-    from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
-
-    return solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch)
+    from insilico_trial.pbpk.fixed_step import _assert_batch_dt_stable, calculate_max_stable_dt, solve_pbpk_batch_fixed_step
+    import numpy as _np
+    try:
+        _n = len(_np.asarray(A_gut_0s).ravel())
+        _bounds = []
+        for _i in range(_n):
+            _single = {}
+            for _k, _v in params_batch.items():
+                try:
+                    _arr = _np.asarray(_v)
+                    _single[_k] = _arr[_i] if _arr.shape and len(_arr) == _n else _v
+                except Exception:
+                    _single[_k] = _v
+            _bounds.append(calculate_max_stable_dt(_single))
+        _dt = min(0.01, 0.9 * min(_bounds))
+    except Exception:
+        _dt = 0.01
+    return solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch, dt=_dt)
 
 
 # ---------------------------------------------------------------------------

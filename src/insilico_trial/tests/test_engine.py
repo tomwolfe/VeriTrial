@@ -416,3 +416,35 @@ def test_mad_no_concentration_reset_at_dose_boundaries():
                 f"at dose boundary t={dose_t}h (should be > 0 from accumulation)"
             )
 
+
+
+def _make_boin_engine() -> TrialEngine:
+    drug = _make_drug()
+    proto = _make_protocol(n_cohorts=3, cohort_size=3)
+    d = proto.model_dump()
+    d["dose_escalation"] = {"rule": "boin", "max_dlt_per_cohort": 99,
+        "min_dlt_free_days": 7, "next_dose_multiplier": 2.0, "starting_dose": 2.0}
+    proto2 = Protocol.model_validate(d)
+    pop = _make_population(9)
+    return TrialEngine(protocol=proto2, drug=drug, population=pop)
+
+
+def test_boin_escalate_on_zero_dlt():
+    eng = _make_boin_engine()
+    dec, nxt, stop = eng.boin_decision(0, 3, 1)
+    assert dec == "escalate" and nxt == 2 and stop is False
+
+
+def test_boin_deescalate_on_2_of_3():
+    eng = _make_boin_engine()
+    dec, nxt, stop = eng.boin_decision(2, 3, 1)
+    assert dec in ("de-escalate", "stop") and stop is False or stop is True
+    # 2/3=0.667 >= lambda_d so must de-escalate (unless safety stops)
+    assert nxt == 0 or stop is True
+
+
+def test_boin_safety_stopping_rule():
+    eng = _make_boin_engine()
+    # 3 DLTs in 3 patients: Pr(p>0.3|3,3) > 0.95 -> stop
+    dec, nxt, stop = eng.boin_decision(3, 3, 1)
+    assert stop is True and dec == "stop"

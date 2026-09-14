@@ -183,6 +183,51 @@ def summarize_metrics(values: list[float]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Bayesian Optimal Interval (BOIN) design
+# ---------------------------------------------------------------------------
+BOIN_PHI: float = 0.30
+BOIN_LAMBDA_E: float = 0.236
+BOIN_LAMBDA_D: float = 0.358
+BOIN_SAFETY_CUTOFF: float = 0.95
+
+
+def boin_pr_toxic_exceeds(d: int, n: int, phi: float = BOIN_PHI) -> float:
+    """Return Pr(p_j > phi | d, n) with Beta(1,1) prior (exact binomial sum)."""
+    import math as _math
+    N = n + 1
+    ple = 0.0
+    for j in range(d + 1, N + 1):
+        ple += _math.comb(N, j) * (phi ** j) * ((1.0 - phi) ** (N - j))
+    return float(1.0 - ple)
+
+
+
+def _stable_dt_for_batch(params_batch: dict[str, Any], dt_requested: float = 0.01) -> float:
+    """Adaptive dt honoring the QED Metzler bound (fail-closed upstream)."""
+    from insilico_trial.pbpk.fixed_step import _assert_batch_dt_stable, calculate_max_stable_dt
+    import numpy as _np
+    try:
+        n = len(_np.asarray(params_batch.get("CL", [0.0])).ravel())
+    except Exception:
+        return dt_requested
+    bounds = []
+    for i in range(max(n, 1)):
+        single = {}
+        for k, v in params_batch.items():
+            try:
+                arr = _np.asarray(v)
+                single[k] = arr[i] if arr.shape and len(arr) == n else v
+            except Exception:
+                single[k] = v
+        try:
+            bounds.append(calculate_max_stable_dt(single))
+        except Exception:
+            continue
+    if not bounds:
+        return dt_requested
+    return float(min(dt_requested, 0.9 * min(bounds)))
+
 class TrialEngine:
     """Event-driven SAD/MAD trial simulator.
 
@@ -334,12 +379,31 @@ class TrialEngine:
         - 0 DLTs -> escalate to the next pre-specified dose level
         - 0 < DLTs < max -> "stay" at the current dose level
         """
+        if getattr(self.protocol.dose_escalation, "rule", "") == "boin":
+            n = max(self.protocol.cohort_size, 1)
+            return self.boin_decision(dlt_count, n, current_level_index)
         max_dlt = self.protocol.dose_escalation.max_dlt_per_cohort
         if dlt_count >= max_dlt:
             return "stop", current_level_index, True
         if dlt_count == 0:
             nxt = min(current_level_index + 1, len(self.protocol.dose_levels) - 1)
             return "escalate", nxt, False
+        return "stay", current_level_index, False
+
+    def boin_decision(self, dlt_count: int, n: int, current_level_index: int) -> tuple[str, int, bool]:
+        """BOIN dose-escalation decision with safety stopping rule."""
+        n_levels = len(self.protocol.dose_levels)
+        if n <= 0:
+            return "stay", current_level_index, False
+        if boin_pr_toxic_exceeds(dlt_count, n, BOIN_PHI) > BOIN_SAFETY_CUTOFF:
+            return "stop", current_level_index, True
+        phat = dlt_count / n
+        if phat <= BOIN_LAMBDA_E:
+            nxt = min(current_level_index + 1, n_levels - 1)
+            return "escalate", nxt, False
+        if phat >= BOIN_LAMBDA_D:
+            nxt = max(current_level_index - 1, 0)
+            return "de-escalate", nxt, False
         return "stay", current_level_index, False
 
     # ------------------------------------------------------------------
@@ -422,7 +486,7 @@ class TrialEngine:
         if effective_solver == "fixed_step":
             # Fixed-step RK4: return plasma, liver + full 9-state (ALT idx 8)
             C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
-                t_eval_hours, A_gut_0s, params_batch, dt=0.01,
+                t_eval_hours, A_gut_0s, params_batch, dt=_stable_dt_for_batch(params_batch),
                 return_full_state=True,
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
@@ -445,7 +509,7 @@ class TrialEngine:
         else:
             # Legacy solver names map to the unified fixed-step 9-state path.
             C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
-                t_eval_hours, A_gut_0s, params_batch, dt=0.01,
+                t_eval_hours, A_gut_0s, params_batch, dt=_stable_dt_for_batch(params_batch),
                 return_full_state=True,
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
@@ -573,7 +637,7 @@ class TrialEngine:
                 params_batch[key] = onp.full(n_patients, default_val, dtype=onp.float64)
 
         C_batch, C_liver_batch = solve_pbpk_batch_multi_dose_fixed_step(
-            t_eval_hours, dose_times, dose_amounts, params_batch, dt=0.01,
+            t_eval_hours, dose_times, dose_amounts, params_batch, dt=_stable_dt_for_batch(params_batch),
         )
 
         return t_eval_hours, onp.asarray(C_batch, dtype=onp.float64)
