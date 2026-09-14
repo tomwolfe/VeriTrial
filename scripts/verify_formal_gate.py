@@ -268,6 +268,51 @@ def _ensure_lake_on_path() -> None:
         os.environ["PATH"] = str(elan_bin) + os.pathsep + os.environ.get("PATH", "")
 
 
+def _lean_env(qed: Path) -> dict[str, str]:
+    """Build the environment for invoking Lean directly (no `lake env`).
+
+    Some Lake versions crash on `lake env` (SIGTRAP) even though the pinned
+    toolchain's `lean` is healthy.  We therefore bypass `lake env` and set
+    LEAN_PATH to the project's olean roots explicitly:
+    ``.lake/build/lib/lean`` plus every package's ``.lake/build/lib/lean``.
+    """
+    import os as _os
+
+    parts = [str(qed / ".lake" / "build" / "lib" / "lean")]
+    pkgs = qed / ".lake" / "packages"
+    if pkgs.is_dir():
+        for pkg in sorted(pkgs.iterdir()):
+            cand = pkg / ".lake" / "build" / "lib" / "lean"
+            if cand.is_dir():
+                parts.append(str(cand))
+    env = dict(_os.environ)
+    prev = env.get("LEAN_PATH", "")
+    env["LEAN_PATH"] = os.pathsep.join(parts) + (os.pathsep + prev if prev else "")
+    return env
+
+
+def _lean_bin() -> str:
+    """Resolve the pinned toolchain's `lean` binary via lean-toolchain."""
+    import shutil as _shutil
+
+    # Prefer the elan-shimmed lean (respects QED/lean-toolchain).
+    found = _shutil.which("lean")
+    if found:
+        return found
+    elan_bin = Path.home() / ".elan" / "bin" / "lean"
+    return str(elan_bin)
+
+
+def _run_lean(qed: Path, args: list[str]) -> "subprocess.CompletedProcess[str]":
+    """Run Lean hermetically without `lake env` (see _lean_env)."""
+    import subprocess as _sp
+
+    return _sp.run(
+        [_lean_bin(), *args], cwd=str(qed), capture_output=True, text=True,
+        shell=False, env=_lean_env(qed),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -414,11 +459,9 @@ def main(argv: list[str] | None = None) -> int:
     lean_export = qed / "VeriTrialExport.lean"
     if lean_export.is_file():
         for cmd in (
-            ["lake", "env", "lean", str(lean_export)],
+            [str(lean_export)],
         ):
-            proc_lean = subprocess.run(
-                cmd, cwd=str(qed), capture_output=True, text=True, shell=False,
-            )
+            proc_lean = _run_lean(qed, cmd)
             sys.stdout.write(proc_lean.stdout)
             if proc_lean.stderr:
                 sys.stderr.write(proc_lean.stderr)
@@ -434,10 +477,7 @@ def main(argv: list[str] | None = None) -> int:
                 "#print axioms veritrial_model_matches_pbpkK\n",
                 encoding="utf-8",
             )
-            proc_ax = subprocess.run(
-                ["lake", "env", "lean", str(check_file)],
-                cwd=str(qed), capture_output=True, text=True, shell=False,
-            )
+            proc_ax = _run_lean(qed, [str(check_file)])
             sys.stdout.write(proc_ax.stdout)
             if proc_ax.stderr:
                 sys.stderr.write(proc_ax.stderr)

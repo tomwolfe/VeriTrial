@@ -294,6 +294,7 @@ def solve_pbpk_batch_9state(
     hold across all 9 states via the RK4 guard in ``_rk4_step``.
     Returns array (n_patients, n_timepoints, 9).
     """
+    _assert_batch_dt_stable(dt, params_batch)
     te = onp.asarray(t_eval, dtype=onp.float64)
     t0 = float(te[0])
     t1 = float(te[-1])

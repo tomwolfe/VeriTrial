@@ -1110,6 +1110,16 @@ def build_regulatory_provenance(
     Reads Tether report.json, QED traces.json, and validation_summary.json,
     builds a unified Merkle tree (sorted-leaf SHA-256 chain), writes
     regulatory_provenance.json, and embeds the root into the V&V40 HTML header.
+
+    The record additionally captures:
+      * git commit SHAs of the sibling ``tether``, ``QED`` and ``VeriTrial``
+        checkouts (tri-repo workspace layout);
+      * SHA-256 digests of ``QED/Compartmental.lean`` and
+        ``QED/VeriTrialExport.lean``;
+      * per-benchmark ASME V&V 40 pass/fail metrics extracted from the
+        validation summary (falling back to the sibling per-benchmark JSON
+        files);
+      * the Tether session report ID and session Merkle root when present.
     """
     def _load(p: str | Path | None, defaults: dict) -> dict:
         if p is None:
@@ -1119,6 +1129,24 @@ def build_regulatory_provenance(
             return json.loads(pp.read_text(encoding="utf-8"))
         return dict(defaults)
 
+    def _git_sha(repo: Path) -> str | None:
+        try:
+            import subprocess as _sp
+            r = _sp.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                        capture_output=True, text=True, timeout=15)
+            sha = r.stdout.strip()
+            return sha if r.returncode == 0 and sha else None
+        except Exception:
+            return None
+
+    def _sha256_file(p: Path) -> str | None:
+        try:
+            if p.is_file():
+                return hashlib.sha256(p.read_bytes()).hexdigest()
+        except Exception:
+            pass
+        return None
+
     root = Path(repo_root) if repo_root else Path.cwd()
     tether = _load(tether_report or (root / "output" / "report.json"),
                    {"note": "tether report unavailable"})
@@ -1127,13 +1155,65 @@ def build_regulatory_provenance(
                 {"note": "qed traces unavailable"})
     bench = _load(validation_summary or (root / "output" / "validation" / "validation_summary.json"),
                   {"note": "benchmarks unavailable"})
+    # Tri-repo workspace root: VeriTrial/..  (tether, QED, VeriTrial siblings).
+    veritrial_root = Path(__file__).resolve().parents[3]
+    workspace = veritrial_root.parent
+    git_shas = {
+        name: _git_sha(workspace / name)
+        for name in ("tether", "QED", "VeriTrial")
+    }
+    lean_digests = {
+        "QED/Compartmental.lean": _sha256_file(workspace / "QED" / "Compartmental.lean"),
+        "QED/VeriTrialExport.lean": _sha256_file(workspace / "QED" / "VeriTrialExport.lean"),
+    }
+    # ASME V&V 40 per-benchmark pass/fail metrics: from the summary when it
+    # carries per-benchmark entries, else from the sibling per-benchmark
+    # JSON files (warfarin_pgx.json, moxifloxacin_qtc.json, ...).
+    benchmark_metrics: dict[str, Any] = {}
+    if isinstance(bench, dict):
+        for key, val in bench.items():
+            if isinstance(val, dict) and "overall_pass" in val:
+                benchmark_metrics[key] = {
+                    "overall_pass": bool(val.get("overall_pass")),
+                    "benchmark": val.get("benchmark", key),
+                }
+    if not benchmark_metrics:
+        val_dir = root / "output" / "validation"
+        if not val_dir.is_dir():
+            val_dir = veritrial_root / "output" / "validation"
+        if val_dir.is_dir():
+            for jf in sorted(val_dir.glob("*.json")):
+                if jf.name in ("validation_summary.json", "qed_traces.json",
+                               "regulatory_provenance.json", "formal_verification.json",
+                               "formal_gate_compound.json"):
+                    continue
+                try:
+                    payload = json.loads(jf.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if isinstance(payload, dict) and "overall_pass" in payload:
+                    benchmark_metrics[jf.stem] = {
+                        "overall_pass": bool(payload.get("overall_pass")),
+                        "benchmark": payload.get("benchmark", jf.stem),
+                    }
+    # Tether session report ID and session Merkle root (when present).
+    session_id = tether.get("session_id") or tether.get("session") or tether.get("id")
+    session_merkle = (
+        tether.get("merkle_root") or tether.get("merkleRoot") or tether.get("root")
+    )
     leaves = sorted([
         hashlib.sha256(json.dumps(tether, sort_keys=True, default=str).encode()).hexdigest(),
         hashlib.sha256(json.dumps(qed, sort_keys=True, default=str).encode()).hexdigest(),
         hashlib.sha256(json.dumps(bench, sort_keys=True, default=str).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(git_shas, sort_keys=True, default=str).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(lean_digests, sort_keys=True, default=str).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(benchmark_metrics, sort_keys=True, default=str).encode()).hexdigest(),
     ])
     h = hashlib.sha256((",".join(leaves)).encode()).hexdigest()
     out = {"merkle_root": h, "tether_session": tether,
+           "tether_session_id": session_id, "tether_session_merkle_root": session_merkle,
+           "git_shas": git_shas, "lean_digests": lean_digests,
+           "benchmark_metrics": benchmark_metrics,
            "qed_proofs": qed, "veritrial_benchmarks": bench}
     op = Path(output_path)
     op.parent.mkdir(parents=True, exist_ok=True)
