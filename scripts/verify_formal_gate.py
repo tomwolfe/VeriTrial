@@ -257,6 +257,17 @@ def _is_numeric_shortcut(lemma: str) -> bool:
     return False
 
 
+def _ensure_lake_on_path() -> None:
+    """Prepend the elan toolchain bin dir so `lake` resolves hermetically."""
+    import shutil as _shutil
+
+    if _shutil.which("lake") is not None:
+        return
+    elan_bin = Path.home() / ".elan" / "bin"
+    if (elan_bin / "lake").exists():
+        os.environ["PATH"] = str(elan_bin) + os.pathsep + os.environ.get("PATH", "")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -398,11 +409,64 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # Isomorphism gate: compile QED/VeriTrialExport.lean and check axioms.
+    _ensure_lake_on_path()
+    lean_export = qed / "VeriTrialExport.lean"
+    if lean_export.is_file():
+        for cmd in (
+            ["lake", "env", "lean", str(lean_export)],
+        ):
+            proc_lean = subprocess.run(
+                cmd, cwd=str(qed), capture_output=True, text=True, shell=False,
+            )
+            sys.stdout.write(proc_lean.stdout)
+            if proc_lean.stderr:
+                sys.stderr.write(proc_lean.stderr)
+            if proc_lean.returncode != 0:
+                print("FORMAL GATE FAILED: VeriTrialExport.lean did not compile.",
+                      file=sys.stderr)
+                return 1
+        check_file = qed / "_axiom_check.lean"
+        try:
+            check_file.write_text(
+                "import Compartmental\nimport VeriTrialExport\n"
+                "open Compartmental\n"
+                "#print axioms veritrial_model_matches_pbpkK\n",
+                encoding="utf-8",
+            )
+            proc_ax = subprocess.run(
+                ["lake", "env", "lean", str(check_file)],
+                cwd=str(qed), capture_output=True, text=True, shell=False,
+            )
+            sys.stdout.write(proc_ax.stdout)
+            if proc_ax.stderr:
+                sys.stderr.write(proc_ax.stderr)
+            if proc_ax.returncode != 0:
+                print("FORMAL GATE FAILED: axiom check did not compile.",
+                      file=sys.stderr)
+                return 1
+            if "sorry" in proc_ax.stdout or "sorryAx" in proc_ax.stdout:
+                print("FORMAL GATE FAILED: sorry axiom in export.",
+                      file=sys.stderr)
+                return 1
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"FORMAL GATE FAILED: axiom check error: {e}",
+                  file=sys.stderr)
+            return 1
+        finally:
+            try:
+                check_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     proc = subprocess.run(
         [sys.executable, str(verify_script), str(lemmas_file)],
         cwd=str(qed),
         capture_output=True,
         text=True,
+        shell=False,
     )
     sys.stdout.write(proc.stdout)
     if proc.stderr:

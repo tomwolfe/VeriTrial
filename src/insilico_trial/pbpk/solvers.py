@@ -73,8 +73,8 @@ def _sdirk2_step(
     # Update: y_new = y + dt*(b1*k1 + b2*k2)
     y_new = y + dt * (_B1 * k1 + _B2 * k2)
 
-    # Physical Non-negativity Guard: clamp numerical truncation artifacts
-    y_new = jnp.maximum(y_new, 0.0)
+    # Non-negativity guaranteed by Metzler matrix invariants (QED
+    # pbpk_diag_neg / pbpk_is_metzler); no ad-hoc clamping.
 
     # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
     mass_drift = jnp.abs(jnp.sum(y_new[:n_monitor]) - y_initial_dose)

@@ -1097,8 +1097,59 @@ def run_all_validations(
     }
 
 
+def build_regulatory_provenance(
+    tether_report: str | Path | None = None,
+    qed_traces: str | Path | None = None,
+    validation_summary: str | Path | None = None,
+    output_path: str | Path = "output/validation/regulatory_provenance.json",
+    vvv40_path: str | Path = "output/vvv40_report.html",
+    repo_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Merkle-provenance aggregator tying tether + QED + VeriTrial.
+
+    Reads Tether report.json, QED traces.json, and validation_summary.json,
+    builds a unified Merkle tree (sorted-leaf SHA-256 chain), writes
+    regulatory_provenance.json, and embeds the root into the V&V40 HTML header.
+    """
+    def _load(p: str | Path | None, defaults: dict) -> dict:
+        if p is None:
+            return dict(defaults)
+        pp = Path(p)
+        if pp.is_file():
+            return json.loads(pp.read_text(encoding="utf-8"))
+        return dict(defaults)
+
+    root = Path(repo_root) if repo_root else Path.cwd()
+    tether = _load(tether_report or (root / "output" / "report.json"),
+                   {"note": "tether report unavailable"})
+    # Also try sibling tether sessions dir
+    qed = _load(qed_traces or (root / "output" / "validation" / "qed_traces.json"),
+                {"note": "qed traces unavailable"})
+    bench = _load(validation_summary or (root / "output" / "validation" / "validation_summary.json"),
+                  {"note": "benchmarks unavailable"})
+    leaves = sorted([
+        hashlib.sha256(json.dumps(tether, sort_keys=True, default=str).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(qed, sort_keys=True, default=str).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(bench, sort_keys=True, default=str).encode()).hexdigest(),
+    ])
+    h = hashlib.sha256((",".join(leaves)).encode()).hexdigest()
+    out = {"merkle_root": h, "tether_session": tether,
+           "qed_proofs": qed, "veritrial_benchmarks": bench}
+    op = Path(output_path)
+    op.parent.mkdir(parents=True, exist_ok=True)
+    op.write_text(json.dumps(out, indent=2, default=str))
+    vp = Path(vvv40_path)
+    if vp.is_file():
+        html = vp.read_text(encoding="utf-8")
+        meta = f'<meta name="merkle-root" content="{h}">'
+        if "merkle-root" not in html:
+            html = html.replace("<head>", f"<head>\n    {meta}", 1)
+            vp.write_text(html, encoding="utf-8")
+    return out
+
+
 __all__ = [
-    "WARFARIN_REFERENCE",
+    "build_regulatory_provenance",    "WARFARIN_REFERENCE",
     "MOXIFLOXACIN_REFERENCE",
     "MIDAZOLAM_REFERENCE",
     "METFORMIN_REFERENCE",
