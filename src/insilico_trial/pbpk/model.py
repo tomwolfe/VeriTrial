@@ -20,7 +20,7 @@ NOTE ON BACKEND
 ---------------
 diffrax (via lineax) is not currently compatible with the JAX Metal backend
 ("unknown attribute code: 22" on Apple Silicon with recent JAX/jax-metal). The
-package therefore defaults to the CPU backend; see ``insilico_trial/__init__.py``
+package therefore defaults to the CPU backend for diffrax paths only; fixed_step/sdirk2 use native JAX (Metal/GPU-capable); see ``insilico_trial/__init__.py``
 and ``docs/ASSUMPTIONS.md``.
 
 A fixed-step PBPK solver using ``jax.lax.scan`` with matrix-exponential integration

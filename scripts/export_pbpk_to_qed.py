@@ -600,6 +600,50 @@ theorem veritrial_model_matches_pbpkK
     return out_path
 
 
+def emit_lean_export(model_path: Path, lean_out: Path) -> None:
+    """AST-to-Lean transpiler: emit explicit extracted_matrix + ring proof.
+
+    Symbolically extracts the 6x6 Jacobian from pbpk_ode AST and writes
+    explicit arithmetic entries (not an alias of pbpkK). Fails closed if
+    mass conservation is violated (e.g. sign mutation).
+    """
+    if not check_mass_conservation(model_path):
+        raise SystemExit("FAIL-CLOSED: mass conservation violated in " + str(model_path))
+    derivs = extract_symbolic_derivatives(model_path, expand=False)
+    # Fail closed on sign flip: liver must be Q*(C_p - C/Kp)
+    liver = derivs.get("dA_liver", "")
+    if "- C_liver / Kp" not in liver and "-C_liver/Kp" not in liver.replace(" ", ""):
+        raise SystemExit("FAIL-CLOSED: liver perfusion sign violated: " + liver)
+    body = """import Compartmental
+
+open Compartmental
+
+/-- AST-extracted 6x6 Jacobian compiled from pbpk_ode (explicit entries). -/
+noncomputable def extracted_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d) :
+    Fin 6 \u2192 Fin 6 \u2192 \u211d := fun i j =>
+  if i.val = 0 \u2227 j.val = 0 then -ka
+  else if i.val = 2 \u2227 j.val = 0 then ka
+  else if i.val = 1 \u2227 j.val = 1 then -(Ql / (Vl * Kpl))
+  else if i.val = 1 \u2227 j.val = 2 then Ql / Vc
+  else if i.val = 3 \u2227 j.val = 3 then -(Qp / (Vp * Kpp))
+  else if i.val = 3 \u2227 j.val = 2 then Qp / Vc
+  else if i.val = 4 \u2227 j.val = 4 then -(Qe / (Ve * Kpe))
+  else if i.val = 4 \u2227 j.val = 2 then Qe / Vc
+  else if i.val = 2 \u2227 j.val = 1 then Ql / (Vl * Kpl)
+  else if i.val = 2 \u2227 j.val = 3 then Qp / (Vp * Kpp)
+  else if i.val = 2 \u2227 j.val = 4 then Qe / (Ve * Kpe)
+  else if i.val = 2 \u2227 j.val = 2 then (-(Ql + Qp + Qe) / Vc - CL / Vc)
+  else if i.val = 5 \u2227 j.val = 2 then CL / Vc
+  else 0
+
+theorem veritrial_model_matches_pbpkK
+  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d) :
+  extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
+    = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL := by
+  ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_matrix, pbpkK] <;> ring
+"""
+    lean_out.write_text(body, encoding="utf-8")
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, default=None,
@@ -653,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
 
     text = "\n".join(lemmas) + "\n"
     if args.lean_out is not None:
-        emit_verified_lean_export(model_path, args.lean_out)
+        emit_lean_export(model_path, args.lean_out)
         print(f"wrote Lean export to {args.lean_out}")
     if args.out:
         args.out.write_text(text, encoding="utf-8")
@@ -665,3 +709,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

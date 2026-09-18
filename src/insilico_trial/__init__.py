@@ -15,7 +15,8 @@ from __future__ import annotations
 import os
 import sys
 
-if sys.platform == "darwin" and os.environ.get("VERITRIAL_ALLOW_METAL") != "1":
+solver = os.environ.get("VERITRIAL_SOLVER", "")
+if sys.platform == "darwin" and os.environ.get("VERITRIAL_ALLOW_METAL") != "1" and solver not in ("fixed_step", "sdirk2"):
     # Must be set before JAX is imported anywhere.
     os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
