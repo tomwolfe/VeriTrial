@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
                                   cwd=str(qed), env=env)
         except subprocess.TimeoutExpired:
             print(f"TIMEOUT compiling {mod}", file=sys.stderr)
-            return 1
+            raise SystemExit(1)
         if proc.returncode != 0:
             print(f"LEAN COMPILE FAILED for {mod}:\n{proc.stdout}\n{proc.stderr}",
                   file=sys.stderr)
