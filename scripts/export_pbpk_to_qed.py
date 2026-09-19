@@ -787,10 +787,10 @@ def emit_lean_export(model_path: Path, lean_out: Path) -> None:
         "      k_synth k_deplete IC50 k_leak k_elim ALT_base := by\n"
         "  ext i j\n"
         "  by_cases h : i.val < 6 ∧ j.val < 6\n"
-        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dif_pos h]\n"
+        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_left h]\n"
         "    have H := veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
         "    exact congr_fun (congr_fun H ⟨i.val, by omega⟩) ⟨j.val, by omega⟩\n"
-        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dif_neg h]\n")
+        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_right h]\n")
     lean_out.write_text(body, encoding="utf-8")
 
 
