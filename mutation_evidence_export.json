@@ -1,0 +1,212 @@
+[
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "40:4",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=Traceback (most recent call last):\n  File \"/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 669, in <module>\n    raise SystemExit(main())\n                     ~~~~^^\n  File \"/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 647, in main\n    if not model_path.is_file():\n           ^^^^^^^^^^^^^^^^^^\nAttributeError: 'NoneType' object has no attribute 'is_file'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "68:15",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=Traceback (most recent call last):\n  File \"/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 669, in <module>\n    raise SystemExit(main())\n                     ~~~~^^\n  File \"/Users/tom/Documents/apps/Veri\n... [truncated 462 characters; full output in audit] ...\n/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 70, in extract_state_variables\n    raise ValueError('Could not locate the state vector returned by pbpk_ode')\nValueError: Could not locate the state vector returned by pbpk_ode\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "negate_compare",
+    "site": "113:11",
+    "status": "killed",
+    "detail": "GATE rc=1 tail=FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas are REQUIRED but only 0 found (expected >= 3 for perfused compartments).\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "116:11",
+    "status": "killed",
+    "detail": "GATE rc=1 tail=FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas are REQUIRED but only 0 found (expected >= 3 for perfused compartments).\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "133:36",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "189:37",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=Traceback (most recent call last):\n  File \"/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 669, in <module>\n    raise SystemExit(main())\n                     ~~~~^^\n  File \"/Users/tom/Documents/apps/Veri\n... [truncated 131 characters; full output in audit] ...\n~~~~~~~^^^^^^^^^^^^\n  File \"/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 164, in check_mass_conservation\n    target = node.targets[0].id\n             ^^^^^^^^^^^^^^^^^^\nAttributeError: 'Tuple' object has no attribute 'id'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "206:15",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "217:4",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=MASS CONSERVATION VIOLATED: the PBPK ODE does not conserve total drug mass. Refusing to export lemmas.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "negate_compare",
+    "site": "237:49",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: Symbolic cancellation verification failed: the PBPK ODE does not conserve total drug mass in symbolic form.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "245:11",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: 'Expr' object has no attribute 'targets'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "253:7",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: Symbolic cancellation verification failed: the PBPK ODE does not conserve total drug mass in symbolic form.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "264:8",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: expected string or bytes-like object, got 'NoneType'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "359:65",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: Symbolic cancellation verification failed: cannot build mass dissipation lemma from a non-conserving model.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "negate_compare",
+    "site": "418:79",
+    "status": "killed",
+    "detail": "GATE rc=1 tail=Qp * Vp\u207b\u00b9 * Kpp\u207b\u00b9\n\ncase \u00ab2\u00bb.\u00ab4\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 0 = Qe * Ve\u207b\u00b9 * Kpe\u207b\u00b9\n\ncase \u00ab3\u00bb.\u00ab2\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 0 = Qp * Vc\u207b\u00b9\n\ncase \u00ab3\u00bb.\u00ab3\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 Qp =\n... [truncated 2515 characters; full output in audit] ...\narning: `dif_pos` has been deprecated: Use `dite_eq_left` instead\n/Users/tom/Documents/apps/QED/VeriTrialExport.lean:38:54: warning: `dif_neg` has been deprecated: Use `dite_eq_right` instead\nFORMAL GATE FAILED: VeriTrialExport.lean did not compile.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "435:16",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: 'UnaryOp' object has no attribute 'operand'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "negate_compare",
+    "site": "435:105",
+    "status": "killed",
+    "detail": "GATE rc=1 tail=noncomm_ring`, `abel` or `module` instead.\n/Users/tom/Documents/apps/QED/VeriTrialExport.lean:23:54: error: unsolved goals\ncase \u00ab2\u00bb.\u00ab1\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 0 = Ql * Vl\u207b\u00b9 * Kpl\u207b\u00b9\n\ncase \u00ab2\u00bb.\u00ab2\u00bb\nka Ql Qp Qe Vc Vl \n... [truncated 2515 characters; full output in audit] ...\narning: `dif_pos` has been deprecated: Use `dite_eq_left` instead\n/Users/tom/Documents/apps/QED/VeriTrialExport.lean:48:54: warning: `dif_neg` has been deprecated: Use `dite_eq_right` instead\nFORMAL GATE FAILED: VeriTrialExport.lean did not compile.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "445:8",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: 'NoneType' object has no attribute '_fields'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "449:8",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: 'NoneType' object has no attribute '_fields'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "466:8",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "469:25",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "471:8",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "520:15",
+    "status": "killed",
+    "detail": "GATE rc=1 tail=Qp * Vp\u207b\u00b9 * Kpp\u207b\u00b9\n\ncase \u00ab2\u00bb.\u00ab4\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 0 = Qe * Ve\u207b\u00b9 * Kpe\u207b\u00b9\n\ncase \u00ab3\u00bb.\u00ab2\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 0 = Qp * Vc\u207b\u00b9\n\ncase \u00ab3\u00bb.\u00ab3\u00bb\nka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d\n\u22a2 Qp =\n... [truncated 2515 characters; full output in audit] ...\narning: `dif_pos` has been deprecated: Use `dite_eq_left` instead\n/Users/tom/Documents/apps/QED/VeriTrialExport.lean:40:54: warning: `dif_neg` has been deprecated: Use `dite_eq_right` instead\nFORMAL GATE FAILED: VeriTrialExport.lean did not compile.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "negate_compare",
+    "site": "554:32",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "658:65",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=failed to export lemmas: Symbolic cancellation verification failed: the PBPK ODE does not conserve total drug mass in symbolic form.\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "arithmetic",
+    "site": "761:12",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=Traceback (most recent call last):\n  File \"/Users/tom/Documents/apps/VeriTrial/scripts/export_pbpk_to_qed.py\", line 669, in <module>\n    raise SystemExit(main())\n                     ~~~~^^\n  File \"/Users/tom/Documents/apps/Veri\n... [truncated 187 characters; full output in audit] ...\neriTrial/scripts/export_pbpk_to_qed.py\", line 618, in emit_lean_export\n    chain = '\\n  else '.join(arms) - '\\n  else 0' if arms else '0'\n            ~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~\nTypeError: unsupported operand type(s) for -: 'str' and 'str'\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "negate_compare",
+    "site": "805:49",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=FAIL-CLOSED: pbpk_dili_ode delegation broken in /Users/tom/Documents/apps/VeriTrial/src/insilico_trial/pbpk/model.py\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "807:12",
+    "status": "killed",
+    "detail": "EXPORT_FAIL rc=1 tail=FAIL-CLOSED: pbpk_dili_ode delegation broken in /Users/tom/Documents/apps/VeriTrial/src/insilico_trial/pbpk/model.py\n"
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "flip_bool",
+    "site": "808:11",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "852:8",
+    "status": "survived",
+    "detail": ""
+  },
+  {
+    "file": "scripts/export_pbpk_to_qed.py",
+    "operator": "break_return",
+    "site": "870:4",
+    "status": "survived",
+    "detail": ""
+  }
+]

@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         if proc.returncode != 0:
             print(f"LEAN COMPILE FAILED for {mod}:\n{proc.stdout}\n{proc.stderr}",
                   file=sys.stderr)
-            return 1
+            raise SystemExit(1)
         print(f"rebuilt {out}")
     return 0
 

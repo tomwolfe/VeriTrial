@@ -1,0 +1,177 @@
+[
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "30:10",
+  "status": "killed",
+  "detail": ".F\n=================================== FAILURES ===================================\n____________________ test_lean_bin_prefers_pinned_toolchain ____________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:40: in test_lean_bin_prefers_pinned_t\n... [truncated 360 characters; full output in audit] ...\n==================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_bin_prefers_pinned_toolchain\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "36:15",
+  "status": "killed",
+  "detail": ".F\n=================================== FAILURES ===================================\n____________________ test_lean_bin_prefers_pinned_toolchain ____________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:40: in test_lean_bin_prefers_pinned_t\n... [truncated 360 characters; full output in audit] ...\n==================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_bin_prefers_pinned_toolchain\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "36:15",
+  "status": "killed",
+  "detail": ".F\n=================================== FAILURES ===================================\n____________________ test_lean_bin_prefers_pinned_toolchain ____________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:40: in test_lean_bin_prefers_pinned_t\n... [truncated 340 characters; full output in audit] ...\n==================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_bin_prefers_pinned_toolchain\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "36:15",
+  "status": "killed",
+  "detail": ".F\n=================================== FAILURES ===================================\n____________________ test_lean_bin_prefers_pinned_toolchain ____________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:40: in test_lean_bin_prefers_pinned_t\n... [truncated 340 characters; full output in audit] ...\n==================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_bin_prefers_pinned_toolchain\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "36:15",
+  "status": "killed",
+  "detail": ".F\n=================================== FAILURES ===================================\n____________________ test_lean_bin_prefers_pinned_toolchain ____________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:40: in test_lean_bin_prefers_pinned_t\n... [truncated 340 characters; full output in audit] ...\n==================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_bin_prefers_pinned_toolchain\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "break_return",
+  "site": "38:12",
+  "status": "killed",
+  "detail": ".F\n=================================== FAILURES ===================================\n____________________ test_lean_bin_prefers_pinned_toolchain ____________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:41: in test_lean_bin_prefers_pinned_t\n... [truncated 151 characters; full output in audit] ...\n==================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_bin_prefers_pinned_toolchain\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "break_return",
+  "site": "39:4",
+  "status": "killed",
+  "detail": "F\n=================================== FAILURES ===================================\n_______________________ test_import_has_no_side_effects ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:31: in test_import_has_no_side_effects\n... [truncated 416 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_import_has_no_side_effects\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "43:17",
+  "status": "killed",
+  "detail": "...F\n=================================== FAILURES ===================================\n________________________ test_lean_path_merges_previous ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:54: in test_lean_path_merges_previo\n... [truncated 314 characters; full output in audit] ...\n\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_path_merges_previous\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "43:17",
+  "status": "killed",
+  "detail": "...F\n=================================== FAILURES ===================================\n________________________ test_lean_path_merges_previous ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:54: in test_lean_path_merges_previo\n... [truncated 314 characters; full output in audit] ...\n\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_path_merges_previous\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "47:19",
+  "status": "killed",
+  "detail": "......F\n=================================== FAILURES ===================================\n_______________________ test_main_rebuilds_oleans_fresh ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:76: in test_main_rebuilds_oleans\n... [truncated 435 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rebuilds_oleans_fresh\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "47:19",
+  "status": "killed",
+  "detail": "......F\n=================================== FAILURES ===================================\n_______________________ test_main_rebuilds_oleans_fresh ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:76: in test_main_rebuilds_oleans\n... [truncated 435 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rebuilds_oleans_fresh\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "51:37",
+  "status": "killed",
+  "detail": "...F\n=================================== FAILURES ===================================\n________________________ test_lean_path_merges_previous ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:54: in test_lean_path_merges_previo\n... [truncated 311 characters; full output in audit] ...\n\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_path_merges_previous\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "59:11",
+  "status": "killed",
+  "detail": "...F\n=================================== FAILURES ===================================\n________________________ test_lean_path_merges_previous ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:54: in test_lean_path_merges_previo\n... [truncated 311 characters; full output in audit] ...\n\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_path_merges_previous\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "60:12",
+  "status": "killed",
+  "detail": "...F\n=================================== FAILURES ===================================\n________________________ test_lean_path_merges_previous ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:54: in test_lean_path_merges_previo\n... [truncated 311 characters; full output in audit] ...\n\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_lean_path_merges_previous\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "66:13",
+  "status": "killed",
+  "detail": ".....F\n=================================== FAILURES ===================================\n_______________________ test_main_rejects_missing_module _______________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:67: in test_main_rejects_missing_\n... [truncated 375 characters; full output in audit] ...\n========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rejects_missing_module\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "66:13",
+  "status": "killed",
+  "detail": ".....F\n=================================== FAILURES ===================================\n_______________________ test_main_rejects_missing_module _______________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:67: in test_main_rejects_missing_\n... [truncated 375 characters; full output in audit] ...\n========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rejects_missing_module\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "66:13",
+  "status": "killed",
+  "detail": ".....F\n=================================== FAILURES ===================================\n_______________________ test_main_rejects_missing_module _______________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:67: in test_main_rejects_missing_\n... [truncated 358 characters; full output in audit] ...\n========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rejects_missing_module\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "flip_bool",
+  "site": "67:25",
+  "status": "killed",
+  "detail": ".....F\n=================================== FAILURES ===================================\n_______________________ test_main_rejects_missing_module _______________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:67: in test_main_rejects_missing_\n... [truncated 551 characters; full output in audit] ...\n========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rejects_missing_module\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "break_return",
+  "site": "72:12",
+  "status": "killed",
+  "detail": ".....F\n=================================== FAILURES ===================================\n_______________________ test_main_rejects_missing_module _______________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:67: in test_main_rejects_missing_\n... [truncated 711 characters; full output in audit] ...\n========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rejects_missing_module\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "arithmetic",
+  "site": "73:14",
+  "status": "killed",
+  "detail": "......F\n=================================== FAILURES ===================================\n_______________________ test_main_rebuilds_oleans_fresh ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:76: in test_main_rebuilds_oleans\n... [truncated 282 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rebuilds_oleans_fresh\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "flip_bool",
+  "site": "77:54",
+  "status": "survived",
+  "detail": ""
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "flip_bool",
+  "site": "77:65",
+  "status": "survived",
+  "detail": ""
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "negate_compare",
+  "site": "82:11",
+  "status": "killed",
+  "detail": "deplete` is not explicitly referenced.\n\nHint: The binding can be removed (if unused) or named `_` (if used implicitly). Alternatively, prefix the name with `_` to silence this warning:\n  [apply] _k_deplete\n\nNote: This linter can be disabled with `set\n... [truncated 1500 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rebuilds_oleans_fresh\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "break_return",
+  "site": "87:4",
+  "status": "killed",
+  "detail": "......F\n=================================== FAILURES ===================================\n_______________________ test_main_rebuilds_oleans_fresh ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:76: in test_main_rebuilds_oleans\n... [truncated 1058 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_main_rebuilds_oleans_fresh\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ },
+ {
+  "file": "scripts/rebuild_qed_oleans.py",
+  "operator": "negate_compare",
+  "site": "90:3",
+  "status": "killed",
+  "detail": "F\n=================================== FAILURES ===================================\n_______________________ test_import_has_no_side_effects ________________________\nsrc/insilico_trial/tests/test_rebuild_oleans.py:26: in test_import_has_no_side_effects\n... [truncated 1089 characters; full output in audit] ...\n=========================== short test summary info ============================\nFAILED src/insilico_trial/tests/test_rebuild_oleans.py::test_import_has_no_side_effects\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+ }
+]
