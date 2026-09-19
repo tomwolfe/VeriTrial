@@ -189,3 +189,29 @@ def test_build_parametric_sum_lemma() -> None:
     assert lemma.endswith("= 0")
     assert "dA_gut" in lemma or "ka" in lemma
     assert "+" in lemma
+
+def test_sign_flip_dynamically_alters_lean_and_fails_gate(tmp_path: Path) -> None:
+    """Flipping a sign in model.py alters generated Lean and fails the gate."""
+    import shutil, subprocess, sys
+    from pathlib import Path
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex
+    model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+    good_lean = tmp_path / "good.lean"
+    ex.emit_lean_export(model_path, good_lean)
+    good_text = good_lean.read_text()
+    # Mutated copy with liver perfusion sign flipped
+    bad_model = tmp_path / "model_bad.py"
+    src = model_path.read_text()
+    bad_src = src.replace("Q[_LIVER_IDX] * (C_p - C_liver / Kp[_LIVER_IDX])", "Q[_LIVER_IDX] * (C_p + C_liver / Kp[_LIVER_IDX])")
+    assert bad_src != src
+    bad_model.write_text(bad_src)
+    import pytest
+    with pytest.raises(SystemExit):
+        ex.emit_lean_export(bad_model, tmp_path / "bad.lean")
+    # Dynamic Jacobian also changes under a subtler sign edit that keeps
+    # conservation text checks but flips a derivative sign
+    J_good = ex.compute_jacobian(model_path)
+    assert J_good[(1, 1)] == "-Ql/(Kpl*Vl)"

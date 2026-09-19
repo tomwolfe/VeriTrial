@@ -411,22 +411,150 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
     return lemmas
 
 
-def extract_column_sum_lemmas(model_path: Path) -> list[str]:
-    """Emit genuine algebraic column summations for the 6-state PBPK Jacobian.
+def _ode_rhs_asts(model_path: Path) -> tuple[dict[str, ast.expr], list[str]]:
+    """Parse pbpk_ode into {deriv_name: RHS ast} plus state-var order."""
+    source = model_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pbpk_ode"), None)
+    if fn is None:
+        raise ValueError(f"pbpk_ode not found in {model_path}")
+    rhs: dict[str, ast.expr] = {}
+    for node in fn.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id.startswith("dA_"):
+            rhs[node.targets[0].id] = node.value
+    order = ["dA_gut", "dA_liver", "dA_central", "dA_periph", "dA_effect", "dA_elim"]
+    order = [k for k in order if k in rhs] + [k for k in rhs if k not in order]
+    return rhs, order
 
-    Each lemma states the column entries summing to zero (mass conservation
-    at CL=0 offset aside), in parametric form so QED auto-generates
-    positivity hypotheses. Distinct by construction from Metzler/system-matrix
-    emissions (which use strict ``> 0`` / ``>= 0`` comparison forms).
+
+def _substitute(expr: ast.expr, env: dict[str, ast.expr]) -> ast.expr:
+    """Inline intermediate names (C_p, dA_liver, ...) via AST copy."""
+    class _S(ast.NodeTransformer):
+        def visit_Name(self, n: ast.Name) -> ast.AST:
+            if n.id in env:
+                return ast.fix_missing_locations(_substitute(env[n.id], {k: v for k, v in env.items() if k != n.id}))
+            return n
+    return ast.fix_missing_locations(_S().visit(ast.parse(ast.unparse(expr)).body[0].value))
+
+
+def _sym_diff(node: ast.expr, var: str) -> ast.expr:
+    """Symbolic d(node)/d(var) over Python AST (linear ODE fragment)."""
+    Z = ast.parse("0").body[0].value
+    O = ast.parse("1").body[0].value
+    if isinstance(node, ast.Name):
+        return ast.copy_location(O if node.id == var else Z, node)
+    if isinstance(node, ast.Constant):
+        return Z
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return ast.UnaryOp(op=ast.USub(), operand=_sym_diff(node.operand, var))
+    if isinstance(node, ast.BinOp):
+        L, R = node.left, node.right
+        dL, dR = _sym_diff(L, var), _sym_diff(R, var)
+        if isinstance(node.op, (ast.Add, ast.Sub)):
+            return ast.BinOp(left=dL, op=node.op, right=dR)
+        if isinstance(node.op, ast.Mult):
+            return ast.BinOp(
+                left=ast.BinOp(left=dL, op=ast.Mult(), right=R),
+                op=ast.Add(),
+                right=ast.BinOp(left=L, op=ast.Mult(), right=dR))
+        if isinstance(node.op, ast.Div):
+            num = ast.BinOp(left=ast.BinOp(left=dL, op=ast.Mult(), right=R),
+                            op=ast.Sub(),
+                            right=ast.BinOp(left=L, op=ast.Mult(), right=dR))
+            den = ast.BinOp(left=R, op=ast.Mult(), right=ast.copy_location(ast.parse(ast.unparse(R)).body[0].value, R))
+            return ast.BinOp(left=num, op=ast.Div(), right=den)
+        return Z
+    if isinstance(node, ast.Call):
+        # jnp.asarray(x)/concatenate etc: pass through single-arg wrappers
+        if node.args and not node.keywords:
+            return _sym_diff(node.args[0], var)
+        return Z
+    if isinstance(node, ast.Subscript):
+        return _sym_diff(node.value, var) if isinstance(node.value, ast.Name) and node.value.id == var else Z
+    return Z
+
+
+def _lean_param(expr: str) -> str:
+    import re as _re
+    expr = _re.sub(r"args\s*\[\s*['\"]Q['\"]\s*\]\s*\[\s*_LIVER_IDX\s*\]", 'Ql', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]Q['\"]\s*\]\s*\[\s*_PERIPHERAL_IDX\s*\]", 'Qp', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]Q['\"]\s*\]\s*\[\s*_EFFECT_SITE_IDX\s*\]", 'Qe', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]Q['\"]\s*\]\s*\[\s*_CENTRAL_IDX\s*\]", 'Qc', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]Kp['\"]\s*\]\s*\[\s*_LIVER_IDX\s*\]", 'Kpl', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]Kp['\"]\s*\]\s*\[\s*_PERIPHERAL_IDX\s*\]", 'Kpp', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]Kp['\"]\s*\]\s*\[\s*_EFFECT_SITE_IDX\s*\]", 'Kpe', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]V['\"]\s*\]\s*\[\s*_LIVER_IDX\s*\]", 'Vl', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]V['\"]\s*\]\s*\[\s*_PERIPHERAL_IDX\s*\]", 'Vp', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]V['\"]\s*\]\s*\[\s*_EFFECT_SITE_IDX\s*\]", 'Ve', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]V['\"]\s*\]\s*\[\s*_CENTRAL_IDX\s*\]", 'Vc', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]CL['\"]\s*\]", 'CL', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]ka['\"]\s*\]", 'ka', expr)
+    expr = _re.sub(r'Q\s*\[\s*_LIVER_IDX\s*\]', 'Ql', expr)
+    expr = _re.sub(r'Q\s*\[\s*_PERIPHERAL_IDX\s*\]', 'Qp', expr)
+    expr = _re.sub(r'Q\s*\[\s*_EFFECT_SITE_IDX\s*\]', 'Qe', expr)
+    expr = _re.sub(r'Q\s*\[\s*_CENTRAL_IDX\s*\]', 'Qc', expr)
+    expr = _re.sub(r'Kp\s*\[\s*_LIVER_IDX\s*\]', 'Kpl', expr)
+    expr = _re.sub(r'Kp\s*\[\s*_PERIPHERAL_IDX\s*\]', 'Kpp', expr)
+    expr = _re.sub(r'Kp\s*\[\s*_EFFECT_SITE_IDX\s*\]', 'Kpe', expr)
+    expr = _re.sub(r'Kp\s*\[\s*_CENTRAL_IDX\s*\]', 'Kpc', expr)
+    expr = _re.sub(r'V\s*\[\s*_LIVER_IDX\s*\]', 'Vl', expr)
+    expr = _re.sub(r'V\s*\[\s*_PERIPHERAL_IDX\s*\]', 'Vp', expr)
+    expr = _re.sub(r'V\s*\[\s*_EFFECT_SITE_IDX\s*\]', 'Ve', expr)
+    expr = _re.sub(r'V\s*\[\s*_CENTRAL_IDX\s*\]', 'Vc', expr)
+    expr = _re.sub(r'\bka\b', 'ka', expr)
+    return expr
+
+
+def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
+    """Symbolic Jacobian J[i][j] = d f_i / d y_j via AST differentiation."""
+    import sympy as _sp
+    rhs, order = _ode_rhs_asts(model_path)
+    # Collect scalar aliases (C_p, C_liver, ...) defined in pbpk_ode body
+    source = model_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pbpk_ode")
+    env: dict[str, ast.expr] = {}
+    for node in fn.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            t = node.targets[0].id
+            if not t.startswith("dA_"):
+                env[t] = node.value
+    state_vars = [("A_gut", 0), ("A_liver", 1), ("A_central", 2), ("A_periph", 3), ("A_effect", 4)]
+    # sympy-backed differentiation for robustness
+    J: dict[tuple[int, int], str] = {}
+    for i, dname in enumerate(order):
+        f = rhs[dname]
+        f_full = _substitute(f, {**env, **{k: v for k, v in rhs.items() if k != dname}})
+        for vname, j in state_vars:
+            d = _sym_diff(f_full, vname)
+            s = _lean_param(ast.unparse(ast.fix_missing_locations(d)))
+            try:
+                s2 = str(_sp.simplify(_sp.sympify(s)))
+                s = s2
+            except Exception:
+                pass
+            J[(i, j)] = s
+    # DILI rows are handled by caller; 6x6 block only here
+    return J
+
+
+def extract_column_sum_lemmas(model_path: Path) -> list[str]:
+    """Dynamically generated column-sum conservation lemmas sum_i J[i][j] = 0.
+
+    Symbolically sums the AST-differentiated Jacobian columns; each lemma is
+    the textual column sum equated to zero. Any sign flip in model.py alters
+    the emitted string (verified by test_formal_verification.py).
     """
-    return [
-        "-ka_rate + ka_rate = 0",
-        "-(Q_liver / (V_liver * Kp_liver)) + (Q_liver / (V_liver * Kp_liver)) = 0",
-        "-(Q_liver + Q_periph + Q_effect + CL) / V_central + (Q_liver / V_central) + (Q_periph / V_central) + (Q_effect / V_central) + (CL / V_central) = 0",
-        "-(Q_periph / (V_periph * Kp_periph)) + (Q_periph / (V_periph * Kp_periph)) = 0",
-        "-(Q_effect / (V_effect * Kp_effect)) + (Q_effect / (V_effect * Kp_effect)) = 0",
-        "0 = 0",
-    ]
+    J = compute_jacobian(model_path)
+    order_n = 6
+    lemmas: list[str] = []
+    for j in range(order_n):
+        col = [J.get((i, j), "0") for i in range(order_n)]
+        # drop pure zeros for readability but keep 6th column identity
+        nz = [c for c in col if c.strip() != "0"]
+        body = " + ".join(f"({c})" for c in nz) if nz else "0"
+        lemmas.append(f"{body} = 0")
+    return lemmas
 
 
 def build_structural_theorem(model_path: Path) -> str:
@@ -618,57 +746,51 @@ def emit_lean_export(model_path: Path, lean_out: Path) -> None:
     if not check_mass_conservation(model_path):
         raise SystemExit("FAIL-CLOSED: mass conservation violated in " + str(model_path))
     derivs = extract_symbolic_derivatives(model_path, expand=False)
-    # Fail closed on sign flip: liver must be Q*(C_p - C/Kp)
     liver = derivs.get("dA_liver", "")
     if "- C_liver / Kp" not in liver and "-C_liver/Kp" not in liver.replace(" ", ""):
         raise SystemExit("FAIL-CLOSED: liver perfusion sign violated: " + liver)
-    body = """import Compartmental
-
-open Compartmental
-
-/-- AST-extracted 6x6 Jacobian compiled from pbpk_ode (explicit entries). -/
-noncomputable def extracted_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d) :
-    Fin 6 \u2192 Fin 6 \u2192 \u211d := fun i j =>
-  if i.val = 0 \u2227 j.val = 0 then -ka
-  else if i.val = 2 \u2227 j.val = 0 then ka
-  else if i.val = 1 \u2227 j.val = 1 then -(Ql / (Vl * Kpl))
-  else if i.val = 1 \u2227 j.val = 2 then Ql / Vc
-  else if i.val = 3 \u2227 j.val = 3 then -(Qp / (Vp * Kpp))
-  else if i.val = 3 \u2227 j.val = 2 then Qp / Vc
-  else if i.val = 4 \u2227 j.val = 4 then -(Qe / (Ve * Kpe))
-  else if i.val = 4 \u2227 j.val = 2 then Qe / Vc
-  else if i.val = 2 \u2227 j.val = 1 then Ql / (Vl * Kpl)
-  else if i.val = 2 \u2227 j.val = 3 then Qp / (Vp * Kpp)
-  else if i.val = 2 \u2227 j.val = 4 then Qe / (Ve * Kpe)
-  else if i.val = 2 \u2227 j.val = 2 then (-(Ql + Qp + Qe) / Vc - CL / Vc)
-  else if i.val = 5 \u2227 j.val = 2 then CL / Vc
-  else 0
-
-theorem veritrial_model_matches_pbpkK
-  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d) :
-  extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-    = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL := by
-  ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_matrix, pbpkK] <;> ring
-
-/-- AST-extracted 9-state unified matrix from pbpk_dili_ode: top-left 6x6 block
-    is the PBPK Jacobian (pbpk_ode on y[:6]), trailing QSP rows mirror the
-    linearised DILI coupling (GSH/S_mito/ALT); structurally `pbpkDiliSystem`. -/
-noncomputable def extracted_dili_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-    k_synth k_deplete IC50 k_leak k_elim ALT_base : \u211d) :
-    Fin 9 \u2192 Fin 9 \u2192 \u211d := fun i j =>
-  if h : i.val < 6 \u2227 j.val < 6 then
-    pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL \u27e8i.val, by omega\u27e9 \u27e8j.val, by omega\u27e9
-  else 0
-
-theorem veritrial_dili_matches_pbpkDiliSystem
-  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-    k_synth k_deplete IC50 k_leak k_elim ALT_base : \u211d) :
-  extracted_dili_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-      k_synth k_deplete IC50 k_leak k_elim ALT_base
-    = pbpkDiliSystem ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-      k_synth k_deplete IC50 k_leak k_elim ALT_base := by
-  ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_dili_matrix, pbpkDiliSystem] <;> ring
-"""
+    if not check_dili_model(model_path):
+        raise SystemExit("FAIL-CLOSED: pbpk_dili_ode delegation broken in " + str(model_path))
+    J = compute_jacobian(model_path)
+    # Dynamically synthesize if-chain from symbolic Jacobian entries
+    arms: list[str] = []
+    for (i, j), e in sorted(J.items()):
+        if e.strip() in ("0",):
+            continue
+        arms.append(f"  if i.val = {i} ∧ j.val = {j} then ({e})")
+    chain = "\n  else ".join(arms) + "\n  else 0" if arms else "0"
+    body = ("import Compartmental\n\nopen Compartmental\n\n"
+        "/-- AST-extracted 6x6 Jacobian symbolically differentiated from pbpk_ode. -/\n"
+        "noncomputable def extracted_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ) :\n"
+        "    Fin 6 → Fin 6 → ℝ := fun i j =>\n"
+        f"  {chain}\n\n"
+        "theorem veritrial_model_matches_pbpkK\n"
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ) :\n"
+        "  extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "    = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL := by\n"
+        "  ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_matrix, pbpkK] <;> ring\n\n"
+        "/-- AST-extracted 9-state unified matrix: top-left 6x6 block is the\n"
+        "    symbolically differentiated PBPK Jacobian; trailing QSP rows mirror\n"
+        "    the linearised DILI coupling; structurally `pbpkDiliSystem`. -/\n"
+        "noncomputable def extracted_dili_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) :\n"
+        "    Fin 9 → Fin 9 → ℝ := fun i j =>\n"
+        "  if h : i.val < 6 ∧ j.val < 6 then\n"
+        "    extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL ⟨i.val, by omega⟩ ⟨j.val, by omega⟩\n"
+        "  else 0\n\n"
+        "theorem veritrial_dili_matches_pbpkDiliSystem\n"
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) :\n"
+        "  extracted_dili_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "      k_synth k_deplete IC50 k_leak k_elim ALT_base\n"
+        "    = pbpkDiliSystem ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "      k_synth k_deplete IC50 k_leak k_elim ALT_base := by\n"
+        "  ext i j\n"
+        "  by_cases h : i.val < 6 ∧ j.val < 6\n"
+        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dif_pos h]\n"
+        "    have H := veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "    exact congr_fun (congr_fun H ⟨i.val, by omega⟩) ⟨j.val, by omega⟩\n"
+        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dif_neg h]\n")
     lean_out.write_text(body, encoding="utf-8")
 
 

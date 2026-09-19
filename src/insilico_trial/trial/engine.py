@@ -310,7 +310,9 @@ class TrialEngine:
             for pi, patient in enumerate(cohort_patients):
                 gs = self._genotype_scale(patient)
                 alt_batch = getattr(self, "_last_alt_batch", None)
+                gsh_batch = getattr(self, "_last_gsh_batch", None)
                 self._last_alt_traj = alt_batch[pi] if alt_batch is not None else None
+                self._last_gsh_traj = gsh_batch[pi] if gsh_batch is not None else None
                 patient_result = self._evaluate_patient(
                     patient, rng, t_eval_hours, C_batch[pi],
                     float(administered_doses[pi]), gs,
@@ -491,7 +493,9 @@ class TrialEngine:
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
+            # Mechanistic QSP state: ALT index 8, GSH index 6 (see model._ALT_IDX/_GSH_IDX)
             self._last_alt_batch = onp.asarray(ys_full[:, :, 8], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(ys_full[:, :, 6], dtype=onp.float64)
         elif effective_solver == "sdirk2":
             # SDIRK2 implicit solver (pure JAX, no lineax): batch-solve
             # via solve_implicit_batch which returns full state trajectories.
@@ -506,6 +510,15 @@ class TrialEngine:
             ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=0.01)
             C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2:3], dtype=onp.float64)
             C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI+1], dtype=onp.float64)
+            # Mechanistic DILI coupling for SDIRK2: reuse the unified 9-state
+            # solver for ALT (idx 8) / GSH (idx 6) trajectories so CTCAE and
+            # Hy's Law evaluate live solver state, never Emax fallbacks.
+            _C2, _Cl2, _ys2 = solve_pbpk_batch_with_compartments(
+                t_eval_hours, A_gut_0s, params_batch, dt=_stable_dt_for_batch(params_batch),
+                return_full_state=True,
+            )
+            self._last_alt_batch = onp.asarray(_ys2[:, :, 8], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(_ys2[:, :, 6], dtype=onp.float64)
         else:
             # Legacy solver names map to the unified fixed-step 9-state path.
             C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
@@ -515,6 +528,7 @@ class TrialEngine:
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
             self._last_alt_batch = onp.asarray(ys_full[:, :, 8], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(ys_full[:, :, 6], dtype=onp.float64)
         return t_eval_hours, C_batch, C_liver_batch
 
     def _get_dosing_events(self) -> list[DosingEvent]:
@@ -823,17 +837,25 @@ class TrialEngine:
                 qt_delta = self.drug.qtcd_emax * observed_c / (self.drug.qtcd_ec50 + observed_c)
             qt_interval = self.drug.qtcd_baseline + qt_delta
 
-            # Dynamic QSP trajectory: ALT from index 8 of the 9-state output
-            # when available; else fall back to QSP steady-state from liver exposure.
+            # Mechanistic QSP: ALT sampled directly from solver state idx 8;
+            # bilirubin derived from GSH depletion state idx 6 (Hy's Law axis).
+            # No empirical Emax fallbacks: missing trajectories fail closed
+            # to drug baselines.
             alt_traj = getattr(self, "_last_alt_traj", None)
+            gsh_traj = getattr(self, "_last_gsh_traj", None)
             if alt_traj is not None:
-                try:
-                    alt = float(onp.asarray(alt_traj).ravel()[min(idx, len(onp.asarray(alt_traj).ravel()) - 1)])
-                except Exception:
-                    alt = self._qsp_alt_from_exposure(liver_exposure)
+                _a = onp.asarray(alt_traj, dtype=onp.float64).ravel()
+                alt = float(_a[min(idx, len(_a) - 1)])
             else:
-                alt = self._qsp_alt_from_exposure(liver_exposure)
-            bilirubin = self._qsp_bili_from_exposure(liver_exposure)
+                alt = float(self.drug.alt_baseline)
+            if gsh_traj is not None:
+                _g = onp.asarray(gsh_traj, dtype=onp.float64).ravel()
+                gsh = float(_g[min(idx, len(_g) - 1)])
+            else:
+                gsh = 1.0
+            # Cholestatic axis: bilirubin rises as GSH depletes (1 - GSH),
+            # scaled by the drug's DILI bilirubin effect size.
+            bilirubin = float(self.drug.bili_baseline * (1.0 + self.drug.dili_emax_bili * max(0.0, 1.0 - gsh)))
 
             observations.append(Observation(
                 patient_id=patient_id,
@@ -848,13 +870,9 @@ class TrialEngine:
 
         return observations
 
-    def _qsp_alt_from_exposure(self, liver_exposure: float) -> float:
-        """Dynamic QSP ALT from solver state (index 8); Emax fallback."""
-        return float(self.drug.alt_baseline * (1.0 + self.drug.dili_emax_alt * liver_exposure / (self.drug.dili_ec50_alt + liver_exposure)))
-
-    def _qsp_bili_from_exposure(self, liver_exposure: float) -> float:
-        """Dynamic QSP bilirubin from solver state; Emax fallback."""
-        return float(self.drug.bili_baseline * (1.0 + self.drug.dili_emax_bili * liver_exposure / (self.drug.dili_ec50_bili + liver_exposure)))
+    # NOTE: empirical Emax fallbacks (_qsp_alt/bili_from_exposure) were
+    # eliminated. ALT (idx 8) and bilirubin-via-GSH (idx 6) are sampled
+    # directly from the unified 9-state solver in _generate_observations.
 
     def _compute_population_summary(
         self, all_pk: dict[str, dict[str, float | None]], n_enrolled: int
