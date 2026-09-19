@@ -138,6 +138,157 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     return file_lemmas
 
 
+def _independent_column_sums(model_path: Path) -> list:
+    """Re-derive the 6 PBPK Jacobian column sums WITHOUT the export bridge.
+
+    Independent oracle (defense in depth): parses ``pbpk_ode`` with its own
+    AST pass, maps indexed parameters to scalar sympy symbols, expands
+    scalar aliases and intermediate derivatives textually, and differentiates
+    with sympy. Any exporter bug (or mutation) that drops terms from the
+    emitted column-sum strings is caught by :func:`_check_column_sum_crosscheck`
+    even when the emitted strings are still Lean-provable on their own.
+    Fail-closed: raises on any parse/simplify failure.
+    """
+    import ast as _ast
+    import re as _re
+    import sympy as _sp
+
+    def _tok(expr: str) -> str:
+        expr = _re.sub(r"Q\s*\[\s*_LIVER_IDX\s*\]", "Ql", expr)
+        expr = _re.sub(r"Q\s*\[\s*_PERIPHERAL_IDX\s*\]", "Qp", expr)
+        expr = _re.sub(r"Q\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Qe", expr)
+        expr = _re.sub(r"Q\s*\[\s*_CENTRAL_IDX\s*\]", "Qc", expr)
+        expr = _re.sub(r"Kp\s*\[\s*_LIVER_IDX\s*\]", "Kpl", expr)
+        expr = _re.sub(r"Kp\s*\[\s*_PERIPHERAL_IDX\s*\]", "Kpp", expr)
+        expr = _re.sub(r"Kp\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Kpe", expr)
+        expr = _re.sub(r"Kp\s*\[\s*_CENTRAL_IDX\s*\]", "Kpc", expr)
+        expr = _re.sub(r"V\s*\[\s*_LIVER_IDX\s*\]", "Vl", expr)
+        expr = _re.sub(r"V\s*\[\s*_PERIPHERAL_IDX\s*\]", "Vp", expr)
+        expr = _re.sub(r"V\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Ve", expr)
+        expr = _re.sub(r"V\s*\[\s*_CENTRAL_IDX\s*\]", "Vc", expr)
+        expr = _re.sub(r"args\s*\[\s*['\"](\w+)['\"]\s*\]", r"\1", expr)
+        expr = _re.sub(r"\bka\b", "ka", expr)
+        return expr
+
+    tree = _ast.parse(model_path.read_text(encoding="utf-8"))
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef) and n.name == "pbpk_ode")
+    rhs: dict[str, str] = {}
+    aliases: dict[str, str] = {}
+    for node in fn.body:
+        if (isinstance(node, _ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], _ast.Name)):
+            t = node.targets[0].id
+            s = _tok(_ast.unparse(node.value))
+            (rhs if t.startswith("dA_") else aliases)[t] = s
+    order = ["dA_gut", "dA_liver", "dA_central",
+             "dA_periph", "dA_effect", "dA_elim"]
+    states = ["A_gut", "A_liver", "A_central", "A_periph", "A_effect"]
+
+    def _expand(expr: str) -> str:
+        for _ in range(20):
+            changed = False
+            for name, val in list(aliases.items()) + list(rhs.items()):
+                pat = r"\b" + _re.escape(name) + r"\b"
+                if _re.search(pat, expr):
+                    expr = _re.sub(pat, f"({val})", expr)
+                    changed = True
+            if not changed:
+                break
+        return expr
+
+    cols = []
+    for j, var in enumerate(states):
+        terms = []
+        for i, dname in enumerate(order):
+            f = _sp.sympify(_expand(rhs[dname]))
+            terms.append(_sp.simplify(_sp.diff(f, _sp.Symbol(var))))
+        cols.append(terms)
+    # 6th (elim-accumulator) column: no state dependence.
+    cols.append([_sp.Integer(0)])
+    return cols
+
+
+def _split_summands(lhs: str) -> list[str]:
+    """Split a lemma LHS on top-level ``+`` (paren-aware)."""
+    parts, depth, cur = [], 0, ""
+    for ch in lhs:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if ch == "+" and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return [p for p in parts if p.strip()]
+
+
+def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path) -> None:
+    """Term-accounting cross-check: every nonzero Jacobian entry must be
+    certified in the file's conservation lemmas.
+
+    Column sums are all identically zero (mass conservation), so *value*
+    matching cannot distinguish genuine certificates from bare
+    ``(0) + (0) = 0`` strings. Instead, collect the ``<params-only sum> = 0``
+    lemmas (summands without state variables — this excludes the parametric
+    mass sum, which carries ``A_*``/``C_*`` states) and require their nonzero
+    summand multiset to cover every nonzero entry of the independently
+    re-derived Jacobian. An exporter that drops terms (or emits only zeros)
+    fails closed. Raises SystemExit(1) on mismatch.
+    """
+    import re as _re
+    import sympy as _sp
+
+    try:
+        expected_cols = _independent_column_sums(model_path)
+    except Exception as e:
+        print("FORMAL GATE FAILED (fail-closed): independent column-sum "
+              f"re-derivation crashed: {e}", file=sys.stderr)
+        raise SystemExit(1)
+    states = ("A_gut", "A_liver", "A_central", "A_periph", "A_effect",
+              "C_p", "C_liver", "C_periph", "C_effect")
+    expected: list = []
+    for terms in expected_cols:
+        for t in terms:
+            if t != 0:
+                expected.append(t)
+    found: list = []
+    for lemma in file_lemmas:
+        if "=" not in lemma or ">" in lemma or "<" in lemma:
+            continue
+        lhs, _, rhs = lemma.partition("=")
+        if rhs.strip() != "0":
+            continue
+        if any(_re.search(r"\b" + s + r"\b", lhs) for s in states):
+            continue  # parametric mass sum, not a column certificate
+        try:
+            for part in _split_summands(lhs.strip()):
+                v = _sp.simplify(_sp.sympify(part.strip()))
+                if v != 0:
+                    found.append(v)
+        except Exception:
+            continue
+    missing = list(expected)
+    for v in found:
+        for m in list(missing):
+            try:
+                if _sp.simplify(v - m) == 0:
+                    missing.remove(m)
+                    break
+            except Exception:
+                continue
+    if missing:
+        print("FORMAL GATE FAILED (fail-closed): column-sum cross-check "
+              "failed: the file's conservation lemmas do not account for "
+              f"{len(missing)} nonzero Jacobian term(s), e.g. {missing[0]}. "
+              "The export no longer reflects the live model.",
+              file=sys.stderr)
+        raise SystemExit(1)
+
+
 def _is_sorry_placeholder(lemma: str) -> bool:
     """Check whether a lemma string contains a sorry axiom placeholder."""
     return bool(re.search(r'\bsorry\b|\bsorryAx\b', lemma))
@@ -348,6 +499,14 @@ def main(argv: list[str] | None = None) -> int:
     # Single-source-of-truth guard: the file must equal exactly what the live
     # PBPK model emits. Fail-closed on any drift.
     file_lemmas = _check_single_source(lemmas_file)
+
+    # Independent column-sum cross-check: re-derive the Jacobian column sums
+    # from model.py WITHOUT the export bridge and require each to appear in
+    # the file. Catches exporter bugs/mutations whose output is still
+    # Lean-provable but no longer reflects the model (e.g. dropped terms).
+    _check_column_sum_crosscheck(
+        file_lemmas,
+        _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py")
 
     # Metzler positivity enforcement: the set of required lemmas MUST include
     # at least one Metzler off-diagonal positivity assertion (Q / Kp > 0) for

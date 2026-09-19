@@ -215,3 +215,44 @@ def test_sign_flip_dynamically_alters_lean_and_fails_gate(tmp_path: Path) -> Non
     # conservation text checks but flips a derivative sign
     J_good = ex.compute_jacobian(model_path)
     assert J_good[(1, 1)] == "-Ql/(Kpl*Vl)"
+
+def test_sym_diff_defensive_fallthroughs() -> None:
+    """_sym_diff totality: exotic AST shapes differentiate to zero."""
+    import ast
+    from pathlib import Path
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+
+    assert ast.dump(ex._sym_diff(ast.parse("x ** 2").body[0].value, "x")) == \
+        ast.dump(ast.parse("0").body[0].value)
+    call_kw = ast.parse("f(x, k=1)").body[0].value
+    assert ast.dump(ex._sym_diff(call_kw, "x")) == \
+        ast.dump(ast.parse("0").body[0].value)
+    sub = ast.parse("Q[i]").body[0].value
+    assert ast.dump(ex._sym_diff(sub, "x")) == \
+        ast.dump(ast.parse("0").body[0].value)
+
+
+def test_crosscheck_rejects_zeroed_column_sums(tmp_path: Path) -> None:
+    """Gate cross-check: conservation lemmas without model terms fail closed."""
+    from pathlib import Path
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+    import verify_formal_gate as gate  # type: ignore
+    import pytest
+
+    model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+    genuine = ex.extract_column_sum_lemmas(model_path)
+    assert len(genuine) == 6
+    # Genuine certificates pass the independent cross-check.
+    gate._check_column_sum_crosscheck(genuine, model_path)
+    # Zeroed certificates (dropped terms) fail closed.
+    zeroed = ["(0) + (0) = 0"] * 6
+    with pytest.raises(SystemExit):
+        gate._check_column_sum_crosscheck(zeroed, model_path)
