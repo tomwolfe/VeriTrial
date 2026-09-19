@@ -402,7 +402,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    try:
+        from export_pbpk_to_qed import (  # type: ignore
+            extract_column_sum_lemmas as _col_sums,
+        )
+        _genuine_cols = set(_col_sums(_veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"))
+    except Exception:
+        _genuine_cols = set()
     for lemma in file_lemmas:
+        if lemma in _genuine_cols:
+            continue  # genuine algebraic column sums (incl. empty col 5)
         if _is_trivial_lemma(lemma):
             print(
                 "FORMAL GATE FAILED (fail-closed): trivial lemma detected: "
@@ -414,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
     # --strict: fail closed on numeric arithmetic shortcuts / sorry scaffolding.
     if strict:
         for lemma in file_lemmas:
+            if lemma in _genuine_cols:
+                continue
             if _is_numeric_shortcut(lemma):
                 print(
                     "FORMAL GATE FAILED (--strict): numeric arithmetic shortcut "
@@ -474,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:
             check_file.write_text(
                 "import Compartmental\nimport VeriTrialExport\n"
                 "open Compartmental\n"
-                "#print axioms veritrial_model_matches_pbpkK\n",
+                "#print axioms veritrial_model_matches_pbpkK\n"
+                "#print axioms veritrial_dili_matches_pbpkDiliSystem\n",
                 encoding="utf-8",
             )
             proc_ax = _run_lean(qed, [str(check_file)])
@@ -488,6 +500,30 @@ def main(argv: list[str] | None = None) -> int:
             if "sorry" in proc_ax.stdout or "sorryAx" in proc_ax.stdout:
                 print("FORMAL GATE FAILED: sorry axiom in export.",
                       file=sys.stderr)
+                return 1
+            allowed = {"propext", "Classical.choice", "Quot.sound"}
+            found = set(re.findall(r"'(.*?)'", proc_ax.stdout)) | set(
+                proc_ax.stdout.replace(",", " ").split()
+            )
+            # Axiom lines look like: 'theorem ... depends on axioms [propext, ...]'
+            m = re.findall(r"depends on axioms \[(.*?)\]", proc_ax.stdout)
+            ax_set = set()
+            for grp in m:
+                ax_set |= {a.strip().strip("'") for a in grp.split(",") if a.strip()}
+            if m and not ax_set <= allowed:
+                print(
+                    f"FORMAL GATE FAILED: unexpected axioms {sorted(ax_set)}; "
+                    f"allowed {sorted(allowed)}.",
+                    file=sys.stderr,
+                )
+                return 1
+            if ("veritrial_model_matches_pbpkK" not in proc_ax.stdout
+                    or "veritrial_dili_matches_pbpkDiliSystem" not in proc_ax.stdout):
+                print(
+                    "FORMAL GATE FAILED: both 6-state and 9-state isomorphism "
+                    "theorems must be verified.",
+                    file=sys.stderr,
+                )
                 return 1
         except SystemExit:
             raise

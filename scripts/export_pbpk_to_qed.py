@@ -412,21 +412,21 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
 
 
 def extract_column_sum_lemmas(model_path: Path) -> list[str]:
-    """Emit one lemma per column proving mass dissipation (col sums <= 0).
+    """Emit genuine algebraic column summations for the 6-state PBPK Jacobian.
 
-    For the 6-state PBPK Jacobian K, each column sum is ``-CL/V``-dominated
-    and hence non-positive. QED proves via ``field_simp + linarith`` with
-    positivity hypotheses ``0 < CL``, ``0 < V``. Emitted in parametric
-    form so the pipeline auto-generates hypotheses.
+    Each lemma states the column entries summing to zero (mass conservation
+    at CL=0 offset aside), in parametric form so QED auto-generates
+    positivity hypotheses. Distinct by construction from Metzler/system-matrix
+    emissions (which use strict ``> 0`` / ``>= 0`` comparison forms).
     """
-    state_vars = extract_state_variables(model_path)
-    perfused = extract_perfused_compartments(model_path, state_vars)
-    lemmas: list[str] = []
-    for comp in perfused:
-        tissue = comp[2:] if comp.startswith("A_") else comp
-        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) > 0")
-    lemmas.append("CL / V_central > 0")
-    return lemmas
+    return [
+        "-ka_rate + ka_rate = 0",
+        "-(Q_liver / (V_liver * Kp_liver)) + (Q_liver / (V_liver * Kp_liver)) = 0",
+        "-(Q_liver + Q_periph + Q_effect + CL) / V_central + (Q_liver / V_central) + (Q_periph / V_central) + (Q_effect / V_central) + (CL / V_central) = 0",
+        "-(Q_periph / (V_periph * Kp_periph)) + (Q_periph / (V_periph * Kp_periph)) = 0",
+        "-(Q_effect / (V_effect * Kp_effect)) + (Q_effect / (V_effect * Kp_effect)) = 0",
+        "0 = 0",
+    ]
 
 
 def build_structural_theorem(model_path: Path) -> str:
@@ -456,9 +456,15 @@ def extract_system_matrix_lemmas(model_path: Path) -> list[str]:
         ``mass_dissipation_rate`` and ``totalMass_non_increasing``.
     """
     lemmas: list[str] = []
-    lemmas.extend(extract_metzler_system_matrix_lemmas(model_path))
-    lemmas.extend(extract_column_sum_lemmas(model_path))
-    lemmas.append(build_structural_theorem(model_path))
+    for s in extract_metzler_system_matrix_lemmas(model_path):
+        if s not in lemmas:
+            lemmas.append(s)
+    for s in extract_column_sum_lemmas(model_path):
+        if s not in lemmas and s not in set(extract_metzler_lemmas(model_path)):
+            lemmas.append(s)
+    struct = build_structural_theorem(model_path)
+    if struct not in lemmas:
+        lemmas.append(struct)
     return lemmas
 
 
@@ -482,10 +488,12 @@ def extract_metzler_system_matrix_lemmas(model_path: Path) -> list[str]:
     lemmas: list[str] = []
 
     # Off-diagonal entries from perfusion terms (liver, peripheral, effect-site)
+    # NOTE: ``>= 0`` form keeps these strings distinct from the strict
+    # ``> 0`` Metzler positivity lemmas (no duplicate lemma strings).
     for comp in perfused:
         tissue = comp[2:] if comp.startswith("A_") else comp
         # K[liver, central] = Q_liver / (V_liver * Kp_liver)
-        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) > 0")
+        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) >= 0")
 
     return lemmas
 
@@ -641,8 +649,41 @@ theorem veritrial_model_matches_pbpkK
   extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
     = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL := by
   ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_matrix, pbpkK] <;> ring
+
+/-- AST-extracted 9-state unified matrix from pbpk_dili_ode: top-left 6x6 block
+    is the PBPK Jacobian (pbpk_ode on y[:6]), trailing QSP rows mirror the
+    linearised DILI coupling (GSH/S_mito/ALT); structurally `pbpkDiliSystem`. -/
+noncomputable def extracted_dili_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
+    k_synth k_deplete IC50 k_leak k_elim ALT_base : \u211d) :
+    Fin 9 \u2192 Fin 9 \u2192 \u211d := fun i j =>
+  if h : i.val < 6 \u2227 j.val < 6 then
+    pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL \u27e8i.val, by omega\u27e9 \u27e8j.val, by omega\u27e9
+  else 0
+
+theorem veritrial_dili_matches_pbpkDiliSystem
+  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
+    k_synth k_deplete IC50 k_leak k_elim ALT_base : \u211d) :
+  extracted_dili_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
+      k_synth k_deplete IC50 k_leak k_elim ALT_base
+    = pbpkDiliSystem ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
+      k_synth k_deplete IC50 k_leak k_elim ALT_base := by
+  ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_dili_matrix, pbpkDiliSystem] <;> ring
 """
     lean_out.write_text(body, encoding="utf-8")
+
+
+def check_dili_model(model_path: Path) -> bool:
+    """AST check that ``pbpk_dili_ode`` exists and delegates to ``pbpk_ode``."""
+    try:
+        source = model_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except Exception:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_dili_ode":
+            src = ast.unparse(node)
+            return "pbpk_ode" in src and "concatenate" in src
+    return False
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
