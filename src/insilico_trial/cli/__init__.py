@@ -129,14 +129,14 @@ def cmd_demo(args: argparse.Namespace) -> int:
     # plasma profile, propagated through posterior_predictive_pk into the
     # result uncertainty block.
     try:
-        from insilico_trial.stats import calibrate_pk_1comp, posterior_predictive_pk
+        from insilico_trial.stats import calibrate_pbpk_nuts, posterior_predictive_pk
         _obs0 = [o for o in result.observations if o.concentration is not None][:24]
         if _obs0:
             import jax.numpy as _jnp
             _t = _jnp.asarray([o.time for o in _obs0], dtype=_jnp.float64)
             _y = _jnp.asarray([o.concentration for o in _obs0], dtype=_jnp.float64)
             _dose = float(result.cohort_summaries[0]["dose_mg"]) if result.cohort_summaries else 10.0
-            _post = calibrate_pk_1comp(_t, _y, _dose, n_samples=100)
+            _post = calibrate_pbpk_nuts(_t, _y, _dose, drug=engine.drug, n_samples=100)
             engine.posterior_samples = _post
             _pp = posterior_predictive_pk(_post, n_patients=min(8, result.n_subjects), dose_mg=_dose, t_eval=onp.linspace(0, 48, 13), drug=engine.drug)
             result.uncertainty = {**(result.uncertainty or {}), "posterior_predictive": {k: {"mean": float(onp.asarray(v).mean()), "n_samples": int(onp.asarray(v).shape[0])} for k, v in _pp.items()}}
@@ -201,11 +201,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     # warfarin data via NUTS and attach posterior-predictive summaries so
     # the V&V report carries calibrated uncertainty, not point estimates.
     try:
-        from insilico_trial.stats import calibrate_pk_1comp, posterior_predictive_pk
+        from insilico_trial.stats import calibrate_pbpk_nuts, posterior_predictive_pk
         import jax.numpy as _jnp
         _t = _jnp.asarray([0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 24.0])
         _y = _jnp.asarray([1.2, 2.0, 2.6, 2.3, 1.7, 1.2, 0.5])
-        _post = calibrate_pk_1comp(_t, _y, 10.0, n_samples=100)
+        _post = calibrate_pbpk_nuts(_t, _y, 10.0, n_samples=100)
         res["posterior_predictive"] = {"n_samples": 100, "keys": sorted(_post.keys())}
     except Exception as _e:
         res["posterior_predictive"] = {"error": str(_e)}

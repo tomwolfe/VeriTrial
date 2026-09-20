@@ -7,3 +7,4 @@ output/
 
 # Test cache
 tests/__pycache__/
+.tether/
