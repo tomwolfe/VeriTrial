@@ -226,7 +226,8 @@ def _split_summands(lhs: str) -> list[str]:
     return [p for p in parts if p.strip()]
 
 
-def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path) -> None:
+def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
+                                 quiet: bool = False) -> None:
     """Term-accounting cross-check: every nonzero Jacobian entry must be
     certified in the file's conservation lemmas.
 
@@ -281,11 +282,91 @@ def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path) -> No
             except Exception:
                 continue
     if missing:
-        print("FORMAL GATE FAILED (fail-closed): column-sum cross-check "
-              "failed: the file's conservation lemmas do not account for "
-              f"{len(missing)} nonzero Jacobian term(s), e.g. {missing[0]}. "
-              "The export no longer reflects the live model.",
-              file=sys.stderr)
+        if not quiet:
+            print("FORMAL GATE FAILED (fail-closed): column-sum cross-check "
+                  "failed: the file's conservation lemmas do not account for "
+                  f"{len(missing)} nonzero Jacobian term(s), e.g. {missing[0]}. "
+                  "The export no longer reflects the live model.",
+                  file=sys.stderr)
+        raise SystemExit(1)
+
+
+def run_negative_controls(model_path: Path) -> None:
+    """Self-sensitivity controls: the bridge AND this gate must reject
+    broken inputs fail-closed (built-in mutation testing).
+
+    Exercises the exact guard paths that silent weakening would break:
+    bad-gut / liver-sign-flipped models must be refused by
+    ``check_mass_conservation``/``emit_lean_export``; zeroed conservation
+    certificates must be refused by the cross-check; reflexive/numeric
+    theater lemmas must be flagged by both the trivial and strict filters.
+    Raises SystemExit(1) if any control is (wrongly) accepted — i.e. the
+    pipeline has lost sensitivity. Fast (AST/sympy only, no Lean).
+    """
+    import tempfile
+    scripts_dir = _veritrial_root() / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex
+
+    src = model_path.read_text(encoding="utf-8")
+
+    def _variant(old: str, new: str) -> Path:
+        bad = src.replace(old, new)
+        if bad == src:
+            raise SystemExit(f"negative-control fixture failed to apply: {old!r}")
+        tmp = Path(tempfile.mkstemp(suffix="_model.py")[1])
+        tmp.write_text(bad, encoding="utf-8")
+        return tmp
+
+    failures: list[str] = []
+    # 1. Bad-gut model: conservation check must refuse.
+    bad_gut = _variant("-ka * A_gut", "-ka * A_gut + A_liver")
+    try:
+        if ex.check_mass_conservation(bad_gut):
+            failures.append("bad-gut model accepted by check_mass_conservation")
+    finally:
+        bad_gut.unlink(missing_ok=True)
+    # 2. Liver-sign flip: Lean export must refuse.
+    bad_liver = _variant("Q[_LIVER_IDX] * (C_p - C_liver / Kp[_LIVER_IDX])",
+                         "Q[_LIVER_IDX] * (C_p + C_liver / Kp[_LIVER_IDX])")
+    try:
+        try:
+            ex.emit_lean_export(bad_liver, bad_liver.with_suffix(".lean"))
+            failures.append("liver-sign-flipped model accepted by emit_lean_export")
+        except SystemExit:
+            pass
+    finally:
+        bad_liver.unlink(missing_ok=True)
+        bad_liver.with_suffix(".lean").unlink(missing_ok=True)
+    # 3. Zeroed conservation certificates: cross-check must refuse.
+    try:
+        _check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, model_path,
+                                     quiet=True)
+        failures.append("zeroed column sums accepted by cross-check")
+    except SystemExit:
+        pass
+    # 4. EACH theater-lemma filter must independently flag reflexive and
+    # numeric identities. The two filters are deliberate defense in depth;
+    # requiring both (not either) keeps a mutant that disables one of them
+    # from surviving behind the other.
+    for theater in ("Ql = Ql", "129 = 129"):
+        if not _is_trivial_lemma(theater):
+            failures.append(f"theater lemma missed by trivial filter: {theater!r}")
+        if not _is_numeric_shortcut(theater):
+            failures.append(f"theater lemma missed by strict filter: {theater!r}")
+    if not _is_numeric_shortcut("(0) + (0) = 0"):
+        failures.append("zero-only sum missed by strict filter")
+    # 5. ...and NEITHER may flag genuine parametric content.
+    genuine = "(-ka) + (ka) + (Ql/Vc) + ((-CL - Qe - Ql - Qp)/Vc) = 0"
+    if _is_trivial_lemma(genuine):
+        failures.append("genuine column sum rejected by trivial filter")
+    if _is_numeric_shortcut(genuine):
+        failures.append("genuine column sum rejected by strict filter")
+    if failures:
+        for f in failures:
+            print(f"FORMAL GATE FAILED (fail-closed): negative control: {f}",
+                  file=sys.stderr)
         raise SystemExit(1)
 
 
@@ -504,9 +585,13 @@ def main(argv: list[str] | None = None) -> int:
     # from model.py WITHOUT the export bridge and require each to appear in
     # the file. Catches exporter bugs/mutations whose output is still
     # Lean-provable but no longer reflects the model (e.g. dropped terms).
-    _check_column_sum_crosscheck(
-        file_lemmas,
-        _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py")
+    model_path = _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
+    _check_column_sum_crosscheck(file_lemmas, model_path)
+
+    # Negative controls (fast, pre-Lean): the bridge and this gate must
+    # refuse broken inputs. A pipeline that accepts theater fails here,
+    # before any expensive compilation.
+    run_negative_controls(model_path)
 
     # Metzler positivity enforcement: the set of required lemmas MUST include
     # at least one Metzler off-diagonal positivity assertion (Q / Kp > 0) for
