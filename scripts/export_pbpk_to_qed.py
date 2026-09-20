@@ -864,7 +864,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote Lean export to {args.lean_out}")
     if args.out:
         args.out.write_text(text, encoding="utf-8")
-        print(f"wrote {len(lemmas)} lemmas to {args.out}")
+        verifiable = [l for l in lemmas if not l.strip().startswith("--")]
+        print(f"wrote {len(lemmas)} lemmas to {args.out} "
+              f"({len(verifiable)} verifiable, "
+              f"{len(lemmas) - len(verifiable)} metadata comment)")
     else:
         sys.stdout.write(text)
     return 0
