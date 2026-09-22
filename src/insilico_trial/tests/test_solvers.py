@@ -18,7 +18,9 @@ from insilico_trial.pbpk.solvers import solve_implicit, solve_implicit_batch
 # Reference PBPK ODE (lightweight, no diffrax dependency in this file)
 # ---------------------------------------------------------------------------
 
-_CENTRAL_IDX = 3
+_CENTRAL_IDX = 2
+_PERIPHERAL_IDX = 3
+_EFFECT_SITE_IDX = 4
 _LIVER_IDX = 1
 
 
@@ -38,13 +40,13 @@ def _pbpk_ode_simple(t: float, y: jnp.ndarray, args: dict) -> jnp.ndarray:
 
     C_p = A_central / V[_CENTRAL_IDX]
     C_liver = A_liver / V[_LIVER_IDX]
-    C_periph = A_periph / V[3]
-    C_effect = A_effect / V[4]
+    C_periph = A_periph / V[_PERIPHERAL_IDX]
+    C_effect = A_effect / V[_EFFECT_SITE_IDX]
 
     dA_gut = -ka * A_gut
     dA_liver = Q[_LIVER_IDX] * (C_p - C_liver / Kp[_LIVER_IDX])
-    dA_periph = Q[3] * (C_p - C_periph / Kp[3])
-    dA_effect = Q[4] * (C_p - C_effect / Kp[4])
+    dA_periph = Q[_PERIPHERAL_IDX] * (C_p - C_periph / Kp[_PERIPHERAL_IDX])
+    dA_effect = Q[_EFFECT_SITE_IDX] * (C_p - C_effect / Kp[_EFFECT_SITE_IDX])
     dA_elim = CL * C_p
     dA_central = ka * A_gut - dA_liver - dA_periph - dA_effect - CL * C_p
 

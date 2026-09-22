@@ -489,15 +489,35 @@ def _is_numeric_shortcut(lemma: str) -> bool:
     return False
 
 
+def _elan_bin_dir() -> str | None:
+    """Locate the elan binary directory without hardcoded home paths.
+
+    Prefers the `elan` executable's own directory (shims live alongside it),
+    then ELAN_HOME, and only then the conventional location derived from
+    XDG/HOME at runtime (never a hardcoded absolute path).
+    """
+    import shutil as _shutil
+
+    elan = _shutil.which("elan")
+    if elan:
+        return str(Path(elan).resolve().parent)
+    elan_home = os.environ.get("ELAN_HOME")
+    if elan_home:
+        cand = Path(elan_home) / "bin"
+        if cand.is_dir():
+            return str(cand)
+    return None
+
+
 def _ensure_lake_on_path() -> None:
     """Prepend the elan toolchain bin dir so `lake` resolves hermetically."""
     import shutil as _shutil
 
     if _shutil.which("lake") is not None:
         return
-    elan_bin = Path.home() / ".elan" / "bin"
-    if (elan_bin / "lake").exists():
-        os.environ["PATH"] = str(elan_bin) + os.pathsep + os.environ.get("PATH", "")
+    elan_bin = _elan_bin_dir()
+    if elan_bin and Path(elan_bin, "lake").exists():
+        os.environ["PATH"] = elan_bin + os.pathsep + os.environ.get("PATH", "")
 
 
 def _lean_env(qed: Path) -> dict[str, str]:
@@ -523,16 +543,26 @@ def _lean_env(qed: Path) -> dict[str, str]:
     return env
 
 
-def _lean_bin() -> str:
-    """Resolve the pinned toolchain's `lean` binary via lean-toolchain."""
+def _lean_bin() -> list[str]:
+    """Resolve the pinned toolchain's `lean` invocation (argv prefix).
+
+    Prefers the elan-shimmed `lean` on PATH (respects QED/lean-toolchain);
+    otherwise runs `elan run <toolchain> lean` using the toolchain pinned in
+    QED/lean-toolchain. No hardcoded home-directory paths.
+    """
     import shutil as _shutil
 
-    # Prefer the elan-shimmed lean (respects QED/lean-toolchain).
     found = _shutil.which("lean")
     if found:
-        return found
-    elan_bin = Path.home() / ".elan" / "bin" / "lean"
-    return str(elan_bin)
+        return [found]
+    tc_file = qed_dir() / "lean-toolchain"
+    tc = tc_file.read_text(encoding="utf-8").strip() if tc_file.is_file() else ""
+    if tc:
+        return ["elan", "run", tc, "lean"]
+    elan_bin = _elan_bin_dir()
+    if elan_bin:
+        return [str(Path(elan_bin) / "lean")]
+    return ["lean"]
 
 
 def _run_lean(qed: Path, args: list[str]) -> "subprocess.CompletedProcess[str]":
@@ -540,7 +570,7 @@ def _run_lean(qed: Path, args: list[str]) -> "subprocess.CompletedProcess[str]":
     import subprocess as _sp
 
     return _sp.run(
-        [_lean_bin(), *args], cwd=str(qed), capture_output=True, text=True,
+        [*_lean_bin(), *args], cwd=str(qed), capture_output=True, text=True,
         shell=False, env=_lean_env(qed),
     )
 
@@ -730,7 +760,8 @@ def main(argv: list[str] | None = None) -> int:
                 "import Compartmental\nimport VeriTrialExport\n"
                 "open Compartmental\n"
                 "#print axioms veritrial_model_matches_pbpkK\n"
-                "#print axioms veritrial_dili_matches_pbpkDiliSystem\n",
+                "#print axioms veritrial_dili_matches_pbpkDiliSystem\n"
+                "#print axioms veritrial_mass_dissipation\n",
                 encoding="utf-8",
             )
             proc_ax = _run_lean(qed, [str(check_file)])
@@ -750,7 +781,7 @@ def main(argv: list[str] | None = None) -> int:
                 proc_ax.stdout.replace(",", " ").split()
             )
             # Axiom lines look like: 'theorem ... depends on axioms [propext, ...]'
-            m = re.findall(r"depends on axioms \[(.*?)\]", proc_ax.stdout)
+            m = re.findall(r"depends on axioms:?\s*\[(.*?)\]", proc_ax.stdout)
             ax_set = set()
             for grp in m:
                 ax_set |= {a.strip().strip("'") for a in grp.split(",") if a.strip()}
@@ -762,10 +793,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
             if ("veritrial_model_matches_pbpkK" not in proc_ax.stdout
-                    or "veritrial_dili_matches_pbpkDiliSystem" not in proc_ax.stdout):
+                    or "veritrial_dili_matches_pbpkDiliSystem" not in proc_ax.stdout
+                    or "veritrial_mass_dissipation" not in proc_ax.stdout):
                 print(
-                    "FORMAL GATE FAILED: both 6-state and 9-state isomorphism "
-                    "theorems must be verified.",
+                    "FORMAL GATE FAILED: 6-state and 9-state isomorphism "
+                    "theorems plus the mass-dissipation certificate must "
+                    "all be verified.",
                     file=sys.stderr,
                 )
                 return 1

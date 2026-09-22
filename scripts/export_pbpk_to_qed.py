@@ -558,30 +558,50 @@ def extract_column_sum_lemmas(model_path: Path) -> list[str]:
 
 
 def build_structural_theorem(model_path: Path) -> str:
-    """Emit structural theorem wiring PBPK entries into QED/Compartmental.lean.
+    """Emit the genuine structural theorem for the Lean export file.
 
-    References ``IsMetzler``, ``HasNonposColSums``, ``mass_dissipation_rate``
-    and ``totalMass_non_increasing`` with the PBPK-specific matrix entries.
-    The QED pipeline treats ``--`` comment lines as metadata; the trailing
-    dissipation lemma line is the provable payload.
+    Returns full multi-line Lean 4 code (not a `--` comment, not a lemma-file
+    line): `theorem veritrial_mass_dissipation` transporting QED's
+    `Compartmental.mass_dissipation_rate` certificate onto the AST-extracted
+    matrix. The PBPK-specific perfusion entries are recorded in the docstring.
+    This belongs in the `.lean` export (see `emit_lean_export`), never in the
+    line-oriented lemma file, so `extract_system_matrix_lemmas` does NOT
+    include it.
     """
     state_vars = extract_state_variables(model_path)
     perfused = extract_perfused_compartments(model_path, state_vars)
     entries = ", ".join(f"Q_{c[2:]} / (V_{c[2:]} * Kp_{c[2:]})" for c in perfused)
     return (
-        "-- import Compartmental : IsMetzler HasNonposColSums "
-        "mass_dissipation_rate totalMass_non_increasing "
-        f"with entries [{entries}]"
+        "/-- Mass dissipation over the extracted matrix: transport of the QED\n"
+        f"    `mass_dissipation_rate` certificate to the AST-extracted model\n"
+        f"    with perfusion entries [{entries}]. -/\n"
+        "theorem veritrial_mass_dissipation\n"
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ)\n"  # noqa: RUF001
+        "  (hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
+        "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
+        "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
+        "  (hCL : 0 ≤ CL) (hNe : Vc ≠ 0)\n"
+        "  {y : Fin 6 → ℝ} (hy : NonNegVec y) :\n"  # noqa: RUF001
+        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL) y) ≤ 0 := by\n"
+        "  have H : extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "      = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL :=\n"
+        "    veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "  rw [H]\n"
+        "  exact mass_dissipation_rate\n"
+        "    (pbpk_is_metzler hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL)\n"
+        "    (pbpk_hasNonposColSums hVc hNe) hy\n"
     )
 
 
 def extract_system_matrix_lemmas(model_path: Path) -> list[str]:
-    """6x6 PBPK Jacobian emission path: Metzler + column-sum + structural theorem.
+    """6x6 PBPK Jacobian emission path: Metzler + column-sum line lemmas.
 
     (a) One lemma per off-diagonal entry ``K[i][j] >= 0`` (Metzler).
     (b) One lemma per column ``sum_i K[i][j] <= 0`` (mass dissipation).
-    (c) A structural theorem importing QED/Compartmental.lean invoking
-        ``mass_dissipation_rate`` and ``totalMass_non_increasing``.
+
+    Every element is a single line provable by QED's lemma pipeline. The
+    multi-line structural theorem (`build_structural_theorem`) is emitted
+    into the `.lean` export instead (see `emit_lean_export`).
     """
     lemmas: list[str] = []
     for s in extract_metzler_system_matrix_lemmas(model_path):
@@ -590,9 +610,8 @@ def extract_system_matrix_lemmas(model_path: Path) -> list[str]:
     for s in extract_column_sum_lemmas(model_path):
         if s not in lemmas and s not in set(extract_metzler_lemmas(model_path)):
             lemmas.append(s)
-    struct = build_structural_theorem(model_path)
-    if struct not in lemmas:
-        lemmas.append(struct)
+    for s in lemmas:
+        assert "\n" not in s, "line lemma must be single-line"
     return lemmas
 
 
@@ -790,7 +809,24 @@ def emit_lean_export(model_path: Path, lean_out: Path) -> None:
         "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_left h]\n"
         "    have H := veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
         "    exact congr_fun (congr_fun H ⟨i.val, by omega⟩) ⟨j.val, by omega⟩\n"
-        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_right h]\n")
+        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_right h]\n\n"
+        "/-- Mass dissipation over the extracted matrix: transport of the QED\n"
+        "    `mass_dissipation_rate` certificate to the AST-extracted model. -/\n"
+        "theorem veritrial_mass_dissipation\n"
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ)\n"  # noqa: RUF001
+        "  (hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
+        "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
+        "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
+        "  (hCL : 0 ≤ CL) (hNe : Vc ≠ 0)\n"
+        "  {y : Fin 6 → ℝ} (hy : NonNegVec y) :\n"  # noqa: RUF001
+        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL) y) ≤ 0 := by\n"
+        "  have H : extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "      = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL :=\n"
+        "    veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "  rw [H]\n"
+        "  exact mass_dissipation_rate\n"
+        "    (pbpk_is_metzler hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL)\n"
+        "    (pbpk_hasNonposColSums hVc hNe) hy\n")
     lean_out.write_text(body, encoding="utf-8")
 
 

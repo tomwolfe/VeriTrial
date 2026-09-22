@@ -25,18 +25,17 @@ import sys
 from pathlib import Path
 
 
-def _lean_bin(qed_dir: Path) -> str:
-    """Toolchain `lean` matching QED's `lean-toolchain` file, else PATH."""
+def _lean_bin(qed_dir: Path) -> list[str]:
+    """Toolchain `lean` matching QED's `lean-toolchain` file, else PATH.
+
+    Resolves via `elan run <toolchain> lean` (no hardcoded home-directory
+    paths), falling back to `lean` on PATH. Returns argv prefix.
+    """
     tc = (qed_dir / "lean-toolchain").read_text(encoding="utf-8").strip() if (
         qed_dir / "lean-toolchain").is_file() else ""
     if tc:
-        # elan toolchain dir escapes ':' and '/' as '--' and '---' hmm:
-        # 'leanprover/lean4:v4.34.0-rc2' -> 'leanprover--lean4---v4.34.0-rc2'
-        dirname = tc.replace(":", "---").replace("/", "--")
-        cand = Path.home() / ".elan" / "toolchains" / dirname / "bin" / "lean"
-        if cand.is_file():
-            return str(cand)
-    return "lean"
+        return ["elan", "run", tc, "lean"]
+    return ["lean"]
 
 
 def _lean_path(qed_dir: Path) -> str:
@@ -71,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"module source missing: {src}", file=sys.stderr)
             return 1
         out = outdir / f"{mod}.olean"
-        cmd = [lean, "-o", str(out), f"--root={qed}", str(src)]
+        cmd = [*lean, "-o", str(out), f"--root={qed}", str(src)]
         print(f"+ {' '.join(cmd)}")
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,

@@ -129,8 +129,9 @@ def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.
 
     # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
     # The ODE is mass-conserving by construction; this catches numerical drift.
-    mass_drift = jnp.abs(jnp.sum(y_next[:n_monitor]) - y_initial_dose)
-    y_next = jnp.where(mass_drift < 1e-6, y_next, y_next)
+    mass_gain = jnp.sum(y_next[:n_monitor]) - y_initial_dose
+    # Fail-closed: poison on mass creation (gain > tol); dissipation (CL elim) is physical.
+    y_next = jnp.where(mass_gain > 1e-6, jnp.nan * y_next, y_next)
 
     return y_next
 

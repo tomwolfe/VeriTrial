@@ -236,6 +236,124 @@ def test_sym_diff_defensive_fallthroughs() -> None:
         ast.dump(ast.parse("0").body[0].value)
 
 
+def _bridge():
+    import sys
+    from pathlib import Path
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as ex  # type: ignore
+    return ex
+
+
+def _model_path():
+    from pathlib import Path
+    return Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+
+
+def test_check_dili_model_delegation(tmp_path: Path) -> None:
+    """check_dili_model: True on genuine model, False on every delegation break."""
+    ex = _bridge()
+    model_path = _model_path()
+    assert ex.check_dili_model(model_path) is True
+    # Missing pbpk_dili_ode -> False.
+    no_dili = tmp_path / "no_dili.py"
+    no_dili.write_text("def pbpk_ode(t, y, args):\n    return y\n")
+    assert ex.check_dili_model(no_dili) is False
+    # Delegation without concatenate -> False.
+    no_concat = tmp_path / "no_concat.py"
+    no_concat.write_text(
+        "def pbpk_ode(t, y, args):\n    return y\n"
+        "def pbpk_dili_ode(t, y, args):\n    return pbpk_ode(t, y, args)\n")
+    assert ex.check_dili_model(no_concat) is False
+    # Concatenate without pbpk_ode -> False.
+    no_ode = tmp_path / "no_ode.py"
+    no_ode.write_text(
+        "def pbpk_dili_ode(t, y, args):\n    import jax.numpy as jnp\n    return jnp.concatenate([y, y])\n")
+    assert ex.check_dili_model(no_ode) is False
+    # Unreadable / unparseable file -> False.
+    assert ex.check_dili_model(tmp_path / "missing.py") is False
+    bad = tmp_path / "bad.py"
+    bad.write_text("def broken(:\n")
+    assert ex.check_dili_model(bad) is False
+
+
+def test_main_fails_closed(tmp_path: Path, capsys) -> None:
+    """main(): exit 1 on missing model and on mass-conservation violation."""
+    import pytest
+    ex = _bridge()
+    assert ex.main(["--model", str(tmp_path / "missing.py")]) == 1
+    model_path = _model_path()
+    bad_model = tmp_path / "model_bad.py"
+    src = model_path.read_text()
+    bad_src = src.replace("dA_elim = CL * C_p", "dA_elim = 2.0 * CL * C_p")
+    assert bad_src != src
+    bad_model.write_text(bad_src)
+    assert ex.check_mass_conservation(bad_model) is False
+    assert ex.main(["--model", str(bad_model)]) == 1
+    assert ex.main(["--model", str(model_path), "--out", str(tmp_path / "L.txt")]) == 0
+    assert (tmp_path / "L.txt").stat().st_size > 0
+
+
+def test_build_lemmas_variants_kill_default_flips() -> None:
+    """build_lemmas defaults equal explicit args; variants differ as documented."""
+    ex = _bridge()
+    model_path = _model_path()
+    assert ex.build_lemmas(model_path) == ex.build_lemmas(
+        model_path, include_ode_lemmas=False, parametric=True)
+    full = ex.build_lemmas(model_path, include_ode_lemmas=False, parametric=True)
+    nonparam = ex.build_lemmas(model_path, include_ode_lemmas=False, parametric=False)
+    assert len(full) > len(nonparam)
+    assert ex.check_mass_conservation(model_path) is True
+
+
+def test_structural_theorem_is_genuine_lean() -> None:
+    """build_structural_theorem emits a real theorem, never a `--` comment."""
+    ex = _bridge()
+    model_path = _model_path()
+    thm = ex.build_structural_theorem(model_path)
+    assert "theorem veritrial_mass_dissipation" in thm
+    assert "exact mass_dissipation_rate" in thm
+    assert "pbpk_is_metzler" in thm
+    assert "extracted_matrix" in thm
+    assert not thm.lstrip().startswith("-- ")
+
+
+def test_lean_export_embeds_mass_dissipation(tmp_path: Path) -> None:
+    """emit_lean_export output carries the mass-dissipation certificate."""
+    ex = _bridge()
+    model_path = _model_path()
+    out = tmp_path / "Export.lean"
+    ex.emit_lean_export(model_path, out)
+    text = out.read_text()
+    assert "theorem veritrial_mass_dissipation" in text
+    assert "exact mass_dissipation_rate" in text
+    assert "extracted_matrix" in text
+    assert not any(line.startswith("-- ") for line in text.splitlines())
+
+
+def test_column_sum_lemmas_exact_zero() -> None:
+    """Every column-sum lemma is an identity equated to exactly zero."""
+    ex = _bridge()
+    model_path = _model_path()
+    lemmas = ex.extract_column_sum_lemmas(model_path)
+    assert len(lemmas) == 6
+    for lemma in lemmas:
+        assert lemma.strip().endswith("= 0")
+
+
+def test_sym_diff_scalar_identities() -> None:
+    """_sym_diff: d(x)/dx=1, d(y)/dx=0, constants diff to zero."""
+    import ast
+    ex = _bridge()
+    one = ast.dump(ast.parse("1").body[0].value)
+    zero = ast.dump(ast.parse("0").body[0].value)
+    assert ast.dump(ex._sym_diff(ast.parse("x").body[0].value, "x")) == one
+    assert ast.dump(ex._sym_diff(ast.parse("y").body[0].value, "x")) == zero
+    assert ast.dump(ex._sym_diff(ast.parse("3.5").body[0].value, "x")) == zero
+    assert ast.dump(ex._sym_diff(ast.parse("-x").body[0].value, "x")) != zero
+
+
 def test_crosscheck_rejects_zeroed_column_sums(tmp_path: Path) -> None:
     """Gate cross-check: conservation lemmas without model terms fail closed."""
     from pathlib import Path

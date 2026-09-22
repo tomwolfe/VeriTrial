@@ -77,8 +77,9 @@ def _sdirk2_step(
     # pbpk_diag_neg / pbpk_is_metzler); no ad-hoc clamping.
 
     # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
-    mass_drift = jnp.abs(jnp.sum(y_new[:n_monitor]) - y_initial_dose)
-    y_new = jnp.where(mass_drift < 1e-6, y_new, y_new)
+    mass_gain = jnp.sum(y_new[:n_monitor]) - y_initial_dose
+    # Fail-closed: poison on mass creation (gain > tol); dissipation (CL elim) is physical.
+    y_new = jnp.where(mass_gain > 1e-6, jnp.nan * y_new, y_new)
 
     return y_new
 

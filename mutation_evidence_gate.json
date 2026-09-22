@@ -1,0 +1,1311 @@
+[
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "40:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "42:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "42:12",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "47:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "50:43",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "50:69",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "58:18",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "64:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "64:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "64:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "64:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "66:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "80:28",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "88:21",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "91:56",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "93:29",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "98:22",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "102:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "102:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "102:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "102:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "104:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "116:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "124:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "125:25",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "126:23",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "138:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "171:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "175:53",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "179:46",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "190:22",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "191:29",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "192:22",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "192:22",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "195:30",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "196:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "198:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "209:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "216:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "218:13",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "219:27",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "220:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "220:25",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "226:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "230:47",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "257:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "264:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "266:26",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "266:26",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "271:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "279:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "279:32",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "285:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "307:18",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "316:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "320:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "329:34",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "340:36",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "341:57",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "344:37",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "345:43",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "354:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "356:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "358:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "375:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "382:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "384:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "385:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "385:23",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "388:16",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "388:23",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "390:16",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "390:23",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "391:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "391:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "402:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "413:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "427:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "439:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "439:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "441:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "442:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "442:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "448:45",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "449:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "451:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "451:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "464:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "464:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "465:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "465:60",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "478:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "478:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "480:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "480:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "482:20",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "483:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "483:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "487:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "487:31",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "488:12",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "488:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "489:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "489:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "503:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "506:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "508:12",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "509:4",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "520:29",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "520:29",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "533:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "533:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "533:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "533:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "534:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "534:11",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "537:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "537:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "537:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "537:19",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "542:23",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "542:49",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "543:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "557:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "558:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "561:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "564:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "564:20",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "565:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "572:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "573:60",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "573:71",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "574:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "591:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "606:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "608:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "618:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "618:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "618:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "618:17",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "635:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "642:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "647:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "654:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "659:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "665:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "677:12",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "683:38",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "683:38",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "683:38",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "683:38",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "695:12",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "710:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "722:24",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "730:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "733:20",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "734:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "734:27",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "740:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "744:18",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "753:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "756:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "757:21",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "771:15",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "774:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "778:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "788:21",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "788:25",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "794:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "804:16",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "810:12",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "813:45",
+  "status": "equivalent",
+  "detail": "documented genuine equivalent (behavior-preserving)"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "820:23",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "821:13",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "822:14",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "828:7",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "834:8",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "837:18",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "837:18",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "837:18",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "838:37",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "838:52",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "845:24",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "flip_bool",
+  "site": "850:20",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "arithmetic",
+  "site": "854:27",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "break_return",
+  "site": "858:4",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ },
+ {
+  "file": "scripts/verify_formal_gate.py",
+  "operator": "negate_compare",
+  "site": "861:3",
+  "status": "killed",
+  "detail": "fast bridge suite"
+ }
+]
