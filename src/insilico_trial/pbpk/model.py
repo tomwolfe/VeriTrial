@@ -42,6 +42,75 @@ from insilico_trial.schemas import Drug
 # Compartment index mapping: 0=gut, 1=liver, 2=central, 3=peripheral, 4=effect-site
 COMPARTMENT_ORDER = ["gut", "liver", "central", "peripheral", "effect-site"]
 
+# Organ-network configurations: an ordered tuple of compartment names defines
+# an N-state model. ``gut`` absorbs the dose, ``central`` is the blood pool,
+# ``elim`` accumulates cleared amount; every other entry is a perfused tissue.
+# The default 6-state network preserves the validated model exactly; the
+# 14-state standard physiological network adds kidney, lung, brain, heart,
+# muscle, adipose, bone, skin, spleen, and pancreas as perfused tissues.
+DEFAULT_ORGAN_NETWORK: tuple[str, ...] = (
+    "gut", "liver", "central", "peripheral", "effect", "elim",
+)
+STANDARD_14_ORGAN_NETWORK: tuple[str, ...] = (
+    "gut", "liver", "central", "kidney", "lung", "brain", "heart",
+    "muscle", "adipose", "bone", "skin", "spleen", "pancreas", "elim",
+)
+
+
+def organ_indices(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
+                  ) -> dict[str, int]:
+    """Map role -> state index for an organ network.
+
+    Requires exactly one ``gut``, one ``central``, and one ``elim`` entry;
+    all other entries are perfused tissues. Fail-closed on duplicates or
+    missing roles.
+    """
+    network = tuple(organ_network)
+    for role in ("gut", "central", "elim"):
+        if network.count(role) != 1:
+            raise ValueError(
+                f"organ network must contain exactly one {role!r}: {network}")
+    idx = {role: network.index(role) for role in ("gut", "central", "elim")}
+    idx["perfused"] = [k for k, name in enumerate(network)
+                       if name not in ("gut", "central", "elim")]
+    idx["n_states"] = len(network)
+    return idx
+
+
+def make_pbpk_ode(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK):
+    """Build an N-state perfusion-limited PBPK ODE for an organ network.
+
+    The returned ``ode(t, y, args)`` uses only indexed JAX array ops over
+    ``args`` ``Q``/``V``/``Kp`` (length N), ``CL``, and ``ka`` — no hardcoded
+    compartment indices — and is ``jax.jit``/``jax.lax.scan`` compatible
+    (the Python loop unrolls over the static network at trace time).
+    Mass is conserved by construction: central receives gut influx minus
+    every perfused outflow minus clearance, and ``elim`` accumulates ``CL``.
+    """
+    spec = organ_indices(organ_network)
+    gut, central, elim = spec["gut"], spec["central"], spec["elim"]
+    perfused = tuple(spec["perfused"])
+
+    def ode(t: float, y: Any, args: dict[str, Any]) -> Array:
+        Q = args["Q"]
+        V = args["V"]
+        Kp = args["Kp"]
+        CL = args["CL"]
+        ka = args["ka"]
+        c_p = y[central] / V[central]
+        flows = [Q[k] * (c_p - (y[k] / V[k]) / Kp[k]) for k in perfused]
+        d = [0.0] * spec["n_states"]
+        d[gut] = -ka * y[gut]
+        for k, f in zip(perfused, flows):
+            d[k] = f
+        d[central] = ka * y[gut] - sum(flows) - CL * c_p
+        d[elim] = CL * c_p
+        return jnp.array(d)
+
+    ode.organ_network = organ_network  # type: ignore[attr-defined]
+    ode.n_states = spec["n_states"]  # type: ignore[attr-defined]
+    return ode
+
 # Default physiological parameters (70 kg adult, Hct = 0.45)
 DEFAULT_HCT = 0.45
 

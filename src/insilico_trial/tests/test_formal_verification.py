@@ -314,7 +314,7 @@ def test_structural_theorem_is_genuine_lean() -> None:
     thm = ex.build_structural_theorem(model_path)
     assert "theorem veritrial_mass_dissipation" in thm
     assert "exact mass_dissipation_rate" in thm
-    assert "pbpk_is_metzler" in thm
+    assert "veritrial_compartmental" in thm
     assert "extracted_matrix" in thm
     assert not thm.lstrip().startswith("-- ")
 

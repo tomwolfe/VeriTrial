@@ -31,12 +31,17 @@ from insilico_trial.pbpk.model import (
 )
 
 
-def calculate_max_stable_dt(params: dict[str, Any]) -> float:
+def calculate_max_stable_dt(params: dict[str, Any],
+                            organ_network: Any = None) -> float:
     """Dynamic Metzler positivity bound derived from matrix invariants.
 
-    Δt_max = min(Vc/(Ql+Qp+Qe+CL), 1/ka, min_i Vi*Kp_i/Qi).
+    Δt_max = min(Vc/(sum_perfused_Q + CL), 1/ka, min_i Vi*Kp_i/Qi) over all
+    perfused tissues. Indices resolve from *organ_network* (default: the
+    legacy 6-state layout, identical to previous behavior).
     """
     import numpy as _np
+
+    from insilico_trial.pbpk.model import organ_indices
 
     def _get(arr: Any, idx: int) -> float:
         try:
@@ -46,12 +51,20 @@ def calculate_max_stable_dt(params: dict[str, Any]) -> float:
 
     Q = params.get("Q"); V = params.get("V"); Kp = params.get("Kp")
     CL = float(params.get("CL", 0.0)); ka = float(params.get("ka", 1.0))
-    Vc = _get(V, _CENTRAL_IDX)
-    Ql = _get(Q, _LIVER_IDX); Qp = _get(Q, 3); Qe = _get(Q, 4)
-    cands = [Vc / (Ql + Qp + Qe + CL), 1.0 / ka]
-    for qi, vi, ki in ((_get(Q, 1), _get(V, 1), _get(Kp, 1)),
-                       (_get(Q, 3), _get(V, 3), _get(Kp, 3)),
-                       (_get(Q, 4), _get(V, 4), _get(Kp, 4))):
+    n = int(_np.asarray(Q).ravel().shape[0])
+    if organ_network is None:
+        spec = {"gut": 0, "central": 2, "elim": n - 1,
+                "perfused": [k for k in range(n) if k not in (0, 2, n - 1)],
+                "n_states": n}
+    else:
+        spec = organ_indices(tuple(organ_network))
+    central = int(spec["central"])
+    perfused = [int(k) for k in spec["perfused"]]
+    Vc = _get(V, central)
+    q_sum = sum(_get(Q, k) for k in perfused)
+    cands = [Vc / (q_sum + CL), 1.0 / ka]
+    for k in perfused:
+        qi, vi, ki = _get(Q, k), _get(V, k), _get(Kp, k)
         if qi > 0 and vi > 0 and ki > 0:
             cands.append(vi * ki / qi)
     return float(min(c for c in cands if c > 0))
@@ -63,7 +76,7 @@ def assert_dt_stable(dt: float, params: dict[str, Any] | None = None) -> None:
     if not dt <= bound:
         raise ValueError(
             f"dt={dt} exceeds stability bound {bound} h "
-            "(Metzler forward-Euler positivity; see QED pbpk_is_metzler)"
+            "(Metzler forward-Euler positivity; see QED Compartmental.IsMetzler)"
         )
     return None
 
@@ -71,7 +84,7 @@ def assert_dt_stable(dt: float, params: dict[str, Any] | None = None) -> None:
 def _assert_batch_dt_stable(dt: float, params_batch: dict[str, Any]) -> None:
     """Fail closed if dt violates the per-patient Metzler bound.
 
-    Aligned with QED ``pbpk_forward_euler_nonneg``: dt must satisfy every
+    Aligned with QED ``orthant_invariance_fwdEuler``: dt must satisfy every
     patient's bound; the batch bound is the minimum over patients.
     """
     import numpy as _np
@@ -95,7 +108,7 @@ def _assert_batch_dt_stable(dt: float, params_batch: dict[str, Any]) -> None:
     if bounds and not dt <= min(bounds):
         raise ValueError(
             f"dt={dt} exceeds batch stability bound {min(bounds)} h "
-            "(Metzler forward-Euler positivity; see QED pbpk_forward_euler_nonneg)"
+            "(Metzler forward-Euler positivity; see QED orthant_invariance_fwdEuler)"
         )
     return None
 
@@ -125,7 +138,7 @@ def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.
     y_next = y + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
     # Physical non-negativity is guaranteed by the dt bound above
-    # (Metzler invariant; see QED pbpk_diag_neg), not by clamping.
+    # (Metzler invariant; see QED diag_nonpos), not by clamping.
 
     # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
     # The ODE is mass-conserving by construction; this catches numerical drift.
@@ -137,14 +150,17 @@ def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.
 
 
 def _initial_state(a0: float, n_state: int = 6) -> jnp.ndarray:
-    """Initial state vector: gut dose + QSP defaults (GSH=1, ALT=ALT_base)."""
+    """Initial state vector: gut dose + QSP defaults (GSH=1, ALT=ALT_base).
+
+    N-generic: dose in gut (index 0), zeros elsewhere, with the 9-state
+    unified defaults applied when ``n_state == 9``.
+    """
+    y0 = [0.0] * n_state
+    y0[0] = a0
     if n_state == 9:
-        return jnp.array(
-            [a0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-             float(_QSP_DEFAULTS["ALT_base"])],
-            dtype=jnp.float64,
-        )
-    return jnp.array([a0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+        y0[6] = 1.0
+        y0[8] = float(_QSP_DEFAULTS["ALT_base"])
+    return jnp.array(y0, dtype=jnp.float64)
 
 
 def _solve_on_grid_fixed(
@@ -230,7 +246,7 @@ def solve_pbpk_fixed_step(
     n_steps = int((t1 - t0) / dt) + 1
     te_j = jnp.asarray(te)
 
-    y0 = jnp.array([A_gut_0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=jnp.float64)
+    y0 = _initial_state(A_gut_0, 6)
 
     ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, params)
     return ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX]
@@ -407,7 +423,7 @@ def solve_pbpk_multi_dose_fixed_step(
     # If no doses, solve as single-dose with zero initial gut amount.
     if n_doses == 0:
         n_steps = int((t_end - t0) / dt) + 1
-        y0 = jnp.zeros(6, dtype=jnp.float64)
+        y0 = jnp.zeros(6, dtype=jnp.float64)  # single-dose 6-state path
         ys = _solve_on_grid_fixed(t0, t_end, dt, n_steps, te_j, y0, params)
         return jnp.asarray(ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX])
 

@@ -181,9 +181,11 @@ def _independent_column_sums(model_path: Path) -> list:
             t = node.targets[0].id
             s = _tok(_ast.unparse(node.value))
             (rhs if t.startswith("dA_") else aliases)[t] = s
-    order = ["dA_gut", "dA_liver", "dA_central",
-             "dA_periph", "dA_effect", "dA_elim"]
-    states = ["A_gut", "A_liver", "A_central", "A_periph", "A_effect"]
+    # N-generic: order follows the model's return vector (via the export
+    # bridge); accumulator columns differentiate to zero automatically.
+    import export_pbpk_to_qed as _exo
+    _rhs, order = _exo._ode_rhs_asts(model_path)
+    states = [d[1:] for d in order]
 
     def _expand(expr: str) -> str:
         for _ in range(20):
@@ -204,8 +206,6 @@ def _independent_column_sums(model_path: Path) -> list:
             f = _sp.sympify(_expand(rhs[dname]))
             terms.append(_sp.simplify(_sp.diff(f, _sp.Symbol(var))))
         cols.append(terms)
-    # 6th (elim-accumulator) column: no state dependence.
-    cols.append([_sp.Integer(0)])
     return cols
 
 
@@ -392,39 +392,72 @@ def _is_trivial_lemma(lemma: str) -> bool:
 
 
 def _is_metzler_positivity(lemma: str) -> bool:
-    """Check whether a lemma is a Metzler off-diagonal positivity statement.
+    """Generic positivity: ``E > 0`` with a division (off-diagonal certificate).
 
-    Metzler positivity lemmas assert that the off-diagonal flow coefficient
-    Q / (V * Kp) > 0 (or equivalently Q / Kp > 0) for each perfused
-    compartment.  These are REQUIRED for dynamical invariants and must not
-    be skipped or treated as optional.
+    Domain-agnostic structural check delegated to QED's generic
+    ``is_positivity`` detector. Kept under its historic name for
+    backward compatibility.
     """
-    return bool(re.search(r'Q\w*\s*/\s*(\(?V\w*\s*\*\s*)?Kp\w*\s*\)?\s*>\s*0', lemma))
+    try:
+        scripts_dir = _veritrial_root() / "scripts"
+        qed = qed_dir()
+        if str(qed) not in sys.path:
+            sys.path.insert(0, str(qed))
+        from parser import parse_equation, is_positivity
+        node, _ = parse_equation(lemma)
+        if node is not None:
+            return bool(is_positivity(node))
+    except Exception:
+        pass
+    return bool(re.search(r'/\s*\(?\s*[A-Za-z_]\w*.*>\s*0', lemma))
 
 
 def _is_boundary_flow_positivity(lemma: str) -> bool:
-    """Check whether a lemma is a compartmental boundary inflow invariant (Lemma 4).
+    """Generic non-negative product: ``E >= 0`` with a division factor.
 
-    Boundary flow lemmas assert that the perfusion inflow term
-    (Q_i / (V_c * Kp_i)) * A_c >= 0 is non-negative when the source
-    compartment amount is non-negative.  These are REQUIRED and must not
-    be skipped.
+    Domain-agnostic structural check delegated to QED's generic
+    ``is_nonneg_product`` detector. Kept under its historic name for
+    backward compatibility.
     """
-    return bool(re.search(
-        r'\(\s*Q\w*\s*/\s*\(?\s*V\w*\s*\*\s*Kp\w*\s*\)?\s*\)\s*\*\s*A\w*\s*>=\s*0',
-        lemma,
-    ))
+    try:
+        qed = qed_dir()
+        if str(qed) not in sys.path:
+            sys.path.insert(0, str(qed))
+        from parser import parse_equation, is_nonneg_product
+        node, _ = parse_equation(lemma)
+        if node is not None:
+            return bool(is_nonneg_product(node))
+    except Exception:
+        pass
+    return bool(re.search(r'\*.*>=\s*0', lemma) and '/' in lemma)
 
 
 def _is_mass_dissipation(lemma: str) -> bool:
-    """Check whether a lemma is a monotonic mass dissipation inequality (Lemma 5).
+    """Generic dissipation inequality: strict ``E > 0`` over a product term.
 
-    Mass dissipation lemmas assert that the total system outflow is
-    strictly positive when clearance is positive:
-    ``CL * C_p > 0`` (equivalent to -CL * C_p < 0).  This is REQUIRED
-    and must not be skipped.
+    Domain-agnostic structural check: a Gt/Lt node with zero on one side
+    whose positive side is a top-level product containing no division
+    (an outflow product, as opposed to a rate ratio ``E / F > 0``).
     """
-    return bool(re.search(r'CL\s*\*\s*C_p\s*>\s*0', lemma))
+    try:
+        qed = qed_dir()
+        if str(qed) not in sys.path:
+            sys.path.insert(0, str(qed))
+        from parser import parse_equation, contains_op, BinOp, Gt, Lt
+        node, _ = parse_equation(lemma)
+        if isinstance(node, (Gt, Lt)):
+            side = node.left if isinstance(node, Gt) else node.right
+            other = node.right if isinstance(node, Gt) else node.left
+            import parser as _pm
+            if (isinstance(other, _pm.Num) and other.value == 0
+                    and isinstance(side, BinOp) and side.op == '*'
+                    and not contains_op(side, '/')):
+                return True
+            return False
+    except Exception:
+        pass
+    return bool(re.search(r'[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*>\s*0', lemma)
+                and '/' not in lemma)
 
 
 def _detect_mathlib_env() -> bool:
@@ -629,9 +662,14 @@ def main(argv: list[str] | None = None) -> int:
     # the Jacobian of the PBPK ODE is a Metzler matrix, which is required
     # for positivity preservation.  Their absence is a fail-closed error.
     metzler_lemmas = [lm for lm in file_lemmas if _is_metzler_positivity(lm)]
-    perfused = [
-        "liver", "periph", "effect",
-    ]  # compartments with perfusion-limited uptake
+    try:
+        import export_pbpk_to_qed as _ex2
+        _perfused = _ex2.extract_perfused_compartments(
+            model_path, _ex2.extract_state_variables(model_path))
+        perfused = [c for c in _perfused
+                    if c not in ("A_gut", "A_central", "A_elim")]
+    except Exception:
+        perfused = ["c1", "c2", "c3"]
     if len(metzler_lemmas) < len(perfused):
         print(
             "FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas "
@@ -759,9 +797,11 @@ def main(argv: list[str] | None = None) -> int:
             check_file.write_text(
                 "import Compartmental\nimport VeriTrialExport\n"
                 "open Compartmental\n"
-                "#print axioms veritrial_model_matches_pbpkK\n"
-                "#print axioms veritrial_dili_matches_pbpkDiliSystem\n"
-                "#print axioms veritrial_mass_dissipation\n",
+                "#print axioms extracted_offDiag_nonneg\n"
+                "#print axioms extracted_colSum_eq_zero\n"
+                "#print axioms veritrial_compartmental\n"
+                "#print axioms veritrial_mass_dissipation\n"
+                "#print axioms veritrial_dili_block\n",
                 encoding="utf-8",
             )
             proc_ax = _run_lean(qed, [str(check_file)])
@@ -792,13 +832,16 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            if ("veritrial_model_matches_pbpkK" not in proc_ax.stdout
-                    or "veritrial_dili_matches_pbpkDiliSystem" not in proc_ax.stdout
-                    or "veritrial_mass_dissipation" not in proc_ax.stdout):
+            required = ("extracted_offDiag_nonneg",
+                          "extracted_colSum_eq_zero",
+                          "veritrial_compartmental",
+                          "veritrial_mass_dissipation",
+                          "veritrial_dili_block")
+            if any(name not in proc_ax.stdout for name in required):
                 print(
-                    "FORMAL GATE FAILED: 6-state and 9-state isomorphism "
-                    "theorems plus the mass-dissipation certificate must "
-                    "all be verified.",
+                    "FORMAL GATE FAILED: off-diagonal, column-sum, "
+                    "compartmental-instance, mass-dissipation, and "
+                    "unified-block certificates must all be verified.",
                     file=sys.stderr,
                 )
                 return 1

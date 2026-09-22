@@ -74,7 +74,7 @@ def _sdirk2_step(
     y_new = y + dt * (_B1 * k1 + _B2 * k2)
 
     # Non-negativity guaranteed by Metzler matrix invariants (QED
-    # pbpk_diag_neg / pbpk_is_metzler); no ad-hoc clamping.
+    # Compartmental.diag_nonpos / Compartmental.IsMetzler); no ad-hoc clamping.
 
     # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
     mass_gain = jnp.sum(y_new[:n_monitor]) - y_initial_dose

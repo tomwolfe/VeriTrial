@@ -97,8 +97,8 @@ def test_fast_structural_theorem_genuine() -> None:
     thm = ex.build_structural_theorem(MODEL)
     assert "theorem veritrial_mass_dissipation" in thm
     assert "exact mass_dissipation_rate" in thm
-    assert "pbpk_is_metzler" in thm
-    assert "pbpk_hasNonposColSums" in thm
+    assert "veritrial_compartmental" in thm
+    assert "CompartmentalMatrix" in thm or "isMetzler" in thm
     assert "extracted_matrix" in thm
     assert "Q_liver" in thm
     assert not thm.lstrip().startswith("-- ")
@@ -166,8 +166,12 @@ def test_fast_emit_lean_export(tmp_path: Path) -> None:
     text = out.read_text()
     assert "theorem veritrial_mass_dissipation" in text
     assert "exact mass_dissipation_rate" in text
-    assert "theorem veritrial_model_matches_pbpkK" in text
-    assert "theorem veritrial_dili_matches_pbpkDiliSystem" in text
+    assert "theorem extracted_offDiag_nonneg" in text
+    assert "theorem extracted_colSum_eq_zero" in text
+    assert "veritrial_compartmental" in text
+    assert "theorem veritrial_dili_block" in text
+    assert "pbpkK" not in text
+    assert "pbpkDiliSystem" not in text
     assert not any(line.startswith("-- ") for line in text.splitlines())
 
 
@@ -639,9 +643,11 @@ class _FakeProc:
 
 def _axiom_stdout(extra_axioms=("[propext, Classical.choice, Quot.sound]")) -> str:
     lines = [
-        f"'veritrial_model_matches_pbpkK' depends on axioms: {extra_axioms}",
-        f"'veritrial_dili_matches_pbpkDiliSystem' depends on axioms: {extra_axioms}",
+        f"'extracted_offDiag_nonneg' depends on axioms: {extra_axioms}",
+        f"'extracted_colSum_eq_zero' depends on axioms: {extra_axioms}",
+        f"'veritrial_compartmental' depends on axioms: {extra_axioms}",
         f"'veritrial_mass_dissipation' depends on axioms: {extra_axioms}",
+        f"'veritrial_dili_block' depends on axioms: {extra_axioms}",
     ]
     return "\n".join(lines) + "\n"
 

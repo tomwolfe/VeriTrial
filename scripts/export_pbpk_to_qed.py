@@ -371,10 +371,7 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
     # We emit the inequality form for QED.
     lemmas: list[str] = []
     # Build the parametric sum expression (without "= 0")
-    state_order = [
-        "dA_gut", "dA_liver", "dA_central",
-        "dA_periph", "dA_effect", "dA_elim",
-    ]
+    _, state_order = _ode_rhs_asts(model_path)
     import re as _re
     derivs = extract_symbolic_derivatives(model_path, expand=True)
 
@@ -422,8 +419,13 @@ def _ode_rhs_asts(model_path: Path) -> tuple[dict[str, ast.expr], list[str]]:
     for node in fn.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id.startswith("dA_"):
             rhs[node.targets[0].id] = node.value
-    order = ["dA_gut", "dA_liver", "dA_central", "dA_periph", "dA_effect", "dA_elim"]
-    order = [k for k in order if k in rhs] + [k for k in rhs if k not in order]
+    # N-generic: state order follows the model's return vector; any extra
+    # derivatives not in the return vector are appended in sorted order.
+    try:
+        ret_order = ["d" + v for v in extract_state_variables(model_path)]
+    except Exception:
+        ret_order = []
+    order = [k for k in ret_order if k in rhs] + sorted(k for k in rhs if k not in ret_order)
     return rhs, order
 
 
@@ -519,7 +521,8 @@ def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
             t = node.targets[0].id
             if not t.startswith("dA_"):
                 env[t] = node.value
-    state_vars = [("A_gut", 0), ("A_liver", 1), ("A_central", 2), ("A_periph", 3), ("A_effect", 4)]
+    # N-generic: differentiate w.r.t. every returned state (dA_xxx -> A_xxx).
+    state_vars = [(dname[1:], i) for i, dname in enumerate(order)]
     # sympy-backed differentiation for robustness
     J: dict[tuple[int, int], str] = {}
     for i, dname in enumerate(order):
@@ -534,7 +537,7 @@ def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
             except Exception:
                 pass
             J[(i, j)] = s
-    # DILI rows are handled by caller; 6x6 block only here
+    # DILI rows are handled by caller; N x N PBPK block only here
     return J
 
 
@@ -546,7 +549,8 @@ def extract_column_sum_lemmas(model_path: Path) -> list[str]:
     the emitted string (verified by test_formal_verification.py).
     """
     J = compute_jacobian(model_path)
-    order_n = 6
+    _, _order = _ode_rhs_asts(model_path)
+    order_n = len(_order)
     lemmas: list[str] = []
     for j in range(order_n):
         col = [J.get((i, j), "0") for i in range(order_n)]
@@ -561,9 +565,9 @@ def build_structural_theorem(model_path: Path) -> str:
     """Emit the genuine structural theorem for the Lean export file.
 
     Returns full multi-line Lean 4 code (not a `--` comment, not a lemma-file
-    line): `theorem veritrial_mass_dissipation` transporting QED's
+    line): `theorem veritrial_mass_dissipation` transporting QED's generic
     `Compartmental.mass_dissipation_rate` certificate onto the AST-extracted
-    matrix. The PBPK-specific perfusion entries are recorded in the docstring.
+    model via its `veritrial_compartmental : CompartmentalMatrix` instance.
     This belongs in the `.lean` export (see `emit_lean_export`), never in the
     line-oriented lemma file, so `extract_system_matrix_lemmas` does NOT
     include it.
@@ -573,23 +577,22 @@ def build_structural_theorem(model_path: Path) -> str:
     entries = ", ".join(f"Q_{c[2:]} / (V_{c[2:]} * Kp_{c[2:]})" for c in perfused)
     return (
         "/-- Mass dissipation over the extracted matrix: transport of the QED\n"
-        f"    `mass_dissipation_rate` certificate to the AST-extracted model\n"
+        "    generic `mass_dissipation_rate` certificate to the AST-extracted model\n"
         f"    with perfusion entries [{entries}]. -/\n"
         "theorem veritrial_mass_dissipation\n"
-        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ)\n"  # noqa: RUF001
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d)\n"
         "  (hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
         "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
         "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
-        "  (hCL : 0 ≤ CL) (hNe : Vc ≠ 0)\n"
-        "  {y : Fin 6 → ℝ} (hy : NonNegVec y) :\n"  # noqa: RUF001
-        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL) y) ≤ 0 := by\n"
-        "  have H : extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "      = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL :=\n"
-        "    veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "  rw [H]\n"
+        "  (hCL : 0 \u2264 CL)\n"
+        "  {y : Fin 6 \u2192 \u211d} (hy : NonNegVec y) :\n"
+        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL) y) \u2264 0 := by\n"
         "  exact mass_dissipation_rate\n"
-        "    (pbpk_is_metzler hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL)\n"
-        "    (pbpk_hasNonposColSums hVc hNe) hy\n"
+        "    (veritrial_compartmental ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).isMetzler\n"
+        "    (veritrial_compartmental ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).hasNonposColSums\n"
+        "    hy\n"
     )
 
 
@@ -685,10 +688,7 @@ def build_parametric_sum_lemma(model_path: Path) -> str:
     # fully in terms of state variables and parameters only.
     derivs = extract_symbolic_derivatives(model_path, expand=True)
 
-    state_order = [
-        "dA_gut", "dA_liver", "dA_central",
-        "dA_periph", "dA_effect", "dA_elim",
-    ]
+    _, state_order = _ode_rhs_asts(model_path)
 
     def _to_parametric(expr: str) -> str:
         """Convert derivative RHS to parametric form with compartment-specific names."""
@@ -724,43 +724,31 @@ def build_parametric_sum_lemma(model_path: Path) -> str:
 
 
 def emit_verified_lean_export(model_path: Path, out_path: Path) -> Path:
-    """Inspect pbpk_ode via AST and emit QED/VeriTrialExport.lean.
+    """Inspect the model ODE via AST and emit QED/VeriTrialExport.lean.
 
-    Verifies the 6-state structure (check_mass_conservation) then emits a
-    Lean file importing Compartmental whose extracted matrix is definitionally
-    pbpkK, so the isomorphism theorem holds by rfl with no sorry/axioms.
+    Verifies mass conservation (check_mass_conservation) for the live
+    N-state structure, then delegates to :func:`emit_lean_export`, which
+    writes the self-contained file (no model-specific matrices).
     """
     if not check_mass_conservation(model_path):
         raise ValueError("MASS CONSERVATION VIOLATED: refusing Lean export.")
-    state_vars = extract_state_variables(model_path)
-    if len(state_vars) != 6:
-        raise ValueError(f"expected 6 states, got {state_vars}")
-    lean = """import Compartmental
-
-open Compartmental
-
-/-- AST-extracted 6x6 matrix: definitionally pbpkK (see model.py pbpk_ode). -/
-noncomputable def extracted_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ) :
-    Fin 6 → Fin 6 → ℝ :=
-  pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-
-theorem veritrial_model_matches_pbpkK
-  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ) :
-  extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL
-    = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL := by
-  rfl
-"""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(lean, encoding="utf-8")
+    emit_lean_export(model_path, out_path)
     return out_path
 
 
-def emit_lean_export(model_path: Path, lean_out: Path) -> None:
-    """AST-to-Lean transpiler: emit explicit extracted_matrix + ring proof.
+def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = None) -> None:
+    """AST-to-Lean transpiler: emit self-contained extracted matrix + certificates.
 
-    Symbolically extracts the 6x6 Jacobian from pbpk_ode AST and writes
-    explicit arithmetic entries (not an alias of pbpkK). Fails closed if
-    mass conservation is violated (e.g. sign mutation).
+    Symbolically extracts the N x N Jacobian from the model ODE AST (N
+    derived from the Jacobian itself, or overridden via *n_states*) and
+    writes explicit arithmetic entries. The emitted file references only
+    QED's domain-agnostic ``Compartmental`` engine: off-diagonal
+    non-negativity, vanishing column sums, the ``CompartmentalMatrix``
+    instance, and the transported mass-dissipation certificate, plus the
+    unified extension block. Proved with universal scripts
+    (``fin_cases`` + ``positivity`` / ``Finset.sum_fin_eq_sum_range`` +
+    ``field_simp`` + ``ring``) valid for any N. Fails closed if mass
+    conservation is violated (e.g. sign mutation).
     """
     if not check_mass_conservation(model_path):
         raise SystemExit("FAIL-CLOSED: mass conservation violated in " + str(model_path))
@@ -771,6 +759,8 @@ def emit_lean_export(model_path: Path, lean_out: Path) -> None:
     if not check_dili_model(model_path):
         raise SystemExit("FAIL-CLOSED: pbpk_dili_ode delegation broken in " + str(model_path))
     J = compute_jacobian(model_path)
+    # N-generic: derive state dimension from the Jacobian itself.
+    N = n_states if n_states is not None else (max(max(i, j) for (i, j) in J) + 1 if J else 0)
     # Dynamically synthesize if-chain from symbolic Jacobian entries
     arms: list[str] = []
     for (i, j), e in sorted(J.items()):
@@ -778,55 +768,101 @@ def emit_lean_export(model_path: Path, lean_out: Path) -> None:
             continue
         arms.append(f"  if i.val = {i} ∧ j.val = {j} then ({e})")
     chain = "\n  else ".join(arms) + "\n  else 0" if arms else "0"
-    body = ("import Compartmental\n\nopen Compartmental\n\n"
-        "/-- AST-extracted 6x6 Jacobian symbolically differentiated from pbpk_ode. -/\n"
-        "noncomputable def extracted_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ) :\n"
-        "    Fin 6 → Fin 6 → ℝ := fun i j =>\n"
+    M = N + 3  # unified extension dimension
+    P = "(ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ)"
+    A = "ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL"
+    H = ("(hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
+         "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
+         "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
+         "  (hCL : 0 ≤ CL)")
+    Hcol = ("(hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
+            "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)")
+    body = (
+        "/-\n"
+        "  VeriTrialExport.lean — Self-contained N-state export of the VeriTrial model.\n"
+        "\n"
+        "  Generated by `VeriTrial/scripts/export_pbpk_to_qed.py` (`emit_lean_export`)\n"
+        "  from the symbolic Jacobian of the live model. References only QED's\n"
+        "  domain-agnostic `Compartmental` engine. No `sorry` or `sorryAx`.\n"
+        "-/\n"
+        "\nimport Compartmental\n\nopen Compartmental\n\n"
+        "/-- AST-extracted N x N Jacobian symbolically differentiated from the model ODE. -/\n"
+        f"noncomputable def extracted_matrix {P} :\n"
+        f"    Fin {N} → Fin {N} → ℝ := fun i j =>\n"
         f"  {chain}\n\n"
-        "theorem veritrial_model_matches_pbpkK\n"
-        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ) :\n"
-        "  extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "    = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL := by\n"
-        "  ext i j; fin_cases i <;> fin_cases j <;> simp [extracted_matrix, pbpkK] <;> ring\n\n"
-        "/-- AST-extracted 9-state unified matrix: top-left 6x6 block is the\n"
-        "    symbolically differentiated PBPK Jacobian; trailing QSP rows mirror\n"
-        "    the linearised DILI coupling; structurally `pbpkDiliSystem`. -/\n"
+        "/-- Off-diagonal entries of the extracted matrix are non-negative. -/\n"
+        "theorem extracted_offDiag_nonneg\n"
+        f"  {P}\n  {H}\n"
+        f"  (i j : Fin {N}) (hij : i ≠ j) :\n"
+        f"  0 ≤ extracted_matrix {A} i j := by\n"
+        "  fin_cases i <;> fin_cases j <;> simp_all [extracted_matrix] <;> positivity\n\n"
+        "/-- Every column sum of the extracted matrix vanishes exactly. -/\n"
+        "theorem extracted_colSum_eq_zero\n"
+        f"  {P}\n  {Hcol}\n"
+        f"  (j : Fin {N}) :\n"
+        f"  ∑ i, extracted_matrix {A} i j = 0 := by\n"
+        "  have hVc0 : Vc ≠ 0 := ne_of_gt hVc\n"
+        "  have hVl0 : Vl ≠ 0 := ne_of_gt hVl\n"
+        "  have hVp0 : Vp ≠ 0 := ne_of_gt hVp\n"
+        "  have hVe0 : Ve ≠ 0 := ne_of_gt hVe\n"
+        "  have hKpl0 : Kpl ≠ 0 := ne_of_gt hKpl\n"
+        "  have hKpp0 : Kpp ≠ 0 := ne_of_gt hKpp\n"
+        "  have hKpe0 : Kpe ≠ 0 := ne_of_gt hKpe\n"
+        "  fin_cases j <;>\n"
+        "    rw [Finset.sum_fin_eq_sum_range] <;>\n"
+        "    simp [extracted_matrix, Finset.sum_range_succ] <;>\n"
+        "    field_simp <;> ring\n\n"
+        "/-- Every column sum of the extracted matrix is non-positive. -/\n"
+        "theorem extracted_colSum_nonpos\n"
+        f"  {P}\n  {Hcol}\n"
+        f"  (j : Fin {N}) :\n"
+        f"  ∑ i, extracted_matrix {A} i j ≤ 0 := by\n"
+        f"  rw [extracted_colSum_eq_zero {A}\n    hVc hVl hVp hVe hKpl hKpp hKpe j]\n\n"
+        "/-- The extracted model inhabits QED's abstract compartmental type. -/\n"
+        "noncomputable def veritrial_compartmental\n"
+        f"  {P}\n  {H} :\n"
+        f"  CompartmentalMatrix (Fin {N}) where\n"
+        f"  toFun := extracted_matrix {A}\n"
+        "  offDiag_nonneg :=\n"
+        f"    extracted_offDiag_nonneg {A}\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL\n"
+        "  colSums_nonpos :=\n"
+        f"    extracted_colSum_nonpos {A}\n"
+        "      hVc hVl hVp hVe hKpl hKpp hKpe\n\n"
+        "/-- Mass dissipation over the extracted matrix: transport of QED's generic\n"
+        "    `mass_dissipation_rate` certificate onto the AST-extracted model. -/\n"
+        "theorem veritrial_mass_dissipation\n"
+        f"  {P}\n  {H}\n"
+        f"  {{y : Fin {N} → ℝ}} (hy : NonNegVec y) :\n"
+        f"  totalMass (mulVec (extracted_matrix {A}) y) ≤ 0 := by\n"
+        "  exact mass_dissipation_rate\n"
+        f"    (veritrial_compartmental {A}\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).isMetzler\n"
+        f"    (veritrial_compartmental {A}\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).hasNonposColSums\n"
+        "    hy\n\n"
+        "/-- Unified extension matrix: the top-left block is the extracted model. -/\n"
         "noncomputable def extracted_dili_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
         "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) :\n"
-        "    Fin 9 → Fin 9 → ℝ := fun i j =>\n"
-        "  if h : i.val < 6 ∧ j.val < 6 then\n"
-        "    extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL ⟨i.val, by omega⟩ ⟨j.val, by omega⟩\n"
+        f"    Fin {M} → Fin {M} → ℝ := fun i j =>\n"
+        f"  if h : i.val < {N} ∧ j.val < {N} then\n"
+        f"    extracted_matrix {A} ⟨i.val, by omega⟩ ⟨j.val, by omega⟩\n"
         "  else 0\n\n"
-        "theorem veritrial_dili_matches_pbpkDiliSystem\n"
+        "/-- The top-left block of the unified matrix is the extracted model. -/\n"
+        "theorem veritrial_dili_block\n"
         "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) :\n"
-        "  extracted_dili_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ)\n"
+        f"  (i j : Fin {N}) :\n"
+        f"  extracted_dili_matrix {A}\n"
         "      k_synth k_deplete IC50 k_leak k_elim ALT_base\n"
-        "    = pbpkDiliSystem ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "      k_synth k_deplete IC50 k_leak k_elim ALT_base := by\n"
-        "  ext i j\n"
-        "  by_cases h : i.val < 6 ∧ j.val < 6\n"
-        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_left h]\n"
-        "    have H := veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "    exact congr_fun (congr_fun H ⟨i.val, by omega⟩) ⟨j.val, by omega⟩\n"
-        "  · simp only [extracted_dili_matrix, pbpkDiliSystem, dite_eq_right h]\n\n"
-        "/-- Mass dissipation over the extracted matrix: transport of the QED\n"
-        "    `mass_dissipation_rate` certificate to the AST-extracted model. -/\n"
-        "theorem veritrial_mass_dissipation\n"
-        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ)\n"  # noqa: RUF001
-        "  (hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
-        "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
-        "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
-        "  (hCL : 0 ≤ CL) (hNe : Vc ≠ 0)\n"
-        "  {y : Fin 6 → ℝ} (hy : NonNegVec y) :\n"  # noqa: RUF001
-        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL) y) ≤ 0 := by\n"
-        "  have H : extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "      = pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL :=\n"
-        "    veritrial_model_matches_pbpkK ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "  rw [H]\n"
-        "  exact mass_dissipation_rate\n"
-        "    (pbpk_is_metzler hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL)\n"
-        "    (pbpk_hasNonposColSums hVc hNe) hy\n")
+        "      ⟨i.val, by omega⟩ ⟨j.val, by omega⟩\n"
+        f"    = extracted_matrix {A} i j := by\n"
+        "  unfold extracted_dili_matrix\n"
+        "  split_ifs with h\n"
+        "  · rfl\n"
+        "  · exact absurd ⟨i.isLt, j.isLt⟩ h\n"
+    )
+    lean_out.parent.mkdir(parents=True, exist_ok=True)
     lean_out.write_text(body, encoding="utf-8")
 
 
