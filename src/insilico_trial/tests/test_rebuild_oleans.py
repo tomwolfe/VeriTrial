@@ -28,7 +28,7 @@ def test_import_has_no_side_effects(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("subprocess must not run on import")
     monkeypatch.setattr(subprocess, "run", _boom)
-    assert mod._lean_bin(Path("/nonexistent")) == "lean"
+    assert mod._lean_bin(Path("/nonexistent")) == ["lean"]
 
 
 def test_lean_bin_prefers_pinned_toolchain():
@@ -38,13 +38,13 @@ def test_lean_bin_prefers_pinned_toolchain():
         import pytest
         pytest.skip("QED checkout unavailable")
     binpath = mod._lean_bin(qed)
-    assert binpath.endswith("/bin/lean")
-    assert Path(binpath).is_file()
+    tc = (qed / "lean-toolchain").read_text(encoding="utf-8").strip()
+    assert binpath == ["elan", "run", tc, "lean"]
 
 
 def test_lean_bin_fallback_without_toolchain(tmp_path):
     mod = _load()
-    assert mod._lean_bin(tmp_path) == "lean"
+    assert mod._lean_bin(tmp_path) == ["lean"]
 
 
 def test_lean_path_merges_previous(monkeypatch, tmp_path):

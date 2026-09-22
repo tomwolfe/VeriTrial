@@ -507,7 +507,7 @@ class TrialEngine:
             y0_batch = y0_batch.at[:, 0].set(jnp.asarray(A_gut_0s, dtype=jnp.float64))
             t_eval_j = jnp.asarray(t_eval_hours, dtype=jnp.float64)
             params_jax = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in params_batch.items()}
-            ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=0.01)
+            ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=_stable_dt_for_batch(params_batch))
             C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2:3], dtype=onp.float64)
             C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI+1], dtype=onp.float64)
             # Mechanistic DILI coupling for SDIRK2: reuse the unified 9-state

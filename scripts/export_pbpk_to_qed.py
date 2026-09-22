@@ -129,8 +129,72 @@ def extract_perfused_compartments(model_path: Path,
     return perfused
 
 
+def _find_saturable_patterns(model_path: Path) -> list[tuple[str, str, str]]:
+    """Detect saturable flux patterns ``V*C/(K+C)`` in the ODE source.
+
+    AST-scans ``pbpk_ode`` (and ``pbpk_dili_ode``) for a division node whose
+    numerator is a product ``V*C`` and whose denominator is a sum ``K+C``
+    sharing the substrate name ``C``. Returns ``(V, K, C)`` triples with
+    de-duplicated model variable names. Purely structural; returns [] when
+    the live model defines no saturable elimination (the current case).
+    """
+    source = model_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    found: list[tuple[str, str, str]] = []
+
+    def _names(n: ast.expr, acc: set[str]) -> None:
+        for sub in ast.walk(n):
+            if isinstance(sub, ast.Name):
+                acc.add(sub.id)
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef)
+                and node.name in ("pbpk_ode", "pbpk_dili_ode")):
+            continue
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Div)):
+                continue
+            num, den = sub.left, sub.right
+            if not (isinstance(num, ast.BinOp) and isinstance(num.op, ast.Mult)):
+                continue
+            if not (isinstance(den, ast.BinOp) and isinstance(den.op, ast.Add)):
+                continue
+            num_vars: set[str] = set()
+            _names(num, num_vars)
+            den_vars: set[str] = set()
+            _names(den, den_vars)
+            shared = (num_vars & den_vars) - {"jnp", "onp"}
+            if len(num_vars) != 2 or len(den_vars) != 2 or len(shared) != 1:
+                continue
+            C = next(iter(shared))
+            V = next(iter(num_vars - {C}))
+            K = next(iter(den_vars - {C}))
+            triple = (V, K, C)
+            if triple not in found:
+                found.append(triple)
+    return found
+
+
+def extract_saturable_lemmas(model_path: Path) -> list[str]:
+    """Emit non-linear saturable-elimination lemmas when Vmax/Km are defined.
+
+    For each ``V*C/(K+C)`` pattern in the ODE, emits the non-negativity
+    lemma ``V * C / (K + C) >= 0``, transporting QED's generic
+    ``Compartmental.saturableFlux_nonneg`` certificate to the model's own
+    variable names. QED proves it via ``intros; positivity`` with
+    auto-generated hypotheses. Only non-negativity is emitted on the
+    line-lemma path: boundedness/monotonicity need relational hypotheses
+    (``C1 <= C2``) the pipeline cannot synthesize, and live in the Lean
+    export instead. Returns [] when the model defines no saturable term.
+    """
+    lemmas: list[str] = []
+    for V, K, C in _find_saturable_patterns(model_path):
+        lemmas.append(f"{V} * {C} / ({K} + {C}) >= 0")
+    return lemmas
+
+
 def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
-                 parametric: bool = True) -> list[str]:
+                  parametric: bool = True) -> list[str]:
     """Build the deterministic list of NON-TRIVIAL QED lemmas.
 
     Retains ONLY:
@@ -148,6 +212,7 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
         pass  # symbolic ODE targets removed: verification theater.
     lemmas.extend(extract_metzler_lemmas(model_path))
     lemmas.extend(extract_boundary_flow_lemmas(model_path))
+    lemmas.extend(extract_saturable_lemmas(model_path))
     if parametric:
         lemmas.append(build_parametric_sum_lemma(model_path))
         lemmas.extend(extract_mass_dissipation_lemma(model_path))

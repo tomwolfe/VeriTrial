@@ -16,8 +16,11 @@ import os
 import sys
 
 solver = os.environ.get("VERITRIAL_SOLVER", "")
-if sys.platform == "darwin" and os.environ.get("VERITRIAL_ALLOW_METAL") != "1" and solver not in ("fixed_step", "sdirk2"):
+if sys.platform == "darwin" and os.environ.get("VERITRIAL_ALLOW_METAL") != "1":
     # Must be set before JAX is imported anywhere.
+    # Applies to ALL solvers (fixed_step/sdirk2 included): jax.jacfwd +
+    # jnp.linalg.solve fail to compile on the Metal backend
+    # ("unknown attribute code: 22"), so default to CPU.
     os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
