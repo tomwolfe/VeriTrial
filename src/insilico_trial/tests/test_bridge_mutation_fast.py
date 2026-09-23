@@ -111,7 +111,9 @@ def test_fast_structural_theorem_genuine() -> None:
 def test_fast_metzler_lemmas() -> None:
     lemmas = ex.extract_metzler_lemmas(MODEL)
     assert len(lemmas) == 3
-    assert all(lemma.endswith("> 0") for lemma in lemmas)
+    # `>= 0` (not strict `> 0`): matches IsMetzler/nonneg conventions in
+    # Compartmental.lean and the gate's `_is_metzler_positivity` (covers both).
+    assert all(lemma.endswith(">= 0") for lemma in lemmas)
 
 
 def test_fast_boundary_lemmas() -> None:
@@ -428,6 +430,15 @@ def test_fast_gate_single_source_drift(tmp_path: Path) -> None:
     short = _write_lemmas(tmp_path / "S.txt", ex.build_lemmas(MODEL)[1:])
     with pytest.raises(SystemExit):
         gate._check_single_source(short)
+
+
+def test_fast_emission_has_no_duplicates() -> None:
+    """Emitted lemma list must be duplicate-free (mutation probe 2026-09-23:
+    disabling the build_lemmas dedupe survived the whole suite — NOTHING
+    asserted uniqueness, and set-based checks collapse the evidence)."""
+    lemmas = ex.build_lemmas(MODEL)
+    assert len(lemmas) == len(set(lemmas)), (
+        [s for s in lemmas if lemmas.count(s) > 1])
 
 
 def test_fast_gate_split_summands() -> None:

@@ -2,10 +2,12 @@ population:
   name: hepatic_impairment
   n_subjects: 50
   seed: 42
-  # Hepatic impairment (Child-Pugh B) reduces clearance.
-  # CL/F is scaled by egfr_scale equivalent for hepatic function.
-  # For moderate hepatic impairment, CL/F is reduced ~40%.
-  egfr_scale: 0.6  # Reduced hepatic clearance function
+  # Hepatic impairment (Child-Pugh B) reduces clearance via the HEPATIC
+  # axis (hepatic_scale), not the renal one: these patients typically have
+  # normal kidneys (egfr_scale stays 1.0). For moderate hepatic impairment,
+  # CL/F and CYP CLint are reduced ~40%.
+  hepatic_scale: 0.6  # Reduced hepatic function (Child-Pugh B)
+  egfr_scale: 1.0  # Normal renal function in this cohort
   age:
     dist: truncated_normal
     mean: 40.0

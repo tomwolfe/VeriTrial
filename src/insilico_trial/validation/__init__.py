@@ -19,7 +19,12 @@ from typing import Any
 
 import numpy as onp
 
-from insilico_trial.pbpk.model import build_pbpk_params, run_pbpk, solve_pbpk_batch
+from insilico_trial.pbpk.model import (
+    build_pbpk_params,
+    renal_egfr_scale,
+    run_pbpk,
+    solve_pbpk_batch,
+)
 from insilico_trial.population.generator import generate_population
 from insilico_trial.schemas import Observation, load_drug_config, load_population_config
 from insilico_trial.trial.engine import compute_nca
@@ -559,6 +564,10 @@ def validate_metformin_renal(
                 age=float(row["age"]),
                 drug=drug,
                 genotype_scale=1.0,  # No CYP metabolism
+                # Mechanistic renal rule (G6b): eGFR-driven CL via the shared
+                # helper — previously the correlation passed on allometry alone.
+                egfr_scale=renal_egfr_scale(
+                    float(row["egfr_ml_min"]), drug.fraction_excreted_renal),
             )
         )
 
@@ -948,15 +957,18 @@ def validate_hepatic_impairment(
 
     params_hepatic = []
     for _, row in df_hepatic.iterrows():
-        # Hepatic impairment uses egfr_scale from population config to reduce CL
-        egfr_scale = float(pop_hepatic.get("egfr_scale", 1.0))
+        # Hepatic impairment uses hepatic_scale (Child-Pugh B ≈ 0.6), which
+        # scales BOTH systemic CL and CYP CLint (G3xG6). The renal axis
+        # (egfr_scale) stays 1.0: conflating them mis-doses renally-cleared
+        # drugs in liver disease.
+        hepatic_scale = float(pop_hepatic.get("hepatic_scale", 1.0))
         params_hepatic.append(
             build_pbpk_params(
                 weight_kg=float(row["weight_kg"]),
                 age=float(row["age"]),
                 drug=drug,
                 genotype_scale=1.0,
-                egfr_scale=egfr_scale,
+                hepatic_scale=hepatic_scale,
             )
         )
     batch_hepatic = {
@@ -1005,7 +1017,7 @@ def validate_hepatic_impairment(
         "cl_within_tolerance": cl_pass,
         "overall_pass": bool(cl_pass),
         "details": {
-            "egfr_scale": float(pop_hepatic.get("egfr_scale", 1.0)),
+            "hepatic_scale": float(pop_hepatic.get("hepatic_scale", 1.0)),
             "n_normal": n_normal,
             "n_hepatic": n_hepatic,
         },

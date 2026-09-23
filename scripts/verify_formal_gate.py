@@ -129,7 +129,12 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
         )
         raise SystemExit(1)
 
-    if set(file_lemmas) != set(emitted):
+    # Multiset (Counter) comparison, not set comparison: a duplicated emission
+    # once let a truncated file pass because set() collapsed the missing copy.
+    # Duplicates in the live emission are themselves a fail-closed error —
+    # certifying a file with doubled lemmas would bless emitter drift.
+    import collections as _collections
+    if _collections.Counter(file_lemmas) != _collections.Counter(emitted):
         missing = sorted(set(emitted) - set(file_lemmas))
         extra = sorted(set(file_lemmas) - set(emitted))
         print(
@@ -299,6 +304,180 @@ def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
         raise SystemExit(1)
 
 
+def _numeric_jacobian_correspondence(model_path: Path, J: dict | None = None,
+                                     order: list | None = None) -> None:
+    """SymPy-free correspondence oracle: the emitted Jacobian must match the
+    live ``model.py`` numerically, not just symbolically.
+
+    Trust analysis (see GLOBAL_MINIMUM_REPORT.md "SymPy-oracle question"):
+    Lean's kernel independently re-proves every *stated* identity (column
+    sums = 0, off-diagonal >= 0), so a SymPy *simplification* error that
+    produces a false statement fails closed at the Lean step. But both the
+    exporter (``_sym_diff`` + ``sympy.simplify``) and the term-accounting
+    oracle (``_independent_column_sums`` + ``sympy.diff``) share SymPy as a
+    trusted component, and Lean never checks *correspondence* between the
+    stated identity and ``model.py``. A CAS soundness bug (or an exporter
+    bug emitting a provable-but-wrong identity such as ``0 = 0`` for a
+    nonzero column) could pass all three symbolic checks.
+
+    This oracle closes that crack with zero shared trusted components
+    besides ``model.py`` itself and Python float arithmetic: it evaluates
+    the live ``pbpk_ode`` at seeded random positive parameters/states,
+    forms the Jacobian by central finite differences, evaluates each
+    emitted Jacobian string numerically in a restricted namespace, and
+    requires agreement to rtol=1e-4. Raises SystemExit(1) on any mismatch
+    or evaluation failure. Fast (no Lean, no SymPy).
+    """
+    import math as _math
+    import sys as _sys
+    scripts_dir = _veritrial_root() / "scripts"
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+    import export_pbpk_to_qed as _ex
+    if J is None or order is None:
+        J = _ex.compute_jacobian(model_path)
+        _, order = _ex._ode_rhs_asts(model_path)
+    n = len(order)
+    states = [d[1:] for d in order]  # dA_gut -> A_gut, ...
+    # order-space != y-position-space: `order` is alphabetical, but the live
+    # state vector follows model.py's own unpack order. Derive the map from
+    # the `... = y` tuple assignment in pbpk_ode (single source of truth).
+    import ast as _ast
+    _tree = _ast.parse(model_path.read_text(encoding="utf-8"))
+    _fn = next(n2 for n2 in _ast.walk(_tree)
+               if isinstance(n2, _ast.FunctionDef) and n2.name == "pbpk_ode")
+    _ypos: dict[str, int] = {}
+    for _node in _fn.body:
+        if (isinstance(_node, _ast.Assign) and len(_node.targets) == 1
+                and isinstance(_node.targets[0], _ast.Tuple)
+                and isinstance(_node.value, _ast.Name)
+                and _node.value.id == "y"):
+            for _k, _elt in enumerate(_node.targets[0].elts):
+                if isinstance(_elt, _ast.Name):
+                    _ypos[_elt.id] = _k
+            break
+    if "A_elim" not in _ypos and "_" in _ypos:
+        # model.py unpacks the accumulator as `_` (unused); it is A_elim.
+        _ypos["A_elim"] = _ypos["_"]
+    if any(s not in _ypos for s in states):
+        print("FORMAL GATE FAILED (fail-closed): numeric correspondence "
+              "oracle cannot map export states to live y positions: "
+              f"{states} vs {sorted(_ypos)}", file=_sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        from jax import config as _jax_config
+        _jax_config.update("jax_enable_x64", True)
+        import jax.numpy as _jnp
+        from insilico_trial.pbpk import model as _m
+        _ode = _m.pbpk_ode
+        _idx = {k: getattr(_m, k) for k in
+                ("_GUT_IDX", "_LIVER_IDX", "_CENTRAL_IDX", "_PERIPHERAL_IDX",
+                 "_EFFECT_SITE_IDX", "_ELIM_IDX")}
+    except Exception as e:
+        print("FORMAL GATE FAILED (fail-closed): numeric correspondence "
+              f"oracle cannot load live model.py: {e}", file=_sys.stderr)
+        raise SystemExit(1)
+
+    _MATH_NS = {k: getattr(_math, k) for k in
+                ("sqrt", "exp", "log", "sin", "cos", "tanh", "pi", "e")}
+    import random as _random
+    _rng = _random.Random(0xC10C)
+
+    def _draw_params() -> tuple[dict, dict]:
+        ka = _rng.uniform(0.1, 3.0)
+        CL = _rng.uniform(0.05, 1.0)
+        # CYP path drawn ACTIVE (CLint > 0): the oracle must exercise the
+        # metabolic term, not just the OFF-default projection.
+        CLint = _rng.uniform(0.1, 2.0)
+        fu_liver = _rng.uniform(0.2, 1.0)
+        cyp_activity = _rng.uniform(0.25, 2.0)
+        Q = [0.0] * 5
+        V = [0.0] * 5
+        Kp = [0.0] * 5
+        per_idx = [_idx["_LIVER_IDX"], _idx["_PERIPHERAL_IDX"],
+                   _idx["_EFFECT_SITE_IDX"]]
+        for k in per_idx:
+            Q[k] = _rng.uniform(0.5, 10.0)
+            Kp[k] = _rng.uniform(0.2, 5.0)
+        for k in range(5):
+            V[k] = _rng.uniform(0.5, 20.0)
+        scalars = {"ka": ka, "CL": CL,
+                   "CLint": CLint, "fu_liver": fu_liver,
+                   "cyp_activity": cyp_activity,
+                   "Ql": Q[_idx["_LIVER_IDX"]], "Qp": Q[_idx["_PERIPHERAL_IDX"]],
+                   "Qe": Q[_idx["_EFFECT_SITE_IDX"]], "Qc": Q[_idx["_CENTRAL_IDX"]],
+                   "Vl": V[_idx["_LIVER_IDX"]], "Vp": V[_idx["_PERIPHERAL_IDX"]],
+                   "Ve": V[_idx["_EFFECT_SITE_IDX"]], "Vc": V[_idx["_CENTRAL_IDX"]],
+                   "Kpl": Kp[_idx["_LIVER_IDX"]], "Kpp": Kp[_idx["_PERIPHERAL_IDX"]],
+                   "Kpe": Kp[_idx["_EFFECT_SITE_IDX"]], "Kpc": Kp[_idx["_CENTRAL_IDX"]]}
+        return {"Q": Q, "V": V, "Kp": Kp, "CL": CL, "ka": ka,
+                "CLint": CLint, "fu_liver": fu_liver,
+                "cyp_activity": cyp_activity}, scalars
+
+    def _eval_entry(expr: str, env: dict) -> float:
+        try:
+            code = compile(expr, "<jacobian-entry>", "eval")
+        except Exception as e:
+            raise ValueError(f"cannot compile Jacobian entry {expr!r}: {e}")
+        for node_name in code.co_names:
+            if node_name not in env and node_name not in _MATH_NS:
+                raise ValueError(f"unknown name {node_name!r} in entry {expr!r}")
+        return float(eval(code, {"__builtins__": {}}, {**_MATH_NS, **env}))
+
+    for trial in range(3):
+        args, scalars = _draw_params()
+        y0 = [_rng.uniform(0.5, 50.0) for _ in range(6)]
+        jargs = {k: (_jnp.asarray(v, dtype=_jnp.float64)
+                     if isinstance(v, list) else float(v))
+                 for k, v in args.items()}
+        h = 1e-6
+        try:
+            f0 = [float(v) for v in _ode(0.0, _jnp.asarray(y0), jargs)]
+        except Exception as e:
+            print("FORMAL GATE FAILED (fail-closed): numeric correspondence "
+                  f"oracle cannot evaluate live pbpk_ode: {e}", file=_sys.stderr)
+            raise SystemExit(1)
+        for jj in range(n):
+            j = _ypos[states[jj]]
+            yp = list(y0)
+            ym = list(y0)
+            yp[j] += h
+            ym[j] -= h
+            try:
+                fp = [float(v) for v in _ode(0.0, _jnp.asarray(yp), jargs)]
+                fm = [float(v) for v in _ode(0.0, _jnp.asarray(ym), jargs)]
+            except Exception as e:
+                print("FORMAL GATE FAILED (fail-closed): numeric correspondence "
+                      f"oracle finite-difference failed at state {jj}: {e}",
+                      file=_sys.stderr)
+                raise SystemExit(1)
+            for ii in range(n):
+                i = _ypos[states[ii]]
+                num = (fp[i] - fm[i]) / (2.0 * h)
+                key = (ii, jj)
+                if key not in J:
+                    print("FORMAL GATE FAILED (fail-closed): numeric "
+                          f"correspondence oracle: Jacobian entry {key} missing "
+                          "from export.", file=_sys.stderr)
+                    raise SystemExit(1)
+                try:
+                    sym = _eval_entry(J[key], scalars)
+                except ValueError as e:
+                    print("FORMAL GATE FAILED (fail-closed): numeric "
+                          f"correspondence oracle: {e}", file=_sys.stderr)
+                    raise SystemExit(1)
+                denom = max(abs(num), abs(sym), 1e-12)
+                if abs(num - sym) / denom > 1e-4:
+                    print("FORMAL GATE FAILED (fail-closed): numeric "
+                          "correspondence oracle: emitted J"
+                          f"[{ii}][{jj}] = {J[key]!r} evaluates to {sym:.6g} "
+                          f"but live model.py gives {num:.6g} "
+                          f"(trial {trial}). Export does not reflect model.",
+                          file=_sys.stderr)
+                    raise SystemExit(1)
+
+
 def run_negative_controls(model_path: Path) -> None:
     """Self-sensitivity controls: the bridge AND this gate must reject
     broken inputs fail-closed (built-in mutation testing).
@@ -371,6 +550,42 @@ def run_negative_controls(model_path: Path) -> None:
         failures.append("genuine column sum rejected by trivial filter")
     if _is_numeric_shortcut(genuine):
         failures.append("genuine column sum rejected by strict filter")
+    # 6. Numeric correspondence oracle: a corrupted (provable-but-wrong)
+    # Jacobian entry must be refused even though no symbolic check is
+    # involved. Corrupt entry (0,0) (genuine: central column sum) to "+ka":
+    # finite differences of the live model disagree.
+    try:
+        _Jc = dict(ex.compute_jacobian(model_path))
+        _, _oc = ex._ode_rhs_asts(model_path)
+        _Jc[(0, 0)] = "+ka"
+        import contextlib as _cl
+        import io as _io
+        with _cl.redirect_stderr(_io.StringIO()):
+            _numeric_jacobian_correspondence(model_path, _Jc, _oc)
+        failures.append("sign-corrupted Jacobian entry accepted by numeric oracle")
+    except SystemExit:
+        pass
+    # 7. Duplicated-lemma file: multiset single-source check must refuse a
+    # file with a doubled lemma (set comparison once let a truncated file
+    # pass by collapsing the missing copy).
+    import contextlib as _cl2
+    import io as _io2
+    _dup = tmp_path_lemma = None
+    try:
+        _genuine = _live_model_lemmas()
+        _dup = Path(tempfile.mkstemp(suffix="_lemmas.txt")[1])
+        _dup.write_text("\n".join([*_genuine, _genuine[0]]) + "\n",
+                        encoding="utf-8")
+        with _cl2.redirect_stderr(_io2.StringIO()):
+            _check_single_source(_dup)
+        failures.append("duplicated-lemma file accepted by single-source check")
+    except SystemExit:
+        pass
+    except Exception as e:
+        failures.append(f"duplicated-lemma control crashed: {e}")
+    finally:
+        if _dup is not None:
+            _dup.unlink(missing_ok=True)
     if failures:
         for f in failures:
             print(f"FORMAL GATE FAILED (fail-closed): negative control: {f}",
@@ -659,6 +874,14 @@ def main(argv: list[str] | None = None) -> int:
     # Lean-provable but no longer reflects the model (e.g. dropped terms).
     model_path = _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
     _check_column_sum_crosscheck(file_lemmas, model_path)
+
+    # SymPy-free numeric correspondence: the emitted Jacobian strings must
+    # agree with finite differences of the live model.py (no shared CAS
+    # trusted component). Catches provable-but-wrong exports.
+    import export_pbpk_to_qed as _exn
+    _J = _exn.compute_jacobian(model_path)
+    _, _order = _exn._ode_rhs_asts(model_path)
+    _numeric_jacobian_correspondence(model_path, _J, _order)
 
     # Negative controls (fast, pre-Lean): the bridge and this gate must
     # refuse broken inputs. A pipeline that accepts theater fails here,

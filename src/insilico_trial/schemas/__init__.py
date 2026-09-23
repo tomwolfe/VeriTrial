@@ -94,13 +94,15 @@ class Drug(BaseModel):
 
     # QSP DILI parameters (optional; when absent, assess_dili uses empirical proxy)
     vmax_metabolic: float = Field(default=0.0, description="Max metabolic rate for QSP DILI model (mg/h)", ge=0.0)
-    km_metabolic: float = Field(default=0.0, description="Michaelis constant for metabolic activation (mg/L)", ge=0.0)
+    km_metabolic: float = Field(default=0.0, description="Mitochondrial IC50 prior, e.g. Seahorse-derived (mg/L). Drives S_mito in the 9-state QSP; 0 falls back to literature default", ge=0.0)
     gsh_depletion_rate: float = Field(default=0.0, description="GSH depletion rate constant for QSP model (L/mg/h)", ge=0.0)
+    bsep_ic50: float = Field(default=0.0, description="BSEP inhibition IC50 prior for bile-acid QSP (mg/L); 0 falls back to literature default", ge=0.0)
+    fraction_excreted_renal: float = Field(default=0.0, description="Fraction of clearance renally excreted (0-1). Drives the per-patient eGFR rule; 0 = neutral (hepatically cleared)", ge=0.0, le=1.0)
 
     @property
     def has_qsp_dili_params(self) -> bool:
         """True if QSP DILI parameters are set (non-zero)."""
-        return self.vmax_metabolic > 0.0 or self.km_metabolic > 0.0 or self.gsh_depletion_rate > 0.0
+        return self.vmax_metabolic > 0.0 or self.km_metabolic > 0.0 or self.gsh_depletion_rate > 0.0 or self.bsep_ic50 > 0.0
 
     @field_validator("pka", mode="before")
     @classmethod
@@ -155,6 +157,7 @@ class Patient(BaseModel):
     weight_scaling: float = Field(default=1.0, description="Allometric scaling factor")
     age_scaling: float = Field(default=1.0, description="Age-based scaling factor")
     egfr_scaling: float = Field(default=1.0, description="Renal function scaling factor")
+    hepatic_scale: float = Field(default=1.0, description="Hepatic function scaling factor (Child-Pugh B ≈ 0.6); scales CL and CYP CLint")
 
     @property
     def bmi(self) -> float:

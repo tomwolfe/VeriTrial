@@ -22,7 +22,7 @@ from insilico_trial.pbpk.fixed_step import (
     solve_pbpk_batch_multi_dose_fixed_step,
     solve_pbpk_batch_with_compartments,
 )
-from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single, _QSP_DEFAULTS
+from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single, _QSP_DEFAULTS, renal_egfr_scale
 from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
     DosingEvent,
@@ -436,6 +436,8 @@ class TrialEngine:
             age=patient.biometrics.age,
             drug=self.drug,
             genotype_scale=genotype_scale,
+            egfr_scale=renal_egfr_scale(patient.biometrics.egfr, self.drug.fraction_excreted_renal),
+            hepatic_scale=float(patient.hepatic_scale),
         )
 
         # Simulation grid (hourly) over the observation period for smooth NCA.
@@ -466,6 +468,8 @@ class TrialEngine:
                 age=p.biometrics.age,
                 drug=self.drug,
                 genotype_scale=self._genotype_scale(p),
+                egfr_scale=renal_egfr_scale(p.biometrics.egfr, self.drug.fraction_excreted_renal),
+                hepatic_scale=float(p.hepatic_scale),
             )
             for p in cohort_patients
         ]
@@ -477,6 +481,7 @@ class TrialEngine:
             "CL": onp.array([p["CL"] for p in params_list]),
             "ka": onp.array([p["ka"] for p in params_list]),
         }
+        params_batch = self._with_mechanistic_keys(params_batch, params_list)
         A_gut_0s = administered_doses * self.drug.bioavailability
 
         # Unified mechanistic solver: pure-JAX paths only (fixed_step /
@@ -580,6 +585,8 @@ class TrialEngine:
                 age=p.biometrics.age,
                 drug=self.drug,
                 genotype_scale=self._genotype_scale(p),
+                egfr_scale=renal_egfr_scale(p.biometrics.egfr, self.drug.fraction_excreted_renal),
+                hepatic_scale=float(p.hepatic_scale),
             )
             for p in cohort_patients
         ]
@@ -645,10 +652,7 @@ class TrialEngine:
             "CL": onp.array([p["CL"] for p in params_list]),
             "ka": onp.array([p["ka"] for p in params_list]),
         }
-        # Add QSP keys so the 9-state unified ODE is used
-        for key, default_val in _QSP_DEFAULTS.items():
-            if key not in params_batch:
-                params_batch[key] = onp.full(n_patients, default_val, dtype=onp.float64)
+        params_batch = self._with_mechanistic_keys(params_batch, params_list)
 
         C_batch, C_liver_batch = solve_pbpk_batch_multi_dose_fixed_step(
             t_eval_hours, dose_times, dose_amounts, params_batch, dt=_stable_dt_for_batch(params_batch),
@@ -763,6 +767,32 @@ class TrialEngine:
                 concentration=float(ci),
             ))
         return obs
+
+    def _with_mechanistic_keys(
+        self,
+        params_batch: dict[str, onp.ndarray],
+        params_list: list[dict],
+    ) -> dict[str, onp.ndarray]:
+        """Thread CYP (G3) + QSP (G4) keys into a batched params dict.
+
+        Single choke point for SAD/MAD/SDIRK2 paths: per-patient CYP keys
+        (CLint/fu_liver/cyp_activity, defaulting to OFF when an older dict
+        lacks them) plus compound-specific QSP priors via
+        ``qsp_params_for_drug`` (NOT bare literature defaults). Without this,
+        batch construction silently drops the mechanism (SAD ignored CYP
+        entirely; all live ALT trajectories used IC50=5.0 for every drug).
+        """
+        from insilico_trial.pbpk.model import qsp_params_for_drug as _qsp_for_drug
+        n = len(onp.asarray(params_batch["CL"]).ravel())
+        for key, off in (("CLint", 0.0), ("fu_liver", 1.0), ("cyp_activity", 1.0)):
+            if key not in params_batch:
+                params_batch[key] = onp.array(
+                    [float(p.get(key, off)) for p in params_list], dtype=onp.float64)
+        _qsp = _qsp_for_drug(self.drug)
+        for key, default_val in _QSP_DEFAULTS.items():
+            if key not in params_batch:
+                params_batch[key] = onp.full(n, _qsp.get(key, default_val), dtype=onp.float64)
+        return params_batch
 
     def _genotype_scale(self, patient: Patient) -> float:
         """Map the drug's metabolizing enzyme activity score to a clearance scale."""

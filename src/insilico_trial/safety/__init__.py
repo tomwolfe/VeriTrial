@@ -236,15 +236,13 @@ def assess_dili(
                     max_conc = obs.concentration
             liver_concs[pid] = max_conc
 
-        # Merge drug schema QSP params with caller-provided overrides
-        merged_params: dict[str, Any] = {
-            "k_synth": 0.1,
-            "k_deplete": drug.gsh_depletion_rate if drug.gsh_depletion_rate > 0 else 0.5,
-            "IC50": drug.km_metabolic if drug.km_metabolic > 0 else 5.0,
-            "k_leak": 0.05,
-            "k_elim": 0.2,
-            "ALT_base": drug.alt_baseline,
-        }
+        # Merge drug schema QSP params with caller-provided overrides.
+        # Compound priors via the central qsp_params_for_drug rule (G4) —
+        # previously a hand-duplicated copy that drifted from the engine.
+        from insilico_trial.pbpk.model import qsp_params_for_drug as _qsp_for_drug
+        merged_params: dict[str, Any] = _qsp_for_drug(drug)
+        if float(getattr(drug, "bsep_ic50", 0.0) or 0.0) > 0:
+            merged_params["IC50_bsep"] = float(drug.bsep_ic50)
         if qsp_params:
             merged_params.update(qsp_params)
 

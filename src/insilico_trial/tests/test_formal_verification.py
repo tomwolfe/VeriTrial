@@ -212,9 +212,23 @@ def test_sign_flip_dynamically_alters_lean_and_fails_gate(tmp_path: Path) -> Non
     with pytest.raises(SystemExit):
         ex.emit_lean_export(bad_model, tmp_path / "bad.lean")
     # Dynamic Jacobian also changes under a subtler sign edit that keeps
-    # conservation text checks but flips a derivative sign
+    # conservation text checks but flips a derivative sign. The liver
+    # diagonal index is derived from live order (alphabetical), NOT
+    # hardcoded: (1, 1) was the y-position-era liver slot and is now the
+    # effect compartment.
     J_good = ex.compute_jacobian(model_path)
-    assert J_good[(1, 1)] == "-Ql/(Kpl*Vl)"
+    _, _live_order = ex._ode_rhs_asts(model_path)
+    _li = _live_order.index("dA_liver")
+    _liv = J_good[(_li, _li)]
+    # Liver diagonal = perfusion loss + CYP metabolic loss (G3). Compared
+    # SYMBOLICALLY (not string-compared): sympy's print form is its own
+    # business; exactness is independently certified by the numeric oracle
+    # and Lean downstream.
+    import sympy as _sp
+
+    _perfusion = _sp.sympify("-Ql/(Kpl*Vl)")
+    _metab = _sp.sympify("-CLint*cyp_activity*fu_liver/Vl")
+    assert _sp.simplify(_sp.sympify(_liv) - _perfusion - _metab) == 0
 
 def test_sym_diff_defensive_fallthroughs() -> None:
     """_sym_diff totality: exotic AST shapes differentiate to zero."""

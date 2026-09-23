@@ -205,7 +205,8 @@ class PopulationSpec:
     seed: int = 42
     marginals: list[MarginalConfig] = field(default_factory=list)
     correlations: dict[str, float] = field(default_factory=dict)
-    egfr_scale: float = 1.0  # Hepatic impairment scale factor for eGFR
+    egfr_scale: float = 1.0  # Renal axis: scales generated eGFR values
+    hepatic_scale: float = 1.0  # Hepatic axis: Child-Pugh B ≈ 0.6 (set on Patient)
     genotype_db: dict[str, dict[str, dict[str, float]]] = field(default_factory=lambda: copy.deepcopy(GENOTYPE_DB))
     organ_volumes_per_kg: dict[str, float] = field(default_factory=lambda: {
         "liver": 0.025,  # ~2.5% body weight
@@ -284,8 +285,10 @@ def config_from_yaml(pop_config: dict[str, Any]) -> PopulationSpec:
         params={"mean_log": lc.get("mean_log", 1.84), "std_log": lc.get("std_log", 0.20)},
     ))
 
-    # eGFR scale factor (e.g., 0.6 for hepatic impairment)
+    # eGFR scale factor (renal axis — NOT hepatic; see hepatic_scale)
     egfr_sc = pop_config.get("egfr_scale", 1.0)
+    # Hepatic function scale (Child-Pugh B ≈ 0.6) carried on each Patient
+    hepatic_sc = pop_config.get("hepatic_scale", 1.0)
 
     # Note: sex is handled separately after the copula draw (Bernoulli p=0.5),
     # so it is not included as a copula marginal here.
@@ -318,6 +321,7 @@ def config_from_yaml(pop_config: dict[str, Any]) -> PopulationSpec:
         marginals=marginals,
         correlations=pop_config.get("correlation_matrix", {}),
         egfr_scale=egfr_sc,
+        hepatic_scale=hepatic_sc,
         genotype_db=genotype_db,
     )
 
@@ -621,6 +625,7 @@ class PopulationGenerator:
                 weight_scaling=weight_sc,
                 age_scaling=age_sc,
                 egfr_scaling=egfr_sc,
+                hepatic_scale=float(self.spec.hepatic_scale),
             )
             patients.append(patient)
         return patients

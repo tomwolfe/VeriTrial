@@ -14,6 +14,7 @@ drug:
   ka: 1.0
   bioavailability: 0.55  # ~50-60% oral
   metabolizing_enzyme: none  # renal clearance; no CYP genotype scaling
+  fraction_excreted_renal: 0.9  # ~90% excreted unchanged (renal dominant)
   target: oct1_transporter
   ec50: 10.0
   emax: 1.0

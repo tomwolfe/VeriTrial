@@ -42,9 +42,50 @@ def _default_model_path() -> Path:
     return here.parent / "src" / "insilico_trial" / "pbpk" / "model.py"
 
 
-def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14_ORGAN_NETWORK) -> list[str]:
-    """Read the PBPK state variable names from the organ network."""
-    return [str(n) for n in organ_network]
+def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] | None = None) -> list[str]:
+    """Read the PBPK state variable names from the live model source.
+
+    Single-source-of-truth: derives ``A_*`` names from the ``dA_*`` derivative
+    assignments actually present in ``model_path``'s ``pbpk_ode`` (via
+    :func:`_ode_rhs_asts`), NOT from a hardcoded network default — the previous
+    ``STANDARD_14_ORGAN_NETWORK`` default ignored ``model_path`` entirely and
+    certified a 14-state network against the live 6-state ODE. An explicit
+    ``organ_network`` still overrides (fail-closed on mismatch with the live
+    model) for callers that genuinely target a different network.
+    """
+    _, order = _ode_rhs_asts(model_path)
+    live = [d[1:] for d in order if d.startswith("dA_")]
+    # Prefer live model-position order from the `return` vector (what the
+    # tests and the structural theorem consume); fall back to sorted order
+    # when the return shape is not a plain list (e.g. concatenate).
+    import ast as _ast
+    try:
+        _tree = _ast.parse(model_path.read_text(encoding="utf-8"))
+        _fn = next(n for n in _ast.walk(_tree)
+                   if isinstance(n, _ast.FunctionDef) and n.name == "pbpk_ode")
+        for _node in _ast.walk(_fn):
+            if not isinstance(_node, _ast.Return) or _node.value is None:
+                continue
+            _val = _node.value
+            if (isinstance(_val, _ast.Call) and _val.args
+                    and isinstance(_val.args[0], (_ast.List, _ast.Tuple))):
+                _val = _val.args[0]
+            if isinstance(_val, (_ast.List, _ast.Tuple)):
+                _names = [e.id[1:] for e in _val.elts
+                          if isinstance(e, _ast.Name) and e.id.startswith("dA_")]
+                if _names:
+                    live = _names
+            break
+    except Exception:
+        pass
+    if organ_network is None:
+        return live
+    want = [str(n) for n in organ_network]
+    if [f"A_{n}" if not n.startswith("A_") else n for n in want] != live:
+        raise ValueError(
+            f"organ_network {want} does not match live model states {live} "
+            f"in {model_path}")
+    return live
 
 
 def extract_perfused_compartments(model_path: Path,
@@ -66,6 +107,15 @@ def extract_perfused_compartments(model_path: Path,
     if pbpk_ode is None:
         raise ValueError(f"pbpk_ode not found in {model_path}")
 
+    # Only RETURNED derivatives are compartments: intermediate dA_* fluxes
+    # (e.g. dA_liver_perf) reference Q but are not states.
+    _, _order = _ode_rhs_asts(model_path)
+    _states = {d[1:] for d in _order}
+    # Perfusion is a property of the FULLY EXPANDED derivative: the liver's
+    # raw RHS (`dA_liver_perf - v_met`) holds Q only indirectly through the
+    # perfusion-flux intermediate. Raw-substring matching would also corrupt
+    # on `dA_liver` ⊂ `dA_liver_perf`, so expand via the AST (not text).
+    _expanded = extract_symbolic_derivatives(model_path, expand=True)
     perfused: list[str] = []
     for node in pbpk_ode.body:
         if not isinstance(node, ast.Assign):
@@ -76,9 +126,20 @@ def extract_perfused_compartments(model_path: Path,
         if not target.startswith("dA_"):
             continue
         state_name = target[1:]
+        if state_name not in _states or state_name in perfused:
+            continue
+        # Gut (source), central (blood pool), elim (sink) are roles, never
+        # perfused tissues — even though central's EXPANDED derivative
+        # mentions Q (it reclaims every tissue backflow).
+        if state_name in ("A_gut", "A_central", "A_elim"):
+            continue
         # Heuristic: perfusion-limited terms reference Q[...].
+        try:
+            _tree = ast.parse(_expanded.get(target, ""))
+        except SyntaxError:
+            continue
         references_q = False
-        for sub in ast.walk(node.value):
+        for sub in ast.walk(_tree):
             if (isinstance(sub, ast.Subscript)
                     and isinstance(sub.value, ast.Name)
                     and sub.value.id == "Q"):
@@ -170,13 +231,21 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
     lemmas: list[str] = []
     if include_ode_lemmas:
         pass  # symbolic ODE targets removed: verification theater.
-    lemmas.extend(extract_metzler_lemmas(model_path))
-    lemmas.extend(extract_boundary_flow_lemmas(model_path))
-    lemmas.extend(extract_saturable_lemmas(model_path))
+    for s in (extract_metzler_lemmas(model_path)
+              + extract_boundary_flow_lemmas(model_path)
+              + extract_saturable_lemmas(model_path)):
+        if s not in lemmas:
+            lemmas.append(s)
     if parametric:
         lemmas.append(build_parametric_sum_lemma(model_path))
         lemmas.extend(extract_mass_dissipation_lemma(model_path))
-        lemmas.extend(extract_system_matrix_lemmas(model_path))
+        for s in extract_system_matrix_lemmas(model_path):
+            # Order-preserving dedupe: the system-matrix path re-emits the
+            # Metzler positivity strings (its "no duplicates" NOTE was falsified
+            # by the `>`→`>=` IsMetzler migration). A duplicated emission lets
+            # a truncated lemma file pass the set-based single-source check.
+            if s not in lemmas:
+                lemmas.append(s)
     return lemmas
 
 
@@ -225,11 +294,24 @@ def check_mass_conservation(model_path: Path) -> bool:
     if gut is None or central is None or elim is None:
         return False
 
-# d[gut] = -ka * A_gut (exact form; extra terms break mass conservation)
+    # d[gut] = -ka * A_gut (exact form; extra terms break mass conservation)
     if gut not in ("-ka*A_gut", "-ka *A_gut", "-kaA_gut", "-ka *A_gut"):
         return False
-    # d[elim] = CL * C_p (exact form; extra terms break mass conservation)
-    if elim not in ("CL*C_p", "CL *C_p", "CL* C_p", "CL * C_p"):
+    # d[elim]: PROVED (not pattern-matched). The old exact-form check
+    # (`elim == CL*C_p`) pinned the no-hepatic-metabolism special case and
+    # rejected the valid G3 form `CL*C_p + v_met`. Instead prove the actual
+    # invariant with sympy: the six RETURNED derivatives sum to zero. Any
+    # dropped/duplicated term (bad-gut, 2x-elim, dropped-periph mutants)
+    # makes the sum nonzero → False. Fail-closed (False) on any parse error.
+    try:
+        import sympy as _sp
+        _derivs = extract_symbolic_derivatives(model_path, expand=True)
+        _, _state_order = _ode_rhs_asts(model_path)
+        _total = sum(_sp.sympify(_lean_param(_derivs[k]))
+                     for k in _state_order if k in _derivs)
+        if _sp.simplify(_total) != 0:
+            return False
+    except Exception:
         return False
     # d[central] must reference the gut influx, every perfused outflow, and CL.
     if "ka" not in central or "A_gut" not in central:
@@ -466,9 +548,38 @@ def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14
         if t.startswith("dA_"):
             rhs[t] = node.value
 
-    spec = organ_indices(organ_network)
-    order = ["d_" + n for n in organ_network]
-    order = [k for k in order if k in rhs] + sorted(k for k in rhs if k not in order)
+    # States are what the return vector returns: intermediate `dA_*` fluxes
+    # (e.g. dA_liver_perf, the perfusion backflow reclaimed by central) are
+    # NOT states. Without this intersection a helper flux becomes a bogus
+    # 7th Jacobian row and breaks every downstream consumer.
+    # States are what the return vector returns: intermediate `dA_*` fluxes
+    # (e.g. dA_liver_perf, the perfusion backflow reclaimed by central) are
+    # NOT states. Without this intersection a helper flux becomes a bogus
+    # 7th Jacobian row and breaks every downstream consumer.
+    # NOTE: `rhs` keeps ALL dA_* assigns (intermediates included) because
+    # `compute_jacobian` inlines them via `_substitute` (a bare intermediate
+    # Name would differentiate to 0 and silently drop terms); only `order`
+    # is restricted to returned states.
+    returned: set[str] = set()
+    for node in ast.walk(pbpk_ode):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        val = node.value
+        if (isinstance(val, ast.Call) and val.args
+                and isinstance(val.args[0], (ast.List, ast.Tuple))):
+            val = val.args[0]
+        if isinstance(val, (ast.List, ast.Tuple)):
+            for e in val.elts:
+                if isinstance(e, ast.Name) and e.id.startswith("dA_"):
+                    returned.add(e.id)
+        break
+    if returned:
+        order = sorted(k for k in rhs if k in returned)
+    else:
+        # No parseable return vector: deterministic sorted order over all
+        # dA_* assigns (legacy fallback; toy models in tests hit this path).
+        order = sorted(rhs)
+
     return rhs, order
 
 
@@ -623,18 +734,19 @@ def build_structural_theorem(model_path: Path) -> str:
         "    generic `mass_dissipation_rate` certificate to the AST-extracted model\n"
         f"    with perfusion entries [{entries}]. -/\n"
         "theorem veritrial_mass_dissipation\n"
-        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : \u211d)\n"
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity : \u211d)\n"
         "  (hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
         "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
         "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
-        "  (hCL : 0 \u2264 CL)\n"
+        "  (hCL : 0 \u2264 CL) (hCLint : 0 \u2264 CLint) (hfu : 0 \u2264 fu_liver)"
+        " (hcyp : 0 \u2264 cyp_activity)\n"
         "  {y : Fin 6 \u2192 \u211d} (hy : NonNegVec y) :\n"
-        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL) y) \u2264 0 := by\n"
+        "  totalMass (mulVec (extracted_matrix ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity) y) \u2264 0 := by\n"
         "  exact mass_dissipation_rate\n"
-        "    (veritrial_compartmental ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).isMetzler\n"
-        "    (veritrial_compartmental ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
-        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).hasNonposColSums\n"
+        "    (veritrial_compartmental ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL hCLint hfu hcyp).isMetzler\n"
+        "    (veritrial_compartmental ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL hCLint hfu hcyp).hasNonposColSums\n"
         "    hy\n"
     )
 
@@ -680,9 +792,11 @@ def extract_metzler_system_matrix_lemmas(model_path: Path) -> list[str]:
     perfused = extract_perfused_compartments(model_path, state_vars)
     lemmas: list[str] = []
 
-    # Off-diagonal entries from perfusion terms (liver, peripheral, effect-site)
-    # NOTE: ``>= 0`` form keeps these strings distinct from the strict
-    # ``> 0`` Metzler positivity lemmas (no duplicate lemma strings).
+    # Off-diagonal entries from perfusion terms (liver, peripheral, effect-site).
+    # NOTE (corrected): the `>= 0` form is REQUIRED to match IsMetzler/nonneg
+    # conventions, which makes these strings identical to
+    # `extract_metzler_lemmas` output by design; `build_lemmas` dedupes, and
+    # the gate compares multisets, so the duplication is contained, not hidden.
     for comp in perfused:
         tissue = comp[2:] if comp.startswith("A_") else comp
         # K[liver, central] = Q_liver / (V_liver * Kp_liver)
@@ -795,7 +909,7 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
     """
     if not check_mass_conservation(model_path):
         raise SystemExit("FAIL-CLOSED: mass conservation violated in " + str(model_path))
-    derivs = extract_symbolic_derivatives(model_path, expand=False)
+    derivs = extract_symbolic_derivatives(model_path, expand=True)
     liver = derivs.get("dA_liver", "")
     if "- C_liver / Kp" not in liver and "-C_liver/Kp" not in liver.replace(" ", ""):
         raise SystemExit("FAIL-CLOSED: liver perfusion sign violated: " + liver)
@@ -812,12 +926,13 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
         arms.append(f"  if i.val = {i} ∧ j.val = {j} then ({e})")
     chain = "\n  else ".join(arms) + "\n  else 0" if arms else "0"
     M = N + 3  # unified extension dimension
-    P = "(ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL : ℝ)"
-    A = "ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL"
+    P = "(ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity : ℝ)"
+    A = "ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity"
     H = ("(hka : 0 < ka) (hQl : 0 < Ql) (hQp : 0 < Qp) (hQe : 0 < Qe)\n"
          "  (hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
          "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)\n"
-         "  (hCL : 0 ≤ CL)")
+         "  (hCL : 0 ≤ CL) (hCLint : 0 ≤ CLint) (hfu : 0 ≤ fu_liver)"
+         " (hcyp : 0 ≤ cyp_activity)")
     Hcol = ("(hVc : 0 < Vc) (hVl : 0 < Vl) (hVp : 0 < Vp) (hVe : 0 < Ve)\n"
             "  (hKpl : 0 < Kpl) (hKpp : 0 < Kpp) (hKpe : 0 < Kpe)")
     body = (
@@ -868,7 +983,7 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
         f"  toFun := extracted_matrix {A}\n"
         "  offDiag_nonneg :=\n"
         f"    extracted_offDiag_nonneg {A}\n"
-        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL hCLint hfu hcyp\n"
         "  colSums_nonpos :=\n"
         f"    extracted_colSum_nonpos {A}\n"
         "      hVc hVl hVp hVe hKpl hKpp hKpe\n\n"
@@ -880,12 +995,12 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
         f"  totalMass (mulVec (extracted_matrix {A}) y) ≤ 0 := by\n"
         "  exact mass_dissipation_rate\n"
         f"    (veritrial_compartmental {A}\n"
-        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).isMetzler\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL hCLint hfu hcyp).isMetzler\n"
         f"    (veritrial_compartmental {A}\n"
-        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL).hasNonposColSums\n"
+        "      hka hQl hQp hQe hVc hVl hVp hVe hKpl hKpp hKpe hCL hCLint hfu hcyp).hasNonposColSums\n"
         "    hy\n\n"
         "/-- Unified extension matrix: the top-left block is the extracted model. -/\n"
-        "noncomputable def extracted_dili_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "noncomputable def extracted_dili_matrix (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity\n"
         "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) :\n"
         f"    Fin {M} → Fin {M} → ℝ := fun i j =>\n"
         f"  if h : i.val < {N} ∧ j.val < {N} then\n"
@@ -893,7 +1008,7 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
         "  else 0\n\n"
         "/-- The top-left block of the unified matrix is the extracted model. -/\n"
         "theorem veritrial_dili_block\n"
-        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL\n"
+        "  (ka Ql Qp Qe Vc Vl Vp Ve Kpl Kpp Kpe CL CLint fu_liver cyp_activity\n"
         "    k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ)\n"
         f"  (i j : Fin {N}) :\n"
         f"  extracted_dili_matrix {A}\n"

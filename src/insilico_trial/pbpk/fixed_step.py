@@ -36,8 +36,9 @@ def calculate_max_stable_dt(params: dict[str, Any],
     """Dynamic Metzler positivity bound derived from matrix invariants.
 
     Δt_max = min(Vc/(sum_perfused_Q + CL), 1/ka, min_i Vi*Kp_i/Qi) over all
-    perfused tissues. Indices resolve from *organ_network* (default: the
-    legacy 6-state layout, identical to previous behavior).
+    perfused tissues, plus Vliver/(CLint*fu*cyp) when the CYP pathway is
+    active. Indices resolve from *organ_network* (default: the legacy 6-state
+    layout, identical to previous behavior).
     """
     import numpy as _np
 
@@ -67,6 +68,19 @@ def calculate_max_stable_dt(params: dict[str, Any],
         qi, vi, ki = _get(Q, k), _get(V, k), _get(Kp, k)
         if qi > 0 and vi > 0 and ki > 0:
             cands.append(vi * ki / qi)
+    # CYP hepatic extraction adds a liver-diagonal rate CLint*fu*cyp/Vl.
+    # Liver is index 1 in the legacy 6-state layout (and the only layout
+    # whose pbpk_ode defines the CYP pathway); other networks skip this.
+    try:
+        _clint = float(params.get("CLint", 0.0))
+        _fu = float(params.get("fu_liver", 1.0))
+        _cyp = float(params.get("cyp_activity", 1.0))
+    except Exception:
+        _clint, _fu, _cyp = 0.0, 1.0, 1.0
+    if _clint * _fu * _cyp > 0 and organ_network is None and n > 2:
+        _vl = _get(V, 1)
+        if _vl > 0:
+            cands.append(_vl / (_clint * _fu * _cyp))
     return float(min(c for c in cands if c > 0))
 
 

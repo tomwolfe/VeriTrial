@@ -23,6 +23,11 @@ tool does **not** yet support.
 ## Known limitations & gaps
 
 ### G1. Hardware: Metal is unsupported
+- **Status (re-verified 2026-09-23)**: Still CPU-only. jax 0.10.2; jax-metal
+  not installed in this environment (previously 0.1.1, broken against
+  StableHLO v1.13.7). No evidence the upstream StableHLO/jax-metal
+  incompatibility has changed — Metal re-attempt deferred, CPU mitigation
+  (forced in `__init__.py`) stays in place.
 - **Status (re-verified 2026-08-15)**: Metal is **completely broken** for all
   JAX computation on this machine (jax 0.10.2 + jax-metal 0.1.1). Even
   `jax.numpy.arange(10)` crashes with `unknown attribute code: 22` from
@@ -51,7 +56,20 @@ tool does **not** yet support.
   (e.g., high-dose saturation, non-linear clearance) are introduced.
 
 ### G3. PBPK structural simplification
-- **Status**: Three-compartment perfusion-limited model (gut→central→peripheral).
+- **Status (CLOSED 2026-09-23, first-order scope)**: `pbpk_ode` has a
+  mechanistic CYP liver path — first-order intrinsic clearance on unbound
+  liver conc (`cyp_activity * CLint * fu_liver * C_liver`), mass-routed to
+  `A_elim`, genotype/DDI-scalable, OFF by default (benchmarks byte-identical).
+  Certified end-to-end: formal gate 14/14, numeric oracle with CYP active,
+  `test_cyp_metabolism.py`, warfarin unchanged. Detail in
+  `tether/GLOBAL_MINIMUM_REPORT.md` (G3 entry).
+- **Follow-up G3b (saturable kinetics, NOT closed)**: Michaelis-Menten
+  `Vmax*C/(Km+C)` was prototyped and reverted — state-dependent Jacobian
+  entries need Lean state binders + mechanism-specific proof preludes the
+  universal-script exporter cannot provide honestly. Revisit with an
+  extended export grammar; the linear path covers DDI/induction decisions
+  at therapeutic (non-saturating) exposures.
+- **Prior status**: Three-compartment perfusion-limited model (gut→central→peripheral).
   No explicit liver/kidney sub-compartments with enzyme kinetics.
 - **Mitigation**: Parameters (`Q_peripheral`, `V_peripheral/V_central`) are
   calibrated so warfarin and moxifloxacin PK match literature simultaneously.
@@ -59,7 +77,14 @@ tool does **not** yet support.
   metabolism when supporting complex DDI or induction/inhibition studies.
 
 ### G4. DILI model is exposure-driven, not mechanistic
-- **Status**: DILI is driven by liver AUC × a drug-level `dili_risk` scalar
+- **Status (CLOSED 2026-09-23, compound-prior scope)**: live ALT/GSH
+  trajectories are compound-aware — `qsp_params_for_drug` maps Seahorse-class
+  priors (`km_metabolic`→mito IC50, `gsh_depletion_rate`, new `bsep_ic50` for
+  the bile-acid axis) into the 9-state ODE (both SAD/MAD paths) and the safety
+  assessor via one shared rule; `test_dili_mechanistic.py` proves same-PK
+  mito discrimination. Bilirubin scaling (`dili_emax_bili` on GSH) remains an
+  explicit effect-size convention. Detail in `tether/GLOBAL_MINIMUM_REPORT.md`.
+- **Prior status**: DILI is driven by liver AUC × a drug-level `dili_risk` scalar
   with an Emax on ALT/bilirubin. No mitochondrial stress biophysics.
 - **Mitigation**: Hy's Law logic (ALT/AST > 3×ULN **and** bilirubin > 2×ULN)
   flags severe hepatotoxicity events.
@@ -76,9 +101,15 @@ tool does **not** yet support.
   wide as normal-approx intervals.
 
 ### G6. Population: US generalizable, not disease-specific
-- **Status**: Cohorts are drawn from NHANES-style age/weight/BMI/eGFR priors
-  with CYP allele frequencies. No disease-stratified cohorts (hepatic
-  impairment, pediatrics, pregnancy).
+- **Status (CLOSED 2026-09-23, hepatic axis)**: Child-Pugh B cohort flows
+  config → Patient → CL + CYP CLint on a renal-independent axis; benchmark
+  40.0% reduction via the honest knob; `test_hepatic_cohort.py` incl.
+  full-trial exposure separation. Detail in `tether/GLOBAL_MINIMUM_REPORT.md`.
+- **Prior status**: Cohorts were drawn from NHANES-style age/weight/BMI/eGFR priors
+  with CYP allele frequencies and no disease stratification.
+- **Follow-up G6b (CLOSED 2026-09-23)**: per-patient renal rule
+  (`renal_egfr_scale`, `fraction_excreted_renal`) drives engine trials and the
+  metformin benchmark mechanistically (was: allometric confound only).
 - **Gap closure**: Add disease cohort configs (e.g., moderate hepatic
   impairment Child-Pugh B) with corresponding `egfr_scale`/CL scaling rules.
 
