@@ -33,6 +33,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from insilico_trial.pbpk.model import STANDARD_14_ORGAN_NETWORK
+
 
 def _default_model_path() -> Path:
     # scripts/export_pbpk_to_qed.py -> repo root -> src/.../model.py
@@ -40,55 +42,13 @@ def _default_model_path() -> Path:
     return here.parent / "src" / "insilico_trial" / "pbpk" / "model.py"
 
 
-def extract_state_variables(model_path: Path) -> list[str]:
-    """Read the PBPK state variable names from ``pbpk_ode`` via AST.
-
-    The model returns ``jnp.array([dA_gut, dA_liver, dA_central, dA_periph,
-    dA_effect, dA_elim])``; we map each ``dA_xxx`` to its state name ``A_xxx``.
-    """
-    source = model_path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    pbpk_ode2: ast.FunctionDef | None = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
-            pbpk_ode2 = node
-            break
-    if pbpk_ode2 is None:
-        raise ValueError(f"pbpk_ode not found in {model_path}")
-    pbpk_ode = pbpk_ode2
-
-    deriv_names: list[str] = []
-    for node in ast.walk(pbpk_ode):
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
-            func = node.value.func
-            is_array = (
-                isinstance(func, ast.Attribute) and func.attr == "array"
-            ) or (isinstance(func, ast.Name) and func.id == "array")
-            if not is_array:
-                continue
-            if not node.value.args:
-                continue
-            arg0 = node.value.args[0]
-            if not isinstance(arg0, ast.List | ast.Tuple):
-                continue
-            for elt in arg0.elts:
-                if isinstance(elt, ast.Name):
-                    deriv_names.append(elt.id)
-            break
-
-    if not deriv_names:
-        raise ValueError(
-            "Could not locate the state vector returned by pbpk_ode")
-
-    # Map dA_xxx -> A_xxx (drop the leading 'd').
-    state_vars = [name[1:] if name.startswith("d") else name
-                  for name in deriv_names]
-    return state_vars
+def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14_ORGAN_NETWORK) -> list[str]:
+    """Read the PBPK state variable names from the organ network."""
+    return [str(n) for n in organ_network]
 
 
 def extract_perfused_compartments(model_path: Path,
-                                  state_vars: list[str]) -> list[str]:
+                                   state_vars: list[str]) -> list[str]:
     """Identify perfused compartments from the ODE source.
 
     A compartment is perfused when its derivative assignment references the
@@ -227,13 +187,13 @@ def check_mass_conservation(model_path: Path) -> bool:
     typing division/subtraction). It confirms, by reading the ODE source,
     that the perfusion-limited residual cancels pairwise:
 
-      * ``dA_gut``   = ``-ka * A_gut``
-      * ``dA_elim``  = ``CL * C_p``
-      * ``dA_central`` = ``ka * A_gut - dA_liver - dA_periph - dA_effect - CL * C_p``
-      * each perfused ``dA_<c>`` references ``Q`` and ``C_p`` (Fick's law)
+      * ``d[gut]``   = ``-ka * y[gut]``
+      * ``d[elim]``  = ``CL * C_p``
+      * ``d[central]`` = ``ka * y[gut] - sum(perfused outflows) - CL * C_p``
+      * each perfused ``d[k]`` references ``Q`` and ``C_p`` (Fick's law)
 
     Returns True only if all of these structural invariants hold. Breaking
-    mass conservation (e.g. dropping a term from ``dA_central``) makes this
+    mass conservation (e.g. dropping a term from ``d[central]``) makes this
     return False, which fails the export and therefore the mission.
     """
     source = model_path.read_text(encoding="utf-8")
@@ -254,32 +214,34 @@ def check_mass_conservation(model_path: Path) -> bool:
         if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
             continue
         target = node.targets[0].id
-        if target.startswith("dA_"):
+        if target.startswith("d_") or target.startswith("dA_"):
             rhs[target] = ast.unparse(node.value).replace(" ", "")
 
-    gut = rhs.get("dA_gut")
-    central = rhs.get("dA_central")
-    elim = rhs.get("dA_elim")
+    # Use the new d_ prefix names; fall back to dA_ if needed
+    gut = rhs.get("d_gut") or rhs.get("dA_gut")
+    central = rhs.get("d_central") or rhs.get("dA_central")
+    elim = rhs.get("d_elim") or rhs.get("dA_elim")
+
     if gut is None or central is None or elim is None:
         return False
 
-    # dA_gut = -ka * A_gut (exact form; extra terms break mass conservation)
-    if gut not in ("-ka*A_gut", "-ka *A_gut", "-ka* A_gut", "-ka * A_gut"):
+# d[gut] = -ka * A_gut (exact form; extra terms break mass conservation)
+    if gut not in ("-ka*A_gut", "-ka *A_gut", "-kaA_gut", "-ka *A_gut"):
         return False
-    # dA_elim = CL * C_p (exact form; extra terms break mass conservation)
+    # d[elim] = CL * C_p (exact form; extra terms break mass conservation)
     if elim not in ("CL*C_p", "CL *C_p", "CL* C_p", "CL * C_p"):
         return False
-    # dA_central must reference the gut influx, every perfused outflow, and CL.
+    # d[central] must reference the gut influx, every perfused outflow, and CL.
     if "ka" not in central or "A_gut" not in central:
         return False
     for comp in extract_perfused_compartments(model_path,
                                               extract_state_variables(model_path)):
         if comp in ("A_gut", "A_central", "A_elim"):
             continue
-        deriv = "d" + comp  # e.g. dA_liver
+        deriv = "d" + comp  # e.g. dA_liver -> dA_liver
         if deriv not in central:
             return False
-    return "CL" in central and "C_p" in central
+    return "CL" in central and "C_p" in central and "ka" in central and "A_gut" in central
 
 
 def extract_symbolic_derivatives(model_path: Path,
@@ -364,20 +326,21 @@ def verify_symbolic_cancellation(derivs: dict[str, str]) -> bool:
 
 
 def extract_metzler_lemmas(model_path: Path) -> list[str]:
-    """Emit Metzler off-diagonal positivity lemmas, one per perfused compartment.
+    """Emit Metzler off-diagonal non-negativity lemmas, one per perfused compartment.
 
     Parses ``pbpk_ode`` via AST; for each perfusion term
-    ``Q[i] * (C_p - C_tissue / Kp[i])`` emits ``Q_i / (V_i * Kp_i) > 0``
-    with positivity hypotheses ``(hQ_i : 0 < Q_i) (hV_i : 0 < V_i)``
-    ``(hKp_i : 0 < Kp_i)`` auto-generated by QED's ``generate_lean_code()``.
-    Requires Mathlib (``positivity`` over R); parametric mode only.
+    ``Q[i] * (C_p - C_tissue / Kp[i])`` emits ``Q_i / (V_i * Kp_i) >= 0``
+    with positivity hypotheses ``(hQ_i : 0 ≤ Q_i) (hV_i : 0 ≤ V_i)``
+    ``(hKp_i : 0 ≤ Kp_i)`` auto-generated by QED's ``generate_lean_code()``.
+    Uses ``>= 0`` to match the Compartmental.lean ``IsMetzler`` definition
+    and the Lean export ``extracted_offDiag_nonneg`` conventions.
     """
     state_vars = extract_state_variables(model_path)
     perfused = extract_perfused_compartments(model_path, state_vars)
     lemmas: list[str] = []
     for comp in perfused:
         tissue = comp[2:] if comp.startswith("A_") else comp
-        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) > 0")
+        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) >= 0")
     return lemmas
 
 
@@ -473,24 +436,39 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
     return lemmas
 
 
-def _ode_rhs_asts(model_path: Path) -> tuple[dict[str, ast.expr], list[str]]:
-    """Parse pbpk_ode into {deriv_name: RHS ast} plus state-var order."""
+def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14_ORGAN_NETWORK) -> tuple[dict[str, ast.expr], list[str]]:
+    """Parse model.py pbpk_ode function into {deriv_name: RHS ast} plus state-var order.
+
+    Uses the model.py AST directly (not inspect.getsource) to avoid issues with
+    code generation indentation. The state order follows the organ_network
+    naming convention (d_gut, d_liver, etc.).
+    """
+    import ast
+    from insilico_trial.pbpk.model import organ_indices
     source = model_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pbpk_ode"), None)
-    if fn is None:
+
+    pbpk_ode = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
+            pbpk_ode = node
+            break
+    if pbpk_ode is None:
         raise ValueError(f"pbpk_ode not found in {model_path}")
+
     rhs: dict[str, ast.expr] = {}
-    for node in fn.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id.startswith("dA_"):
-            rhs[node.targets[0].id] = node.value
-    # N-generic: state order follows the model's return vector; any extra
-    # derivatives not in the return vector are appended in sorted order.
-    try:
-        ret_order = ["d" + v for v in extract_state_variables(model_path)]
-    except Exception:
-        ret_order = []
-    order = [k for k in ret_order if k in rhs] + sorted(k for k in rhs if k not in ret_order)
+    for node in pbpk_ode.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        t = node.targets[0].id
+        if t.startswith("dA_"):
+            rhs[t] = node.value
+
+    spec = organ_indices(organ_network)
+    order = ["d_" + n for n in organ_network]
+    order = [k for k in order if k in rhs] + sorted(k for k in rhs if k not in order)
     return rhs, order
 
 

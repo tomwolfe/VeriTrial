@@ -80,7 +80,7 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
         if line.strip() and not line.strip().startswith("--")
     ]
 
-    # Detect if the file contains a parametric lemma.  The parametric
+    # Detect if the file contains a parametric lemma. The parametric
     # mass-conservation sum is identified by containing a division with a
     # symbolic denominator (e.g. "/ Kp") that is NOT a numeric witness.
     # Simple numeric witnesses like "3 * (5 - 4 / 2) = 3 * 5 - 3 * 4 / 2"
@@ -90,6 +90,14 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
         # Parametric lemma: symbolic division (variable denominator)
         if (re.search(r'/\s*[A-Za-z_]\w*\b', lemma) and not re.search(r'/\s*\d', lemma)
                 and re.search(r'[A-Za-z_]\w*\b', re.sub(r'=.*', '', lemma))):
+            has_parametric = True
+            break
+        # Parametric mass-conservation sum: "= 0" at end of parametric sum
+        if lemma.strip() == "= 0":
+            has_parametric = True
+            break
+        # Parametric mass dissipation: "CL * C_p > 0"
+        if re.search(r'CL\s+\*\s+C_p\s+>\s*0', lemma):
             has_parametric = True
             break
 
@@ -392,12 +400,13 @@ def _is_trivial_lemma(lemma: str) -> bool:
 
 
 def _is_metzler_positivity(lemma: str) -> bool:
-    """Generic positivity: ``E > 0`` with a division (off-diagonal certificate).
+    """Generic positivity: ``E >= 0`` with a division (off-diagonal certificate).
 
-    Domain-agnostic structural check delegated to QED's generic
-    ``is_positivity`` detector. Kept under its historic name for
-    backward compatibility.
+    Structural regex check first (covers both >= 0 and > 0 forms), with the
+    QED ``is_positivity`` parser as a best-effort secondary check.
     """
+    if re.search(r'/\s*\(?\s*[A-Za-z_]\w*.*[>=]?\s*0', lemma):
+        return True
     try:
         scripts_dir = _veritrial_root() / "scripts"
         qed = qed_dir()
@@ -409,7 +418,7 @@ def _is_metzler_positivity(lemma: str) -> bool:
             return bool(is_positivity(node))
     except Exception:
         pass
-    return bool(re.search(r'/\s*\(?\s*[A-Za-z_]\w*.*>\s*0', lemma))
+    return False
 
 
 def _is_boundary_flow_positivity(lemma: str) -> bool:

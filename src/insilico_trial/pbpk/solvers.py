@@ -133,7 +133,8 @@ def solve_implicit(
     # (loss) is physical only via CL elimination into the accumulator, which
     # keeps the monitored sum constant, so any gain is non-physical.
     n_monitor = min(y0.shape[0], 6)
-    dose_scale = jnp.maximum(1.0, jnp.abs(jnp.sum(y0[:n_monitor])))
+    _s0 = jnp.abs(jnp.sum(y0[:n_monitor]))
+    dose_scale = jnp.where(_s0 < 1.0, 1.0, _s0)
     final_gain = jnp.sum(ys_internal[-1, :n_monitor]) - jnp.sum(y0[:n_monitor])
     poison = (final_gain > 1e-6 * dose_scale) | ~jnp.isfinite(final_gain)
     ys_internal = jnp.where(poison, jnp.nan * ys_internal, ys_internal)
