@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
@@ -42,6 +43,7 @@ def calibrate_pbpk_nuts(
     typical_cl_f: float | None = None,
     typical_v_f: float | None = None,
     n_samples: int = 100,
+    n_warmup: int = 50,
 ) -> dict[str, Any]:
     """Bayesian calibration directly over the PBPK ODE solver (NumPyro NUTS).
 
@@ -51,11 +53,13 @@ def calibrate_pbpk_nuts(
     ``Normal(C_plasma, sigma)`` likelihood with ``sigma ~ HalfNormal(0.1)``.
     Uses bounded MCMC evaluation: num_warmup=50, num_samples=100 (or n_samples).
     """
-    from insilico_trial.pbpk.fixed_step import (
-        calculate_max_stable_dt,
-        solve_pbpk_fixed_step,
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        _CENTRAL_IDX,
+        build_pbpk_params,
+        predict_pbpk_plasma_linear,
     )
-    from insilico_trial.pbpk.model import _CENTRAL_IDX, build_pbpk_params
 
     t_arr = jnp.asarray(times, dtype=jnp.float64)
     y_arr = jnp.asarray(observations, dtype=jnp.float64)
@@ -83,22 +87,38 @@ def calibrate_pbpk_nuts(
     _V0 = jnp.asarray(_onp.asarray(base["V"], dtype=_onp.float64))
     _Kp0 = jnp.asarray(_onp.asarray(base["Kp"], dtype=_onp.float64))
     _ka0 = float(base["ka"])
-    try:
-        _dt = min(0.01, 0.9 * float(calculate_max_stable_dt(base)))
-    except Exception:
-        _dt = 0.01
+    typical_v_f = float(_onp.asarray(base["V"])[_CENTRAL_IDX])
+    calculate_max_stable_dt(base)
     _a0 = float(dose) * bioav
 
     def model(times: Any, obs: Any) -> None:
         cl = numpyro.sample("cl", dist.LogNormal(jnp.log(jnp.asarray(typical_cl_f)), 0.3))
         v = numpyro.sample("v", dist.LogNormal(jnp.log(jnp.asarray(typical_v_f)), 0.3))
-        sigma = numpyro.sample("sigma", dist.HalfNormal(0.1))
-        params = {"Q": _Q0, "V": _V0.at[_CENTRAL_IDX].set(v), "Kp": _Kp0, "CL": cl, "ka": _ka0}
-        mu = solve_pbpk_fixed_step(times, _a0, params, dt=_dt)
-        numpyro.sample("obs", dist.Normal(mu, sigma), obs=obs)
+        sigma = numpyro.sample("sigma", dist.HalfNormal(0.5))
+        params = {
+            "organ_network": tuple(base.get("organ_network", DEFAULT_ORGAN_NETWORK)),
+            "Q": _Q0,
+            "V": _V0.at[_CENTRAL_IDX].set(v),
+            "Kp": _Kp0,
+            "CL": cl,
+            "ka": _ka0,
+        }
+        mu = predict_pbpk_plasma_linear(times, _a0, params)
+        numpyro.sample(
+            "obs", dist.Normal(mu, jnp.maximum(sigma, 0.05)), obs=obs
+        )
 
-    kernel = numpyro.infer.NUTS(model)
-    mcmc = numpyro.infer.MCMC(kernel, num_warmup=50, num_samples=n_samples)
+    init_strategy = numpyro.infer.init_to_median(num_samples=10)
+    kernel = numpyro.infer.NUTS(
+        model, init_strategy=init_strategy, max_tree_depth=6
+    )
+    mcmc = numpyro.infer.MCMC(
+        kernel,
+        num_warmup=n_warmup,
+        num_samples=n_samples,
+        chain_method="sequential",
+        progress_bar=False,
+    )
     mcmc.run(random.PRNGKey(0), t_arr, y_arr)
     return dict(mcmc.get_samples())
 
@@ -127,7 +147,7 @@ def posterior_predictive_pk(
     """
     import numpy as onp
 
-    from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_single
+    from insilico_trial.pbpk.model import build_pbpk_params, predict_pbpk_plasma_linear
 
     cl_samples = onp.asarray(posterior_samples["cl"])
     v_samples = onp.asarray(posterior_samples["v"])
@@ -158,7 +178,12 @@ def posterior_predictive_pk(
             params["CL"] = float(cl_samples[s])
             params["V"] = params["V"] * (float(v_samples[s]) / drug.typical_v_f)
 
-            C_p = onp.asarray(solve_pbpk_single(t_eval, dose_mg * drug.bioavailability, params), dtype=onp.float64)
+            C_p = onp.asarray(
+                predict_pbpk_plasma_linear(
+                    t_eval, dose_mg * drug.bioavailability, params
+                ),
+                dtype=onp.float64,
+            )
 
             # Compute metrics
             cmax = float(onp.max(C_p))

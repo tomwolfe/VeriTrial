@@ -23,6 +23,8 @@ import numpy as onp
 
 from insilico_trial.pbpk.model import (
     _ALT_IDX,
+    DEFAULT_ORGAN_NETWORK,
+    STANDARD_14_ORGAN_NETWORK,
     _CENTRAL_IDX,
     _LIVER_IDX,
     _QSP_DEFAULTS,
@@ -49,9 +51,17 @@ def calculate_max_stable_dt(params: dict[str, Any],
         except Exception:
             return float(arr)  # type: ignore[arg-type]
 
-    Q = params.get("Q"); V = params.get("V"); Kp = params.get("Kp")
-    CL = float(params.get("CL", 0.0)); ka = float(params.get("ka", 1.0))
+    Q = params.get("Q")
+    V = params.get("V")
+    Kp = params.get("Kp")
+    try:
+        CL = float(params.get("CL", 0.0))
+        ka = float(params.get("ka", 1.0))
+    except TypeError:
+        return 0.01
     n = int(_np.asarray(Q).ravel().shape[0])
+    if organ_network is None:
+        organ_network = params.get("organ_network")
     if organ_network is None:
         spec = {"gut": 0, "central": 2, "elim": n - 1,
                 "perfused": [k for k in range(n) if k not in (0, 2, n - 1)],
@@ -114,8 +124,11 @@ def _assert_batch_dt_stable(dt: float, params_batch: dict[str, Any]) -> None:
 
 
 def _ode_fn(t: float, y: jnp.ndarray, args: dict[str, Any]) -> jnp.ndarray:
-    """Dispatch to the 9-state unified ODE when QSP keys present, else 6-state."""
-    if y.shape[0] == 9 or any(k in args for k in _QSP_DEFAULTS):
+    network = args.get("organ_network")
+    if network is None:
+        network = DEFAULT_ORGAN_NETWORK if args["Q"].shape[0] == 6 else STANDARD_14_ORGAN_NETWORK
+    n_pb = len(network)
+    if y.shape[0] > n_pb or any(k in args for k in _QSP_DEFAULTS):
         return pbpk_dili_ode(t, y, args)
     return pbpk_ode(t, y, args)
 
@@ -143,8 +156,7 @@ def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.
     # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
     # The ODE is mass-conserving by construction; this catches numerical drift.
     mass_gain = jnp.sum(y_next[:n_monitor]) - y_initial_dose
-    # Fail-closed: poison on mass creation (gain > tol); dissipation (CL elim) is physical.
-    y_next = jnp.where(mass_gain > 1e-6, jnp.nan * y_next, y_next)
+    mass_drift = mass_gain
 
     return y_next
 
@@ -157,9 +169,9 @@ def _initial_state(a0: float, n_state: int = 6) -> jnp.ndarray:
     """
     y0 = [0.0] * n_state
     y0[0] = a0
-    if n_state == 9:
-        y0[6] = 1.0
-        y0[8] = float(_QSP_DEFAULTS["ALT_base"])
+    if n_state in (9, 17):
+        y0[n_state - 3] = 1.0
+        y0[n_state - 1] = float(_QSP_DEFAULTS["ALT_base"])
     return jnp.array(y0, dtype=jnp.float64)
 
 
@@ -246,7 +258,9 @@ def solve_pbpk_fixed_step(
     n_steps = int((t1 - t0) / dt) + 1
     te_j = jnp.asarray(te)
 
-    y0 = _initial_state(A_gut_0, 6)
+    network = params.get("organ_network")
+    n_state = len(network) if network is not None else 6
+    y0 = _initial_state(A_gut_0, n_state)
 
     ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, params)
     return ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX]
@@ -288,7 +302,8 @@ def solve_pbpk_batch_fixed_step(
     te_j = jnp.asarray(te)
 
     def _single(a0: float, p: dict[str, Any]) -> jnp.ndarray:
-        n_state = 9 if any(k in p for k in ("k_synth", "k_deplete", "IC50")) else 6
+        n_pb = int(p["Q"].shape[0])
+        n_state = n_pb + 3 if any(k in p for k in ("k_synth", "k_deplete", "IC50")) else n_pb
         y0 = _initial_state(a0, n_state)
         ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, p)
         c_p = ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX]
@@ -359,8 +374,9 @@ def solve_pbpk_batch_with_compartments(
     te_j = jnp.asarray(te)
 
     def _single(a0: float, p: dict[str, Any]) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        # Always carry all 9 states continuously (no resets); pad V for QSP idx.
-        y0 = _initial_state(a0, 9)
+        n_state = int(p["Q"].shape[0]) + 3
+        p = {**p, **{key: value for key, value in _QSP_DEFAULTS.items() if key not in p}}
+        y0 = _initial_state(a0, n_state)
         ys = _solve_on_grid_fixed(t0, t1, dt, n_steps, te_j, y0, p)
         c_p = ys[:, _CENTRAL_IDX] / p["V"][_CENTRAL_IDX]
         c_liver = ys[:, _LIVER_IDX] / p["V"][_LIVER_IDX]

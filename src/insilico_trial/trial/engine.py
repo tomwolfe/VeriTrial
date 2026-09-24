@@ -22,7 +22,14 @@ from insilico_trial.pbpk.fixed_step import (
     solve_pbpk_batch_multi_dose_fixed_step,
     solve_pbpk_batch_with_compartments,
 )
-from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch, solve_pbpk_single, _QSP_DEFAULTS
+from insilico_trial.pbpk.model import (
+    DEFAULT_ORGAN_NETWORK,
+    STANDARD_14_ORGAN_NETWORK,
+    _QSP_DEFAULTS,
+    build_pbpk_params,
+    solve_pbpk_single,
+)
+from insilico_trial.pd import cardiac_apd_effect
 from insilico_trial.safety import determine_dlt, run_safety_assessment
 from insilico_trial.schemas import (
     DosingEvent,
@@ -35,7 +42,7 @@ from insilico_trial.schemas import (
     Protocol,
     TrialResult,
 )
-from insilico_trial.stats import posterior_predictive_pk
+from insilico_trial.stats import calibrate_pbpk_nuts, posterior_predictive_pk
 
 # ---------------------------------------------------------------------------
 # Non-compartmental analysis (NCA)
@@ -325,9 +332,68 @@ class TrialEngine:
 
             dlt_rate = cohort_dlt_count / len(cohort_patients) if cohort_patients else 0.0
 
-            # Determine next dose via escalation rules.
+            cohort_patient_ids = {patient.id for patient in cohort_patients}
+            calibration_obs = [
+                obs for obs in all_observations
+                if (
+                    obs.patient_id in cohort_patient_ids
+                    and obs.concentration is not None
+                    and onp.isfinite(obs.concentration)
+                )
+            ]
+            predictive_toxicity: float | None = None
+            if calibration_obs:
+                times = jnp.asarray([obs.time for obs in calibration_obs], dtype=jnp.float64)
+                values = jnp.asarray([obs.concentration for obs in calibration_obs], dtype=jnp.float64)
+                try:
+                    self.posterior_samples = calibrate_pbpk_nuts(
+                        times, values, dose_mg, drug=self.drug,
+                        n_samples=12, n_warmup=12,
+                    )
+                    prospective_index = min(next_dose_level_index + 1, len(dose_levels) - 1)
+                    prospective_dose = dose_levels[prospective_index]
+                    prediction = posterior_predictive_pk(
+                        self.posterior_samples,
+                        n_patients=max(self.protocol.cohort_size, 1),
+                        dose_mg=prospective_dose,
+                        t_eval=onp.linspace(
+                            0.0, self.protocol.observation_period_days * 24.0, 49
+                        ),
+                        drug=self.drug,
+                    )
+                    cmax_samples = onp.asarray(prediction["cmax"]).reshape(-1)
+                    predicted_qtc = onp.asarray([
+                        cardiac_apd_effect(
+                            value,
+                            ic50_kr=self.drug.ic50_ikr,
+                            ic50_na=self.drug.ic50_ina,
+                            ic50_cal=self.drug.ic50_ical,
+                            baseline_apd90=self.drug.qtcd_baseline - 80.0,
+                            emax=self.drug.qtcd_emax,
+                        )
+                        for value in cmax_samples
+                    ])
+                    qtc_dlt = (
+                        predicted_qtc >= self.protocol.safety.qt_threshold
+                    ) | (
+                        predicted_qtc - self.drug.qtcd_baseline
+                        >= self.protocol.safety.qt_delta
+                    )
+                    cmax_dlt = (
+                        cmax_samples
+                        > self.protocol.dose_escalation.posterior_cmax_safety_bound
+                    )
+                    predictive_toxicity = float(
+                        onp.mean(qtc_dlt | cmax_dlt | (self.drug.dili_risk > 0.5))
+                    )
+                    if not onp.isfinite(predictive_toxicity):
+                        predictive_toxicity = None
+                except (FloatingPointError, ValueError, RuntimeError):
+                    self.posterior_samples = None
+                    predictive_toxicity = None
+
             decision, next_dose_level_index, stop = self._escalation_decision(
-                cohort_dlt_count, next_dose_level_index
+                cohort_dlt_count, next_dose_level_index, predictive_toxicity
             )
             cohort_escalations.append(decision)
 
@@ -338,6 +404,7 @@ class TrialEngine:
                 "n_dlt": cohort_dlt_count,
                 "dlt_rate": dlt_rate,
                 "escalation_decision": decision,
+                "posterior_predictive_toxicity": predictive_toxicity,
                 "steady_state_reached": self._check_steady_state(cohort_patients, t_eval_hours, C_batch, administered_doses),
             })
 
@@ -373,14 +440,19 @@ class TrialEngine:
     # Escalation / de-escalation / stop rules
     # ------------------------------------------------------------------
 
-    def _escalation_decision(self, dlt_count: int, current_level_index: int) -> tuple[str, int, bool]:
-        """Return (decision, next_level_index, stop).
-
-        Rules (modified accrual):
-        - DLTs >= max_dlt_per_cohort -> "stop" (no further cohorts)
-        - 0 DLTs -> escalate to the next pre-specified dose level
-        - 0 < DLTs < max -> "stay" at the current dose level
-        """
+    def _escalation_decision(
+        self,
+        dlt_count: int,
+        current_level_index: int,
+        predictive_toxicity: float | None = None,
+    ) -> tuple[str, int, bool]:
+        """Return (decision, next_level_index, stop)."""
+        max_probability = self.protocol.dose_escalation.posterior_toxicity_probability
+        if predictive_toxicity is not None:
+            if predictive_toxicity >= 0.95:
+                return "stop", current_level_index, True
+            if predictive_toxicity > max_probability:
+                return "stay", current_level_index, False
         if getattr(self.protocol.dose_escalation, "rule", "") == "boin":
             n = max(self.protocol.cohort_size, 1)
             return self.boin_decision(dlt_count, n, current_level_index)
@@ -436,6 +508,7 @@ class TrialEngine:
             age=patient.biometrics.age,
             drug=self.drug,
             genotype_scale=genotype_scale,
+            organ_network=self._organ_network(),
         )
 
         # Simulation grid (hourly) over the observation period for smooth NCA.
@@ -466,6 +539,7 @@ class TrialEngine:
                 age=p.biometrics.age,
                 drug=self.drug,
                 genotype_scale=self._genotype_scale(p),
+                organ_network=self._organ_network(),
             )
             for p in cohort_patients
         ]
@@ -503,13 +577,14 @@ class TrialEngine:
             from insilico_trial.pbpk.model import pbpk_ode as _pbpk_ode
             from insilico_trial.pbpk.model import _LIVER_IDX as _LI
 
-            y0_batch = jnp.zeros((len(cohort_patients), 6), dtype=jnp.float64)
+            n_states = len(self._organ_network())
+            y0_batch = jnp.zeros((len(cohort_patients), n_states), dtype=jnp.float64)
             y0_batch = y0_batch.at[:, 0].set(jnp.asarray(A_gut_0s, dtype=jnp.float64))
             t_eval_j = jnp.asarray(t_eval_hours, dtype=jnp.float64)
             params_jax = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in params_batch.items()}
             ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=_stable_dt_for_batch(params_batch))
             C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2:3], dtype=onp.float64)
-            C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI+1], dtype=onp.float64)
+            C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI + 1], dtype=onp.float64)
             # Mechanistic DILI coupling for SDIRK2: reuse the unified 9-state
             # solver for ALT (idx 8) / GSH (idx 6) trajectories so CTCAE and
             # Hy's Law evaluate live solver state, never Emax fallbacks.
@@ -580,6 +655,7 @@ class TrialEngine:
                 age=p.biometrics.age,
                 drug=self.drug,
                 genotype_scale=self._genotype_scale(p),
+                organ_network=self._organ_network(),
             )
             for p in cohort_patients
         ]
@@ -764,6 +840,11 @@ class TrialEngine:
             ))
         return obs
 
+    def _organ_network(self) -> tuple[str, ...]:
+        if self.protocol.organ_network == "STANDARD_14":
+            return STANDARD_14_ORGAN_NETWORK
+        return DEFAULT_ORGAN_NETWORK
+
     def _genotype_scale(self, patient: Patient) -> float:
         """Map the drug's metabolizing enzyme activity score to a clearance scale."""
         enzyme = self.drug.metabolizing_enzyme
@@ -831,11 +912,15 @@ class TrialEngine:
             sigma = cv_percent / 100.0 / onp.sqrt(2)
             observed_c = float(concentration * onp.exp(sigma * rng.standard_normal()))
 
-            # QTc exposure-response (Emax).
-            qt_delta = 0.0
-            if self.drug.qtcd_ec50 > 0:
-                qt_delta = self.drug.qtcd_emax * observed_c / (self.drug.qtcd_ec50 + observed_c)
-            qt_interval = self.drug.qtcd_baseline + qt_delta
+            modeled_qtc = cardiac_apd_effect(
+                observed_c,
+                ic50_kr=self.drug.ic50_ikr,
+                ic50_na=self.drug.ic50_ina,
+                ic50_cal=self.drug.ic50_ical,
+                baseline_apd90=self.drug.qtcd_baseline - 80.0,
+                emax=self.drug.qtcd_emax,
+            )
+            qt_interval = float(modeled_qtc)
 
             # Mechanistic QSP: ALT sampled directly from solver state idx 8;
             # bilirubin derived from GSH depletion state idx 6 (Hy's Law axis).
@@ -1049,15 +1134,17 @@ class TrialEngine:
                 patient_means = onp.nanmean(samples, axis=0)  # (n_patients,)
                 return summarize_metrics(patient_means.tolist())
 
-            result: dict[str, Any] = {"overall": {}}
+            result: dict[str, Any] = {"overall": _summarize(pk_list)}
+            posterior_summary: dict[str, Any] = {}
             for key in metric_keys:
                 if key in post_pred:
-                    result["overall"][key] = _summarize_posterior(key)
-
-            # Add per-cohort breakdowns (same for all cohorts since posterior is global)
-            for ci in range(len(cohort_summaries)):
-                result[f"cohort_{ci + 1}"] = result["overall"].copy()
-
+                    posterior_summary[key] = _summarize_posterior(key)
+            result["posterior_predictive"] = posterior_summary
+            cursor = 0
+            for ci, summary in enumerate(cohort_summaries):
+                size = int(summary["n"])
+                result[f"cohort_{ci + 1}"] = _summarize(pk_list[cursor:cursor + size])
+                cursor += size
             return result
 
         # Fall back to normal-approx intervals across virtual subjects

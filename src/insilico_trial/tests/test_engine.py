@@ -19,7 +19,11 @@ _EM_GT = {"cyp2c9": ActivityScore(gene="cyp2c9", allele="CYP2C9*1", activity_sco
 _PM_GT = {"cyp2c9": ActivityScore(gene="cyp2c9", allele="CYP2C9*3", activity_score=0.0, metabolizer_status=GenotypeEnum.POOR)}
 
 
-def _make_drug(qtcd_emax: float = 0.0, qtcd_ec50: float = 1.0) -> Drug:
+def _make_drug(
+    qtcd_emax: float = 0.0,
+    qtcd_ec50: float = 1.0,
+    ic50_ikr: float = 1.0,
+) -> Drug:
     return Drug.model_validate(
         {"name": "test", "mol_weight": 300.0, "log_p": 2.0, "pka": [5.0],
          "fup": 0.1, "bp_ratio": 1.0, "dose_unit": "mg",
@@ -27,6 +31,7 @@ def _make_drug(qtcd_emax: float = 0.0, qtcd_ec50: float = 1.0) -> Drug:
          "bioavailability": 1.0, "target": "test",
          "ec50": 1.0, "emax": 5.0, "hill_coeff": 2.0,
          "qtcd_baseline": 400.0, "qtcd_slope": 0.0, "qtcd_emax": qtcd_emax, "qtcd_ec50": qtcd_ec50,
+         "ic50_ikr": ic50_ikr,
          "dili_risk": 0.01, "metabolizing_enzyme": "cyp2c9"}
     )
 
@@ -92,7 +97,7 @@ def test_escalation_no_dlt_escalates():
 def test_escalation_max_dlt_stops():
     """>= max DLTs in first cohort -> trial stops after one cohort."""
     # High qtcd_emax / low ec50 forces QTc-related DLTs.
-    drug = _make_drug(qtcd_emax=500.0, qtcd_ec50=0.5)
+    drug = _make_drug(qtcd_emax=500.0, qtcd_ec50=0.5, ic50_ikr=0.01)
     protocol = _make_protocol(n_cohorts=3, cohort_size=10)
     population = _make_population(30, _EM_GT)
     engine = TrialEngine(protocol=protocol, drug=drug, population=population)

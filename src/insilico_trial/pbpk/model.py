@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as onp
 from jax import Array
@@ -57,8 +58,9 @@ STANDARD_14_ORGAN_NETWORK: tuple[str, ...] = (
 )
 
 
-def organ_indices(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
-                  ) -> dict[str, int]:
+def organ_indices(
+    organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
+) -> dict[str, int | list[int] | tuple[str, ...]]:
     """Map role -> state index for an organ network.
 
     Requires exactly one ``gut``, one ``central``, and one ``elim`` entry;
@@ -71,6 +73,8 @@ def organ_indices(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
             raise ValueError(
                 f"organ network must contain exactly one {role!r}: {network}")
     idx = {role: network.index(role) for role in ("gut", "central", "elim")}
+    if "liver" in network:
+        idx["liver"] = network.index("liver")
     idx["perfused"] = [k for k, name in enumerate(network)
                        if name not in ("gut", "central", "elim")]
     idx["n_states"] = len(network)
@@ -98,17 +102,70 @@ def make_pbpk_ode(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK):
         CL = args["CL"]
         ka = args["ka"]
         c_p = y[central] / V[central]
-        flows = [Q[k] * (c_p - (y[k] / V[k]) / Kp[k]) for k in perfused]
+        C_p = c_p
+        if len(organ_network) == 6:
+            C_liver = y[1] / V[1]
+            C_periph = y[3] / V[3]
+            C_effect = y[4] / V[4]
+            dA_liver_flux = Q[_LIVER_IDX] * (C_p - C_liver / Kp[_LIVER_IDX])
+            dA_periph_flux = Q[_PERIPHERAL_IDX] * (C_p - C_periph / Kp[_PERIPHERAL_IDX])
+            dA_effect_flux = Q[_EFFECT_SITE_IDX] * (C_p - C_effect / Kp[_EFFECT_SITE_IDX])
+            flows = [dA_liver_flux, dA_periph_flux, dA_effect_flux]
+        else:
+            flows = [Q[k] * (C_p - (y[k] / V[k]) / Kp[k]) for k in perfused]
+        A_gut = y[gut]
+        dA_gut = -ka * A_gut
+        dA_elim = CL * C_p
+        if len(organ_network) == 6:
+            dA_liver = flows[0]
+            dA_periph = flows[1]
+            dA_effect = flows[2]
+            dA_central = (ka * A_gut
+        - dA_liver
+        - dA_periph
+        - dA_effect - CL * C_p)
+        else:
+            dA_central = ka * A_gut - sum(flows) - CL * C_p
         d = [0.0] * spec["n_states"]
-        d[gut] = -ka * y[gut]
-        for k, f in zip(perfused, flows):
+        d[gut] = dA_gut
+        for k, f in zip(perfused, flows, strict=True):
             d[k] = f
-        d[central] = ka * y[gut] - sum(flows) - CL * c_p
-        d[elim] = CL * c_p
+        d[central] = dA_central
+        d[elim] = dA_elim
         return jnp.array(d)
 
     ode.organ_network = organ_network  # type: ignore[attr-defined]
     ode.n_states = spec["n_states"]  # type: ignore[attr-defined]
+    return ode
+
+
+def make_pbpk_dili_ode(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK):
+    """Build the unified organ-network PBPK plus DILI-QSP ODE."""
+    pbpk = make_pbpk_ode(organ_network)
+    spec = organ_indices(organ_network)
+    liver = int(spec["liver"]) if "liver" in spec else 1
+    n_pb = int(spec["n_states"])
+    gsh_i = n_pb
+    alt_i = n_pb + 2
+
+    def ode(t: float, y: Any, args: dict[str, Any]) -> Array:
+        d_pb = pbpk(t, y[:n_pb], args)
+        liver_conc = y[liver] / args["V"][liver]
+        gsh = y[gsh_i]
+        alt = y[alt_i]
+        k_synth = jnp.asarray(args.get("k_synth", _QSP_DEFAULTS["k_synth"]))
+        k_dep = jnp.asarray(args.get("k_deplete", _QSP_DEFAULTS["k_deplete"]))
+        ic50 = jnp.asarray(args.get("IC50", _QSP_DEFAULTS["IC50"]))
+        k_leak = jnp.asarray(args.get("k_leak", _QSP_DEFAULTS["k_leak"]))
+        k_elim = jnp.asarray(args.get("k_elim", _QSP_DEFAULTS["k_elim"]))
+        alt_base = jnp.asarray(args.get("ALT_base", _QSP_DEFAULTS["ALT_base"]))
+        d_gsh = k_synth * (1.0 - gsh) - k_dep * liver_conc * gsh
+        mito = liver_conc / (ic50 + liver_conc)
+        d_alt = k_leak * (1.0 - gsh) * mito - k_elim * (alt - alt_base)
+        return jnp.concatenate([d_pb, jnp.array([d_gsh, 0.0, d_alt])])
+
+    ode.organ_network = organ_network  # type: ignore[attr-defined]
+    ode.n_states = n_pb + 3  # type: ignore[attr-defined]
     return ode
 
 # Default physiological parameters (70 kg adult, Hct = 0.45)
@@ -256,28 +313,11 @@ _QSP_DEFAULTS: dict[str, float] = {
 
 
 def pbpk_dili_ode(t: float, y: Any, args: dict[str, Any]) -> Array:
-    """Unified 9-state PBPK + DILI-QSP ODE (pure JAX).
-
-    First 6 states are the standard ``pbpk_ode`` amounts; the last 3 are
-    ``(GSH, S_mito, ALT)`` driven by the liver concentration
-    ``C_liver = A_liver / V_liver``. QSP rate constants are read from
-    ``args`` with literature defaults when absent.
-    """
-    d6 = pbpk_ode(t, y[:6], args)
-    V = args["V"]
-    C_liver = y[_LIVER_IDX] / V[_LIVER_IDX]
-    GSH = y[_GSH_IDX]
-    ALT = y[_ALT_IDX]
-    k_synth = jnp.asarray(args.get("k_synth", _QSP_DEFAULTS["k_synth"]))
-    k_dep = jnp.asarray(args.get("k_deplete", _QSP_DEFAULTS["k_deplete"]))
-    ic50 = jnp.asarray(args.get("IC50", _QSP_DEFAULTS["IC50"]))
-    k_leak = jnp.asarray(args.get("k_leak", _QSP_DEFAULTS["k_leak"]))
-    k_elim = jnp.asarray(args.get("k_elim", _QSP_DEFAULTS["k_elim"]))
-    alt_base = jnp.asarray(args.get("ALT_base", _QSP_DEFAULTS["ALT_base"]))
-    dGSH = k_synth * (1.0 - GSH) - k_dep * C_liver * GSH
-    S_mito = C_liver / (ic50 + C_liver)
-    dALT = k_leak * (1.0 - GSH) * S_mito - k_elim * (ALT - alt_base)
-    return jnp.concatenate([d6, jnp.array([dGSH, 0.0, dALT])])
+    """Unified organ-network PBPK plus DILI-QSP ODE."""
+    network = args.get("organ_network")
+    if network is None:
+        network = DEFAULT_ORGAN_NETWORK if args["Q"].shape[0] == 6 else STANDARD_14_ORGAN_NETWORK
+    return make_pbpk_dili_ode(tuple(network))(t, y, args)
 
 
 def pbpk_ode(
@@ -285,49 +325,198 @@ def pbpk_ode(
     y: Any,
     args: dict[str, Any],
 ) -> Array:
-    """Compute derivatives for the perfusion-limited PBPK ODE system.
+    """Compute derivatives for the configured perfusion-limited PBPK network."""
+    network = args.get("organ_network")
+    if network is None:
+        network = DEFAULT_ORGAN_NETWORK if args["Q"].shape[0] == 6 else STANDARD_14_ORGAN_NETWORK
+    return make_pbpk_ode(tuple(network))(t, y, args)
 
-    State vector y = [A_gut, A_liver, A_central, A_periph, A_effect, A_elim]
-    (drug amounts in each compartment plus cumulative eliminated amount).
-    ``args`` carries patient parameters: Q (5,) flows, V (5,) volumes,
-    Kp (5,) partition ratios, CL (float) clearance, ka (float) absorption rate.
-    """
-    A_gut, A_liver, A_central, A_periph, A_effect, _ = y
 
-    Q = args["Q"]  # (5,) blood flows L/h
-    V = args["V"]  # (5,) volumes L
-    Kp = args["Kp"]  # (5,) tissue:plasma partition ratios
-    CL = args["CL"]  # float, clearance L/h
-    ka = args["ka"]  # float, absorption rate constant 1/h
+def _reference_physiology(
+    organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
+) -> dict[str, onp.ndarray]:
+    reference = {
+        "gut": (0.0, 0.3), "liver": (1.5, 1.5), "central": (0.0, 3.0),
+        "peripheral": (50.0, 4.0), "effect": (0.5, 0.3),
+        "kidney": (1.2, 0.5), "lung": (1.0, 2.0), "brain": (0.75, 1.4),
+        "heart": (0.5, 0.6), "muscle": (0.9, 30.0), "adipose": (0.25, 12.0),
+        "bone": (0.45, 3.0), "skin": (0.5, 4.0), "spleen": (0.25, 0.25),
+        "pancreas": (0.3, 0.3), "elim": (0.0, 1.0),
+    }
+    organ_network = tuple(organ_network)
+    return {
+        "Q": onp.asarray([reference[name][0] for name in organ_network]),
+        "V": onp.asarray([reference[name][1] for name in organ_network]),
+    }
 
-    # Plasma concentration in central compartment
-    C_p = A_central / V[_CENTRAL_IDX]
 
-    # --- Gut compartment: first-order absorption ---
-    dA_gut = -ka * A_gut
+def scale_physiological(weight_kg: float, age: float) -> dict[str, float]:
+    weight_scale = float(weight_kg / 70.0)
+    return {
+        "w_scaling": weight_scale ** 0.75,
+        "age_factor": 1.0 if age <= 40 else 0.9,
+    }
 
-    # --- Liver compartment (perfusion-limited) ---
-    C_liver = A_liver / V[_LIVER_IDX]
-    dA_liver = Q[_LIVER_IDX] * (C_p - C_liver / Kp[_LIVER_IDX])
 
-    # --- Peripheral compartment (perfusion-limited) ---
-    C_periph = A_periph / V[_PERIPHERAL_IDX]
-    dA_periph = Q[_PERIPHERAL_IDX] * (C_p - C_periph / Kp[_PERIPHERAL_IDX])
+def scale_physiology(weight_kg: float, age: float) -> dict[str, float]:
+    return scale_physiological(weight_kg, age)
 
-    # --- Effect-site compartment (perfusion-limited, rapid equilibration) ---
-    C_effect = A_effect / V[_EFFECT_SITE_IDX]
-    dA_effect = Q[_EFFECT_SITE_IDX] * (C_p - C_effect / Kp[_EFFECT_SITE_IDX])
 
-    # --- Central compartment (plasma) ---
-    dA_central = (
-        ka * A_gut
-        - dA_liver
-        - dA_periph
-        - dA_effect
-        - CL * C_p
+def compute_patient_kp(
+    drug: Drug,
+    typical_v_f: float | None = None,
+    weight_kg: float = 70.0,
+) -> dict[str, float]:
+    kp = {}
+    for organ in COMPARTMENT_ORDER:
+        tissue = {
+            "gut": "generic", "liver": "liver", "central": "generic",
+            "peripheral": "peripheral", "effect-site": "generic",
+        }[organ]
+        kp[organ] = kp_for_tissue(
+            drug.log_p, drug.pka, drug.fup, drug.bp_ratio, tissue, drug.mol_weight
+        ) if organ == "liver" else 1.0
+    return kp
+
+
+def build_pbpk_params(
+    weight_kg: float,
+    age: float,
+    drug: Drug,
+    genotype_scale: float = 1.0,
+    egfr_scale: float = 1.0,
+    organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
+) -> dict[str, Any]:
+    scaling = scale_physiology(weight_kg, age)
+    organ_network = tuple(organ_network)
+    organ_indices(organ_network)
+    ref = _reference_physiology(organ_network)
+    kp = compute_patient_kp(drug, drug.typical_v_f, weight_kg)
+    kp_by_name = {
+        "gut": 1.0, "central": 1.0, "peripheral": 1.0, "effect": 1.0,
+        "elim": 1.0, "liver": kp_for_tissue(
+            drug.log_p, drug.pka, drug.fup, drug.bp_ratio, "liver", drug.mol_weight
+        ),
+    }
+    for name in organ_network:
+        if name not in kp_by_name:
+            kp_by_name[name] = kp_for_tissue(
+                drug.log_p, drug.pka, drug.fup, drug.bp_ratio,
+                "fat" if name == "adipose" else "generic", drug.mol_weight,
+            )
+    return {
+        "organ_network": organ_network,
+        "Q": ref["Q"] * scaling["w_scaling"],
+        "V": ref["V"] * (weight_kg / 70.0),
+        "Kp": onp.asarray([kp_by_name[name] for name in organ_network]),
+        "CL": float(max(drug.typical_cl_f * scaling["w_scaling"] *
+                        scaling["age_factor"] *
+                        ((0.2 + 0.8 * genotype_scale) ** 2) *
+                        egfr_scale, 1e-6)),
+        "ka": float(drug.ka),
+    }
+
+
+def solve_pbpk_single(t_eval: Any, A_gut_0: float, params: dict[str, Any]) -> Any:
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt, solve_pbpk_fixed_step
+    dt = min(0.01, 0.9 * calculate_max_stable_dt(params))
+    return solve_pbpk_fixed_step(t_eval, A_gut_0, params, dt=dt)
+
+
+def solve_pbpk_full(t_eval: Any, A_gut_0: float, params: dict[str, Any]) -> Any:
+    from insilico_trial.pbpk.fixed_step import _initial_state, _solve_on_grid_fixed
+    te = onp.asarray(t_eval, dtype=onp.float64)
+    t0, t1 = float(te[0]), float(te[-1])
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    dt = min(0.01, 0.9 * calculate_max_stable_dt(params))
+    n_steps = int((t1 - t0) / dt) + 1
+    network = tuple(params.get("organ_network", DEFAULT_ORGAN_NETWORK))
+    return _solve_on_grid_fixed(
+        t0, t1, dt, n_steps, jnp.asarray(te),
+        _initial_state(A_gut_0, len(network)), params,
     )
 
-    # --- Eliminated amount accumulator ---
-    dA_elim = CL * C_p
 
-    return jnp.array([dA_gut, dA_liver, dA_central, dA_periph, dA_effect, dA_elim])
+def solve_pbpk_batch(t_eval: Any, A_gut_0s: Any, params_batch: dict[str, Any]) -> Any:
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_batch_fixed_step
+    return solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch, dt=0.001)
+
+
+def predict_pbpk_plasma_linear(
+    t_eval: Any,
+    A_gut_0: float,
+    params: dict[str, Any],
+) -> Any:
+    """Evaluate central concentration from the exact linear PBPK transition."""
+    import jax.scipy.linalg as jsl
+
+    network = tuple(params.get("organ_network", DEFAULT_ORGAN_NETWORK))
+    spec = organ_indices(network)
+    gut = int(spec["gut"])
+    central = int(spec["central"])
+    elim = int(spec["elim"])
+    perfused = tuple(int(index) for index in spec["perfused"])
+    n = len(network)
+    Q = jnp.asarray(params["Q"], dtype=jnp.float64)
+    V = jnp.asarray(params["V"], dtype=jnp.float64)
+    Kp = jnp.asarray(params["Kp"], dtype=jnp.float64)
+    matrix = jnp.zeros((n, n), dtype=jnp.float64)
+    matrix = matrix.at[gut, gut].set(-jnp.asarray(params["ka"]))
+    matrix = matrix.at[central, gut].set(jnp.asarray(params["ka"]))
+    for index in perfused:
+        tissue_return = Q[index] / (V[index] * Kp[index])
+        tissue_outflow = Q[index] / V[central]
+        matrix = matrix.at[index, central].set(tissue_outflow)
+        matrix = matrix.at[index, index].set(-tissue_return)
+        matrix = matrix.at[central, index].add(tissue_return)
+    clearance = params["CL"] / V[central]
+    total_perfusion = sum(Q[index] / V[central] for index in perfused)
+    matrix = matrix.at[central, central].add(-clearance - total_perfusion)
+    matrix = matrix.at[elim, central].set(clearance)
+    times = jnp.asarray(t_eval, dtype=jnp.float64)
+    y0 = jnp.zeros(n, dtype=jnp.float64).at[gut].set(A_gut_0)
+    states = jax.vmap(lambda time: jsl.expm(time * matrix) @ y0)(times)
+    return states[:, central] / V[central]
+
+
+def compute_mass_balance(y_initial: Any, y_final: Any) -> float:
+    initial = float(jnp.sum(y_initial))
+    final = float(jnp.sum(y_final))
+    return 0.0 if initial == 0.0 else abs(final - initial) / abs(initial)
+
+
+def run_pbpk(
+    dose_mg: float,
+    weight_kg: float,
+    age: float,
+    log_p: float,
+    pka: list[float],
+    fu_plasma: float,
+    bp_ratio: float,
+    cl: float = 0.5,
+    ka: float = 1.0,
+    n_timepoints: int = 24 * 7,
+    t_max_days: float = 7.0,
+    bioavailability: float = 1.0,
+    typical_v_f: float | None = None,
+    genotype_scale: float = 1.0,
+) -> dict[str, Any]:
+    drug = Drug(
+        name="synthetic", mol_weight=300.0, log_p=log_p, pka=pka, fup=fu_plasma,
+        bp_ratio=bp_ratio, typical_cl_f=max(cl, 1e-6),
+        typical_v_f=typical_v_f if typical_v_f is not None else 10.0,
+        ka=ka, bioavailability=bioavailability, ec50=1.0, emax=1.0,
+    )
+    params = build_pbpk_params(weight_kg, age, drug, genotype_scale)
+    t = onp.linspace(0.0, t_max_days * 24.0, n_timepoints)
+    absorbed = dose_mg * bioavailability
+    ys = solve_pbpk_full(t, absorbed, params)
+    y0 = onp.zeros(6)
+    y0[_GUT_IDX] = absorbed
+    return {
+        "t": t,
+        "C_plasma": onp.asarray(ys[:, _CENTRAL_IDX] / params["V"][_CENTRAL_IDX]),
+        "y": onp.asarray(ys[-1]),
+        "eliminated": float(onp.asarray(ys[-1, _ELIM_IDX])),
+        "mass_balance": compute_mass_balance(y0, ys[-1]),
+    }

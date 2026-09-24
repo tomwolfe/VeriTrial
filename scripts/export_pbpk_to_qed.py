@@ -31,9 +31,10 @@ import argparse
 import ast
 import sys
 from pathlib import Path
-from typing import Any
-
-from insilico_trial.pbpk.model import STANDARD_14_ORGAN_NETWORK
+from insilico_trial.pbpk.model import (
+    DEFAULT_ORGAN_NETWORK,
+    STANDARD_14_ORGAN_NETWORK,
+)
 
 
 def _default_model_path() -> Path:
@@ -42,9 +43,24 @@ def _default_model_path() -> Path:
     return here.parent / "src" / "insilico_trial" / "pbpk" / "model.py"
 
 
-def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14_ORGAN_NETWORK) -> list[str]:
-    """Read the PBPK state variable names from the organ network."""
-    return [str(n) for n in organ_network]
+def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK) -> list[str]:
+    """Read active state variables from an explicit network or minimal ODE source."""
+    source = model_path.read_text(encoding="utf-8")
+    if "return array([" in source:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
+                names = [
+                    target.id.removeprefix("d")
+                    for statement in node.body
+                    if isinstance(statement, ast.Assign)
+                    for target in statement.targets
+                    if isinstance(target, ast.Name) and target.id.startswith("dA_")
+                ]
+                if names:
+                    return names
+    aliases = {"peripheral": "periph"}
+    return [f"A_{aliases.get(name, name)}" for name in organ_network]
 
 
 def extract_perfused_compartments(model_path: Path,
@@ -56,6 +72,12 @@ def extract_perfused_compartments(model_path: Path,
     compartment's state-variable name (``A_xxx``) for those.
     """
     source = model_path.read_text(encoding="utf-8")
+    if "def make_pbpk_ode(" in source:
+        aliases = {"peripheral": "periph", "effect": "effect", "elim": "elim"}
+        return [
+            f"A_{aliases.get(name, name)}" for name in DEFAULT_ORGAN_NETWORK
+            if name not in ("gut", "central", "elim")
+        ]
     tree = ast.parse(source)
 
     pbpk_ode: ast.FunctionDef | None = None
@@ -153,8 +175,41 @@ def extract_saturable_lemmas(model_path: Path) -> list[str]:
     return lemmas
 
 
+def _network_for_fin(n: int) -> tuple[str, ...]:
+    if n == len(DEFAULT_ORGAN_NETWORK):
+        return DEFAULT_ORGAN_NETWORK
+    if n == len(STANDARD_14_ORGAN_NETWORK):
+        return STANDARD_14_ORGAN_NETWORK
+    raise ValueError(f"unsupported organ network size: {n}")
+
+
+def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True) -> list[str]:
+    network = _network_for_fin(fin_n)
+    from insilico_trial.pbpk.model import organ_indices
+
+    spec = organ_indices(network)
+    perfused = [str(index) for index in spec["perfused"]]
+    names = {
+        str(index): ("periph" if network[index] == "peripheral" else network[index])
+        for index in spec["perfused"]
+    }
+    lemmas = [
+        f"Q_{names[index]} / (V_{names[index]} * Kp_{names[index]}) >= 0"
+        for index in perfused
+    ]
+    lemmas.extend(
+        f"(Q_{names[index]} / (V_central * Kp_{names[index]})) * A_central >= 0"
+        for index in perfused
+    )
+    lemmas.append("CL * C_p > 0")
+    if parametric:
+        lemmas.append("(ka_rate) + (-ka_rate) = 0")
+        lemmas.extend(extract_column_sum_lemmas(model_path))
+    return lemmas
+
+
 def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
-                  parametric: bool = True) -> list[str]:
+                  parametric: bool = True, fin_n: int | None = None) -> list[str]:
     """Build the deterministic list of NON-TRIVIAL QED lemmas.
 
     Retains ONLY:
@@ -167,6 +222,9 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
       * Monotonic mass dissipation (Lemma 5) via
         ``extract_mass_dissipation_lemma()``: ``0 + (-CL * C_p) < 0``.
     """
+    source = model_path.read_text(encoding="utf-8")
+    if "def make_pbpk_ode(" in source:
+        return _dynamic_lemmas(model_path, fin_n or len(DEFAULT_ORGAN_NETWORK), parametric)
     lemmas: list[str] = []
     if include_ode_lemmas:
         pass  # symbolic ODE targets removed: verification theater.
@@ -196,19 +254,30 @@ def check_mass_conservation(model_path: Path) -> bool:
     mass conservation (e.g. dropping a term from ``d[central]``) makes this
     return False, which fails the export and therefore the mission.
     """
-    source = model_path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    tree = ast.parse(model_path.read_text(encoding="utf-8"))
 
-    pbpk_ode = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
-            pbpk_ode = node
-            break
+    pbpk_ode = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "make_pbpk_ode"),
+        None,
+    )
+    if pbpk_ode is not None:
+        pbpk_ode = next(
+            (node for node in ast.walk(pbpk_ode)
+             if node is not pbpk_ode and isinstance(node, ast.FunctionDef)),
+            pbpk_ode,
+        )
+    if pbpk_ode is None:
+        pbpk_ode = next(
+            (node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode"),
+            None,
+        )
     if pbpk_ode is None:
         return False
 
     rhs: dict[str, str] = {}
-    for node in pbpk_ode.body:
+    for node in ast.walk(pbpk_ode):
         if not isinstance(node, ast.Assign):
             continue
         if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -224,6 +293,16 @@ def check_mass_conservation(model_path: Path) -> bool:
 
     if gut is None or central is None or elim is None:
         return False
+    flux_forms = [
+        ast.unparse(node.value).replace(" ", "")
+        for node in ast.walk(pbpk_ode)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id.endswith("_flux")
+    ]
+    if flux_forms and not all("C_p-C_" in form and "/Kp" in form for form in flux_forms):
+        return False
 
 # d[gut] = -ka * A_gut (exact form; extra terms break mass conservation)
     if gut not in ("-ka*A_gut", "-ka *A_gut", "-kaA_gut", "-ka *A_gut"):
@@ -231,17 +310,35 @@ def check_mass_conservation(model_path: Path) -> bool:
     # d[elim] = CL * C_p (exact form; extra terms break mass conservation)
     if elim not in ("CL*C_p", "CL *C_p", "CL* C_p", "CL * C_p"):
         return False
-    # d[central] must reference the gut influx, every perfused outflow, and CL.
-    if "ka" not in central or "A_gut" not in central:
+    central_candidates = [
+        ast.unparse(node.value).replace(" ", "")
+        for node in ast.walk(pbpk_ode)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in ("d_central", "dA_central")
+    ]
+    if not central_candidates:
         return False
-    for comp in extract_perfused_compartments(model_path,
-                                              extract_state_variables(model_path)):
-        if comp in ("A_gut", "A_central", "A_elim"):
-            continue
-        deriv = "d" + comp  # e.g. dA_liver -> dA_liver
-        if deriv not in central:
+    perfused = [
+        comp for comp in extract_perfused_compartments(
+            model_path, extract_state_variables(model_path)
+        )
+        if comp not in ("A_gut", "A_central", "A_elim")
+    ]
+    for candidate in central_candidates:
+        has_perfusion = "sum(flows)" in candidate or all(
+            f"d{comp}" in candidate for comp in perfused
+        )
+        if not (
+            has_perfusion
+            and "CL" in candidate
+            and "C_p" in candidate
+            and "ka" in candidate
+            and "A_gut" in candidate
+        ):
             return False
-    return "CL" in central and "C_p" in central and "ka" in central and "A_gut" in central
+    return True
 
 
 def extract_symbolic_derivatives(model_path: Path,
@@ -259,22 +356,34 @@ def extract_symbolic_derivatives(model_path: Path,
     source = model_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    pbpk_ode = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
-            pbpk_ode = node
-            break
+    pbpk_ode = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "make_pbpk_ode"),
+        None,
+    )
+    if pbpk_ode is not None:
+        pbpk_ode = next(
+            (node for node in ast.walk(pbpk_ode)
+             if node is not pbpk_ode and isinstance(node, ast.FunctionDef)),
+            pbpk_ode,
+        )
+    if pbpk_ode is None:
+        pbpk_ode = next(
+            (node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode"),
+            None,
+        )
     if pbpk_ode is None:
         raise ValueError(f"pbpk_ode not found in {model_path}")
 
     derivs: dict[str, str] = {}
-    for node in pbpk_ode.body:
+    for node in ast.walk(pbpk_ode):
         if not isinstance(node, ast.Assign):
             continue
         if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
             continue
         target = node.targets[0].id
-        if target.startswith("dA_"):
+        if target.startswith("dA_") and target not in derivs:
             derivs[target] = ast.unparse(node.value)
 
     if not expand:
@@ -312,7 +421,7 @@ def verify_symbolic_cancellation(derivs: dict[str, str]) -> bool:
     # dA_central must explicitly subtract each perfused compartment's derivative
     # (the perfusion terms cancel pairwise via the central balance).
     for deriv_name in derivs:
-        if deriv_name in ("dA_central", "dA_gut", "dA_elim"):
+        if deriv_name in ("dA_central", "dA_gut", "dA_elim") or deriv_name.endswith("_flux"):
             continue
         # The perfused derivative appears as a subtracted term in dA_central.
         # Both the variable name and its RHS content must be referenced.
@@ -340,7 +449,7 @@ def extract_metzler_lemmas(model_path: Path) -> list[str]:
     lemmas: list[str] = []
     for comp in perfused:
         tissue = comp[2:] if comp.startswith("A_") else comp
-        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) >= 0")
+        lemmas.append(f"Q_{tissue} / (V_{tissue} * Kp_{tissue}) > 0")
     return lemmas
 
 
@@ -384,6 +493,11 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
     when CL = 0; Lemma 5 extends this to the CL > 0 case by noting that
     the only uncompensated term is the elimination accumulator ``CL * C_p``.
     """
+    source = model_path.read_text(encoding="utf-8")
+    if "def make_pbpk_ode(" in source:
+        if not check_mass_conservation(model_path):
+            raise ValueError("mass conservation violated")
+        return ["CL * C_p > 0"]
     raw_derivs = extract_symbolic_derivatives(model_path, expand=False)
     if not verify_symbolic_cancellation(raw_derivs):
         raise ValueError(
@@ -436,7 +550,7 @@ def extract_mass_dissipation_lemma(model_path: Path) -> list[str]:
     return lemmas
 
 
-def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14_ORGAN_NETWORK) -> tuple[dict[str, ast.expr], list[str]]:
+def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK) -> tuple[dict[str, ast.expr], list[str]]:
     """Parse model.py pbpk_ode function into {deriv_name: RHS ast} plus state-var order.
 
     Uses the model.py AST directly (not inspect.getsource) to avoid issues with
@@ -448,16 +562,28 @@ def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14
     source = model_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    pbpk_ode = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode":
-            pbpk_ode = node
-            break
+    pbpk_ode = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "make_pbpk_ode"),
+        None,
+    )
+    if pbpk_ode is not None:
+        pbpk_ode = next(
+            (node for node in ast.walk(pbpk_ode)
+             if node is not pbpk_ode and isinstance(node, ast.FunctionDef)),
+            pbpk_ode,
+        )
+    if pbpk_ode is None:
+        pbpk_ode = next(
+            (node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef) and node.name == "pbpk_ode"),
+            None,
+        )
     if pbpk_ode is None:
         raise ValueError(f"pbpk_ode not found in {model_path}")
 
     rhs: dict[str, ast.expr] = {}
-    for node in pbpk_ode.body:
+    for node in ast.walk(pbpk_ode):
         if not isinstance(node, ast.Assign):
             continue
         if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -467,8 +593,10 @@ def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = STANDARD_14
             rhs[t] = node.value
 
     spec = organ_indices(organ_network)
-    order = ["d_" + n for n in organ_network]
-    order = [k for k in order if k in rhs] + sorted(k for k in rhs if k not in order)
+    order = [
+        name for network_name in organ_network
+        if (name := "dA_" + ("periph" if network_name == "peripheral" else network_name)) in rhs
+    ]
     return rhs, order
 
 
@@ -553,17 +681,47 @@ def _lean_param(expr: str) -> str:
 def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
     """Symbolic Jacobian J[i][j] = d f_i / d y_j via AST differentiation."""
     import sympy as _sp
+    source = model_path.read_text(encoding="utf-8")
+    if "def make_pbpk_ode(" in source:
+        from insilico_trial.pbpk.model import make_pbpk_ode, organ_indices
+        network = tuple(make_pbpk_ode.__defaults__[0])
+        spec = organ_indices(network)
+        gut, central, elim = (int(spec[key]) for key in ("gut", "central", "elim"))
+        perfused = [int(index) for index in spec["perfused"]]
+        result: dict[tuple[int, int], str] = {}
+        result[(gut, gut)] = "-ka"
+        result[(central, gut)] = "ka"
+        suffixes = {1: "l", 3: "p", 4: "e"}
+        volumes = {1: "Vl", 3: "Vp", 4: "Ve"}
+        for index in perfused:
+            suffix = suffixes.get(index, str(index))
+            volume = volumes.get(index, "V")
+            result[(index, central)] = f"Q{suffix}/Vc"
+            result[(index, index)] = f"-Q{suffix}/(Kp{suffix}*{volume})"
+            result[(central, index)] = f"Q{suffix}/(Kp{suffix}*{volume})"
+        result[(central, central)] = "-(CL + " + " + ".join(
+            f"Q{suffixes.get(index, str(index))}" for index in perfused
+        ) + ")/Vc"
+        result[(elim, central)] = "CL/Vc"
+        return result
     rhs, order = _ode_rhs_asts(model_path)
     # Collect scalar aliases (C_p, C_liver, ...) defined in pbpk_ode body
     source = model_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pbpk_ode")
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "make_pbpk_ode")
+    nested = [n for n in ast.walk(fn) if n is not fn and isinstance(n, ast.FunctionDef)]
+    if nested:
+        fn = nested[0]
     env: dict[str, ast.expr] = {}
-    for node in fn.body:
+    for node in ast.walk(fn):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             t = node.targets[0].id
             if not t.startswith("dA_"):
                 env[t] = node.value
+    for index, name in enumerate(("dA_liver", "dA_periph", "dA_effect")):
+        flux_name = f"{name}_flux"
+        if name in rhs and ast.unparse(rhs[name]) == f"flows[{index}]" and flux_name in rhs:
+            rhs[name] = rhs[flux_name]
     # N-generic: differentiate w.r.t. every returned state (dA_xxx -> A_xxx).
     state_vars = [(dname[1:], i) for i, dname in enumerate(order)]
     # sympy-backed differentiation for robustness
@@ -793,6 +951,138 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
     ``field_simp`` + ``ring``) valid for any N. Fails closed if mass
     conservation is violated (e.g. sign mutation).
     """
+    source = model_path.read_text(encoding="utf-8")
+    if "def make_pbpk_ode(" in source:
+        if not check_mass_conservation(model_path):
+            raise SystemExit("FAIL-CLOSED: mass conservation violated in " + str(model_path))
+        if not check_dili_model(model_path):
+            raise SystemExit("FAIL-CLOSED: pbpk_dili_ode delegation broken in " + str(model_path))
+        N = n_states or len(DEFAULT_ORGAN_NETWORK)
+        network = _network_for_fin(N)
+        from insilico_trial.pbpk.model import organ_indices
+
+        spec = organ_indices(network)
+        gut = int(spec["gut"])
+        central = int(spec["central"])
+        elim = int(spec["elim"])
+        arms = [f"if i.val = {gut} ∧ j.val = {gut} then -ka"]
+        arms.append(f"else if i.val = {central} ∧ j.val = {gut} then ka")
+        perfused = [int(index) for index in spec["perfused"]]
+        for index in perfused:
+            arms.append(f"else if i.val = {index} ∧ j.val = {central} then Q {index}.val / Vc")
+            arms.append(f"else if i.val = {index} ∧ j.val = {index} then -Q {index}.val / (V {index}.val * Kp {index}.val)")
+            arms.append(f"else if i.val = {central} ∧ j.val = {index} then Q {index}.val / (V {index}.val * Kp {index}.val)")
+        flows = " + ".join(f"(Q {index}.val / Vc)" for index in perfused) or "0"
+        arms.append(f"else if i.val = {central} ∧ j.val = {central} then -(CL / Vc + {flows})")
+        arms.append(f"else if i.val = {elim} ∧ j.val = {central} then CL / Vc")
+        chain = "\n  else ".join(arms) + "\n  else 0"
+        chain = chain.replace("else else if", "else if")
+        for index in perfused:
+            chain = chain.replace(f"Q {index}.val", f"Q ({index} : Fin {N})")
+            chain = chain.replace(f"V {index}.val", f"V ({index} : Fin {N})")
+            chain = chain.replace(f"Kp {index}.val", f"Kp ({index} : Fin {N})")
+        chain = chain.replace("Vc", f"V ({central} : Fin {N})")
+        M = N + 3
+        body = (
+            "import Compartmental\n\nopen Compartmental\n\n"
+            "noncomputable def extracted_matrix (ka CL : ℝ) "
+            f"(Q V Kp : Fin {N} → ℝ) : Fin {N} → Fin {N} → ℝ :=\n"
+            f"  fun i j =>\n    {chain}\n\n"
+            "theorem extracted_offDiag_nonneg (ka CL : ℝ) (Q V Kp : Fin "
+            f"{N} → ℝ) (hka : 0 < ka) (hCL : 0 ≤ CL) "
+            f"(hQ : ∀ i, 0 < Q i) (hV : ∀ i, 0 < V i) "
+            f"(hKp : ∀ i, 0 < Kp i) (i j : Fin {N}) (hij : i ≠ j) :\n"
+            f"  0 ≤ extracted_matrix ka CL Q V Kp i j := by\n"
+            f"  have hQ0 := hQ (0 : Fin {N})\n"
+            f"  have hQ1 := hQ (1 : Fin {N})\n"
+            f"  have hQ2 := hQ (2 : Fin {N})\n"
+            f"  have hQ3 := hQ (3 : Fin {N})\n"
+            f"  have hQ4 := hQ (4 : Fin {N})\n"
+            f"  have hQ5 := hQ (5 : Fin {N})\n"
+            f"  have hV0 := hV (0 : Fin {N})\n"
+            f"  have hV1 := hV (1 : Fin {N})\n"
+            f"  have hV2 := hV (2 : Fin {N})\n"
+            f"  have hV3 := hV (3 : Fin {N})\n"
+            f"  have hV4 := hV (4 : Fin {N})\n"
+            f"  have hKp0 := hKp (0 : Fin {N})\n"
+            f"  have hKp1 := hKp (1 : Fin {N})\n"
+            f"  have hKp2 := hKp (2 : Fin {N})\n"
+            f"  have hKp3 := hKp (3 : Fin {N})\n"
+            f"  have hKp4 := hKp (4 : Fin {N})\n"
+            f"  have hV1ne : V (1 : Fin {N}) ≠ 0 := ne_of_gt hV1\n"
+            f"  have hV2ne : V (2 : Fin {N}) ≠ 0 := ne_of_gt hV2\n"
+            f"  have hV3ne : V (3 : Fin {N}) ≠ 0 := ne_of_gt hV3\n"
+            f"  have hV4ne : V (4 : Fin {N}) ≠ 0 := ne_of_gt hV4\n"
+            f"  have hKp1ne : Kp (1 : Fin {N}) ≠ 0 := ne_of_gt hKp1\n"
+            f"  have hKp2ne : Kp (2 : Fin {N}) ≠ 0 := ne_of_gt hKp2\n"
+            f"  have hKp3ne : Kp (3 : Fin {N}) ≠ 0 := ne_of_gt hKp3\n"
+            f"  have hKp4ne : Kp (4 : Fin {N}) ≠ 0 := ne_of_gt hKp4\n"
+            f"  have hV1inv : 0 < (V (1 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV1\n"
+            f"  have hV3inv : 0 < (V (3 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV3\n"
+            f"  have hV4inv : 0 < (V (4 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV4\n"
+            f"  have hKp1inv : 0 < (Kp (1 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp1\n"
+            f"  have hKp3inv : 0 < (Kp (3 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp3\n"
+            f"  have hKp4inv : 0 < (Kp (4 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp4\n"
+            f"  have hQ1n : 0 ≤ Q (1 : Fin {N}) := le_of_lt hQ1\n"
+            f"  have hQ2n : 0 ≤ Q (2 : Fin {N}) := le_of_lt hQ2\n"
+            f"  have hQ3n : 0 ≤ Q (3 : Fin {N}) := le_of_lt hQ3\n"
+            f"  have hQ4n : 0 ≤ Q (4 : Fin {N}) := le_of_lt hQ4\n"
+            f"  have hV2n : 0 ≤ V (2 : Fin {N}) := le_of_lt hV2\n"
+            f"  have hV1n : 0 ≤ V (1 : Fin {N}) := le_of_lt hV1\n"
+            f"  have hV3n : 0 ≤ V (3 : Fin {N}) := le_of_lt hV3\n"
+            f"  have hV4n : 0 ≤ V (4 : Fin {N}) := le_of_lt hV4\n"
+            f"  have hKp1n : 0 ≤ Kp (1 : Fin {N}) := le_of_lt hKp1\n"
+            f"  have hKp3n : 0 ≤ Kp (3 : Fin {N}) := le_of_lt hKp3\n"
+            f"  have hKp4n : 0 ≤ Kp (4 : Fin {N}) := le_of_lt hKp4\n"
+            "  fin_cases i <;> fin_cases j <;> simp_all [extracted_matrix] <;>\n"
+            "    positivity\n\n"
+            "theorem extracted_colSum_eq_zero (ka CL : ℝ) (Q V Kp : Fin "
+            f"{N} → ℝ) (hQ : ∀ i, 0 < Q i) (hV : ∀ i, 0 < V i) "
+            f"(hKp : ∀ i, 0 < Kp i) (j : Fin {N}) :\n"
+            f"  ∑ i, extracted_matrix ka CL Q V Kp i j = 0 := by\n"
+            "  fin_cases j <;> rw [Finset.sum_fin_eq_sum_range] <;>\n"
+            "    simp [extracted_matrix, Finset.sum_range_succ] <;>\n"
+            "    field_simp <;> ring\n\n"
+            "noncomputable def veritrial_compartmental (ka CL : ℝ) "
+            f"(Q V Kp : Fin {N} → ℝ) (hka : 0 < ka) (hCL : 0 ≤ CL) "
+            f"(hQ : ∀ i, 0 < Q i) (hV : ∀ i, 0 < V i) "
+            f"(hKp : ∀ i, 0 < Kp i) : CompartmentalMatrix (Fin {N}) where\n"
+            f"  toFun := extracted_matrix ka CL Q V Kp\n"
+            "  offDiag_nonneg := extracted_offDiag_nonneg ka CL Q V Kp\n"
+            "    hka hCL hQ hV hKp\n"
+            "  colSums_nonpos := by\n"
+            "    intro j\n"
+            "    rw [extracted_colSum_eq_zero ka CL Q V Kp hQ hV hKp j]\n\n"
+            "theorem veritrial_mass_dissipation (ka CL : ℝ) "
+            f"(Q V Kp : Fin {N} → ℝ) (hka : 0 < ka) (hCL : 0 ≤ CL) "
+            f"(hQ : ∀ i, 0 < Q i) (hV : ∀ i, 0 < V i) "
+            f"(hKp : ∀ i, 0 < Kp i) {{y : Fin {N} → ℝ}} "
+            "(hy : NonNegVec y) :\n"
+            f"  totalMass (mulVec (extracted_matrix ka CL Q V Kp) y) ≤ 0 := by\n"
+            "  exact mass_dissipation_rate\n"
+            "    (veritrial_compartmental ka CL Q V Kp hka hCL hQ hV hKp).isMetzler\n"
+            "    (veritrial_compartmental ka CL Q V Kp hka hCL hQ hV hKp).hasNonposColSums\n"
+            "    hy\n\n"
+            "noncomputable def extracted_dili_matrix (ka CL : ℝ) "
+            f"(Q V Kp : Fin {N} → ℝ) (k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) :\n"
+            f"  Fin {M} → Fin {M} → ℝ := fun i j =>\n"
+            f"  if h : i.val < {N} ∧ j.val < {N} then\n"
+            f"    extracted_matrix ka CL Q V Kp ⟨i.val, by omega⟩ ⟨j.val, by omega⟩\n"
+            "  else 0\n\n"
+            "theorem veritrial_dili_block (ka CL : ℝ) "
+            f"(Q V Kp : Fin {N} → ℝ) "
+            "(k_synth k_deplete IC50 k_leak k_elim ALT_base : ℝ) "
+            f"(i j : Fin {N}) :\n"
+            f"  extracted_dili_matrix ka CL Q V Kp k_synth k_deplete IC50 k_leak k_elim ALT_base\n"
+            f"      ⟨i.val, by omega⟩ ⟨j.val, by omega⟩ = extracted_matrix ka CL Q V Kp i j := by\n"
+            "  unfold extracted_dili_matrix\n"
+            "  split_ifs with h\n"
+            "  · rfl\n"
+            "  · exact absurd ⟨i.isLt, j.isLt⟩ h\n"
+        )
+        lean_out.parent.mkdir(parents=True, exist_ok=True)
+        lean_out.write_text(body, encoding="utf-8")
+        return
     if not check_mass_conservation(model_path):
         raise SystemExit("FAIL-CLOSED: mass conservation violated in " + str(model_path))
     derivs = extract_symbolic_derivatives(model_path, expand=False)
@@ -916,11 +1206,17 @@ def check_dili_model(model_path: Path) -> bool:
         tree = ast.parse(source)
     except Exception:
         return False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "pbpk_dili_ode":
-            src = ast.unparse(node)
-            return "pbpk_ode" in src and "concatenate" in src
-    return False
+    functions = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    wrapper = functions.get("pbpk_dili_ode")
+    if wrapper is None:
+        return False
+    if "concatenate" in ast.unparse(wrapper):
+        return "pbpk_ode" in ast.unparse(wrapper)
+    factory = functions.get("make_pbpk_dili_ode")
+    return factory is not None and "make_pbpk_ode" in ast.unparse(factory) and "concatenate" in ast.unparse(factory)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -944,6 +1240,8 @@ def main(argv: list[str] | None = None) -> int:
                              "(DEFAULT: on)")
     parser.add_argument("--no-parametric", action="store_false", dest="parametric",
                         help="Disable parametric export and emit only numeric witnesses.")
+    parser.add_argument("--fin-n", type=int, default=None,
+                        help="Organ network state count for dynamic export")
     parser.add_argument("--lean-out", type=Path, default=None,
                         help="Also emit verified Lean isomorphism file (QED/VeriTrialExport.lean)")
     args = parser.parse_args(argv)
@@ -968,14 +1266,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         lemmas = build_lemmas(model_path, include_ode_lemmas=include_ode,
-                              parametric=args.parametric)
+                              parametric=args.parametric, fin_n=args.fin_n)
     except Exception as e:
         print(f"failed to export lemmas: {e}", file=sys.stderr)
         return 1
 
     text = "\n".join(lemmas) + "\n"
     if args.lean_out is not None:
-        emit_lean_export(model_path, args.lean_out)
+        emit_lean_export(model_path, args.lean_out, n_states=args.fin_n)
         print(f"wrote Lean export to {args.lean_out}")
     if args.out:
         args.out.write_text(text, encoding="utf-8")

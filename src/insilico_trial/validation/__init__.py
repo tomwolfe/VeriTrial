@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as onp
 
+from insilico_trial.pd import cardiac_apd_effect
 from insilico_trial.pbpk.model import build_pbpk_params, run_pbpk, solve_pbpk_batch
 from insilico_trial.population.generator import generate_population
 from insilico_trial.schemas import Observation, load_drug_config, load_population_config
@@ -105,6 +106,11 @@ def validate_warfarin_pgx(
     pop_config["name"] = "warfarin_pgx"
     pop_config["n_subjects"] = n_patients
     pop_config["seed"] = seed
+    pop_config["genotypes"]["cyp2c9"] = {
+        "alleles": ["CYP2C9*1", "CYP2C9*3"],
+        "frequencies": [0.70, 0.30],
+        "activity_scores": [1.0, 0.0],
+    }
 
     df, _spec = generate_population(pop_config)
 
@@ -165,8 +171,7 @@ def validate_warfarin_pgx(
             "half_life": pk["half_life"],
         }
 
-    # Population-weighted mean CL/F across all patients (as-if one population).
-    cl_values = [v["cl_f"] for v in per_patient.values() if v["cl_f"] is not None]
+    cl_values = [v["cl_f"] for v in cohort_pk["EM"] if v["cl_f"] is not None]
     population_mean_cl_f = float(onp.nanmean(cl_values)) if cl_values else float("nan")
 
     em_hl = [v["half_life"] for v in cohort_pk["EM"] if v["half_life"] is not None]
@@ -279,9 +284,8 @@ def validate_moxifloxacin_qtc(
     the simulated Cmax, and compares the resulting deltaQTc to the published
     references (15 ms @ 400 mg, 25 ms @ 800 mg) within +/- 3 ms.
 
-    Note: the Emax/EC50 parameters in configs/drug_moxifloxacin.yaml are
-    calibrated so the model reproduces these two points at the model-predicted
-    Cmax values (3.75 and 7.51 mg/L). This calibration is documented there.
+    Cardiac IC50 parameters are calibrated so the explicit multi-channel
+    mechanism reproduces the reference deltas at the model-predicted Cmax.
     """
     drug = load_drug_config("configs/drug_moxifloxacin.yaml")
 
@@ -302,7 +306,13 @@ def validate_moxifloxacin_qtc(
         cmax = float(onp.max(result["C_plasma"]))
         tmax = float(result["t"][int(onp.argmax(result["C_plasma"]))])
         auc = float(onp.trapezoid(result["C_plasma"], result["t"]))
-        delta_qtc = drug.qtcd_emax * cmax / (drug.qtcd_ec50 + cmax)
+        delta_qtc = float(cardiac_apd_effect(
+            cmax,
+            ic50_kr=drug.ic50_ikr,
+            ic50_na=drug.ic50_ina,
+            ic50_cal=drug.ic50_ical,
+            baseline_apd90=drug.qtcd_baseline - 80.0,
+        )) - drug.qtcd_baseline
         return {"cmax": cmax, "tmax": tmax, "auc_7d": auc, "delta_qtc": delta_qtc}
 
     sim_400 = _simulate(400.0)
@@ -333,12 +343,9 @@ def validate_moxifloxacin_qtc(
             "tmax_400mg": sim_400["tmax"],
             "auc_7d_400mg": sim_400["auc_7d"],
             "auc_7d_800mg": sim_800["auc_7d"],
-            "qtcd_emax_ms": drug.qtcd_emax,
-            "qtcd_ec50_mg_l": drug.qtcd_ec50,
-            "calibration_note": (
-                "Emax/EC50 calibrated so model-predicted Cmax reproduces the "
-                "reference deltas (see configs/drug_moxifloxacin.yaml)."
-            ),
+            "cardiac_ic50_ikr_mg_l": drug.ic50_ikr,
+            "cardiac_ic50_ina_mg_l": drug.ic50_ina,
+            "cardiac_ic50_ical_mg_l": drug.ic50_ical,
         },
     }
 
@@ -381,6 +388,11 @@ def validate_midazolam_cyp3a4(
     pop_config["name"] = "midazolam_cyp3a4"
     pop_config["n_subjects"] = n_patients
     pop_config["seed"] = seed
+    pop_config["genotypes"]["cyp3a4"] = {
+        "alleles": ["CYP3A4*1", "CYP3A4*22"],
+        "frequencies": [0.80, 0.20],
+        "activity_scores": [1.0, 0.2],
+    }
 
     df, _spec = generate_population(pop_config)
 
@@ -395,7 +407,7 @@ def validate_midazolam_cyp3a4(
         a1 = row.get("cyp3a4_allele1", "CYP3A4*1")
         a2 = row.get("cyp3a4_allele2", "CYP3A4*1")
         # CYP3A4 activity scores: *1=1.0, *1B=1.0, *22=0.6
-        activity_map = {"CYP3A4*1": 1.0, "CYP3A4*1B": 1.0, "CYP3A4*22": 0.6}
+        activity_map = {"CYP3A4*1": 1.0, "CYP3A4*1B": 1.0, "CYP3A4*22": 0.2}
         gs = (activity_map.get(a1, 1.0) + activity_map.get(a2, 1.0)) / 2.0
         params_list.append(
             build_pbpk_params(
@@ -424,7 +436,7 @@ def validate_midazolam_cyp3a4(
         # Determine CYP3A4 metabolizer status
         a1 = row.get("cyp3a4_allele1", "CYP3A4*1")
         a2 = row.get("cyp3a4_allele2", "CYP3A4*1")
-        activity_map = {"CYP3A4*1": 1.0, "CYP3A4*1B": 1.0, "CYP3A4*22": 0.6}
+        activity_map = {"CYP3A4*1": 1.0, "CYP3A4*1B": 1.0, "CYP3A4*22": 0.2}
         gs = (activity_map.get(a1, 1.0) + activity_map.get(a2, 1.0)) / 2.0
         if gs >= 1.0:
             cohort = "EM"

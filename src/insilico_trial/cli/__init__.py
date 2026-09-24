@@ -125,23 +125,18 @@ def cmd_demo(args: argparse.Namespace) -> int:
     rng = onp.random.default_rng(args.seed)
     t0 = datetime.now(UTC)
     result = engine.run_sad_mad(rng)
-    # Bayesian coupling: NumPyro NUTS calibration on the first cohort's
-    # plasma profile, propagated through posterior_predictive_pk into the
-    # result uncertainty block.
-    try:
-        from insilico_trial.stats import calibrate_pbpk_nuts, posterior_predictive_pk
-        _obs0 = [o for o in result.observations if o.concentration is not None][:24]
-        if _obs0:
-            import jax.numpy as _jnp
-            _t = _jnp.asarray([o.time for o in _obs0], dtype=_jnp.float64)
-            _y = _jnp.asarray([o.concentration for o in _obs0], dtype=_jnp.float64)
-            _dose = float(result.cohort_summaries[0]["dose_mg"]) if result.cohort_summaries else 10.0
-            _post = calibrate_pbpk_nuts(_t, _y, _dose, drug=engine.drug, n_samples=100)
-            engine.posterior_samples = _post
-            _pp = posterior_predictive_pk(_post, n_patients=min(8, result.n_subjects), dose_mg=_dose, t_eval=onp.linspace(0, 48, 13), drug=engine.drug)
-            result.uncertainty = {**(result.uncertainty or {}), "posterior_predictive": {k: {"mean": float(onp.asarray(v).mean()), "n_samples": int(onp.asarray(v).shape[0])} for k, v in _pp.items()}}
-    except Exception as _e:
-        result.uncertainty = {**(result.uncertainty or {}), "posterior_error": str(_e)}
+    result.uncertainty = {
+        **(result.uncertainty or {}),
+        "closed_loop_bayesian": [
+            {
+                "cohort": cohort["cohort"],
+                "prospective_toxicity_probability": cohort.get(
+                    "posterior_predictive_toxicity"
+                ),
+            }
+            for cohort in result.cohort_summaries
+        ],
+    }
     elapsed = (datetime.now(UTC) - t0).total_seconds()
 
     run_id = result.run_id

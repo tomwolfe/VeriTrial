@@ -82,6 +82,9 @@ class Drug(BaseModel):
     qtcd_emax: float = Field(default=0.0, description="Max QTc prolongation from drug effect (ms)")
     qtcd_ec50: float = Field(default=0.0, description="Plasma conc for half-max QTc effect (same units as ec50)")
     qtcd_slope: float = Field(default=0.0, description="Linear QTc-concentration slope (ms per conc unit)")
+    ic50_ikr: float = Field(default=1.0, description="Cardiac IKr half-inhibition concentration", gt=0.0)
+    ic50_ina: float = Field(default=50.0, description="Cardiac INa half-inhibition concentration", gt=0.0)
+    ic50_ical: float = Field(default=30.0, description="Cardiac ICaL half-inhibition concentration", gt=0.0)
     dili_risk: float = Field(default=0.01, description="Baseline DILI risk probability", ge=0.0, le=1.0)
 
     # DILI exposure-response: drives simulated ALT/bilirubin from liver exposure
@@ -219,6 +222,8 @@ class DoseEscalationRule(BaseModel):
     starting_dose: float = Field(..., gt=0)
     max_dose: float | None = None
     max_administered_doses: int | None = None
+    posterior_cmax_safety_bound: float = Field(default=100.0, description="Posterior Cmax safety bound (mg/L)", gt=0.0)
+    posterior_toxicity_probability: float = Field(default=0.30, description="Maximum prospective toxicity probability", ge=0.0, le=1.0)
 
 
 class DropoutSpec(BaseModel):
@@ -285,6 +290,9 @@ class Protocol(BaseModel):
     measurement_noise: MeasurementNoiseSpec
     safety: SafetyThresholds
     solver: str = Field(default="diffrax", description="PBPK ODE solver: 'diffrax' or 'fixed_step'")
+    organ_network: Literal["DEFAULT", "STANDARD_14"] = Field(
+        default="DEFAULT", description="PBPK organ network"
+    )
     dosing_events: list[DosingEvent] = Field(
         default_factory=list,
         description="Explicit dosing events for MAD; if empty, auto-generated from dose_levels + dosing_interval_days"

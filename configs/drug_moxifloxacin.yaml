@@ -18,15 +18,15 @@ drug:
   ec50: 0.5  # mg/L minimal effect conc
   emax: 0.95
   hill_coeff: 1.5
-  # QTc exposure-response (Emax model) calibrated from Démolis et al. 2000.
-  # PK and PD are calibrated independently (see docs/ASSUMPTIONS.md §7):
-  #   PK (CL/F, V/F) from Stass & Kubitza 2001 / FDA Avelox label.
-  #   PD (Emax, EC50) from hERG/IKr channel kinetics (Démolis 2000):
-  #     Cmax(400 mg) ~ 3.75 mg/L -> deltaQTc ~ 15 ms
-  #     Cmax(800 mg) ~ 7.51 mg/L -> deltaQTc ~ 25 ms
+  # Cardiac channel parameters calibrated to published QTc dose response.
+  # PK (CL/F, V/F) from Stass & Kubitza 2001 / FDA Avelox label.
+  # PD uses explicit IKr, INa, and ICaL block; no empirical QTc Emax scaling.
   qtcd_baseline: 420.0  # ms baseline QTc
-  qtcd_emax: 75.0       # max QTc prolongation (ms)
-  qtcd_ec50: 15.0       # mg/L plasma conc for half-max QTc effect
+  qtcd_emax: 75.0
+  qtcd_ec50: 15.0
+  ic50_ikr: 170.0
+  ic50_ina: 1000000000.0
+  ic50_ical: 1000000000.0
   dili_risk: 0.05
   # DILI exposure-response (explicit per drug)
   alt_baseline: 22.0

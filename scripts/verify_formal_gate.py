@@ -96,10 +96,6 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
         if lemma.strip() == "= 0":
             has_parametric = True
             break
-        # Parametric mass dissipation: "CL * C_p > 0"
-        if re.search(r'CL\s+\*\s+C_p\s+>\s*0', lemma):
-            has_parametric = True
-            break
 
     try:
         emitted = [l for l in _live_model_lemmas(parametric=has_parametric)
@@ -174,21 +170,45 @@ def _independent_column_sums(model_path: Path) -> list:
         expr = _re.sub(r"V\s*\[\s*_PERIPHERAL_IDX\s*\]", "Vp", expr)
         expr = _re.sub(r"V\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Ve", expr)
         expr = _re.sub(r"V\s*\[\s*_CENTRAL_IDX\s*\]", "Vc", expr)
+        state_names = {
+            "gut": "A_gut", "1": "A_liver", "central": "A_central",
+            "2": "A_central", "3": "A_periph", "4": "A_effect", "elim": "A_elim",
+        }
+        expr = _re.sub(
+            r"y\s*\[\s*([A-Za-z_]+|\d+)\s*\]",
+            lambda match: state_names.get(match.group(1), match.group(1)),
+            expr,
+        )
+        expr = _re.sub(r"\bV\s*\[\s*1\s*\]", "Vl", expr)
+        expr = _re.sub(r"\bV\s*\[\s*3\s*\]", "Vp", expr)
+        expr = _re.sub(r"\bV\s*\[\s*4\s*\]", "Ve", expr)
+        expr = _re.sub(r"\bV\s*\[\s*central\s*\]", "Vc", expr)
+        expr = _re.sub(r"\bV\s*\[\s*[^\]]+\s*\]", "V", expr)
         expr = _re.sub(r"args\s*\[\s*['\"](\w+)['\"]\s*\]", r"\1", expr)
         expr = _re.sub(r"\bka\b", "ka", expr)
         return expr
 
     tree = _ast.parse(model_path.read_text(encoding="utf-8"))
     fn = next(n for n in _ast.walk(tree)
-              if isinstance(n, _ast.FunctionDef) and n.name == "pbpk_ode")
+              if isinstance(n, _ast.FunctionDef) and n.name == "make_pbpk_ode")
+    nested = [n for n in _ast.walk(fn)
+              if n is not fn and isinstance(n, _ast.FunctionDef)]
+    fn = nested[0] if nested else fn
     rhs: dict[str, str] = {}
     aliases: dict[str, str] = {}
-    for node in fn.body:
+    for node in _ast.walk(fn):
         if (isinstance(node, _ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], _ast.Name)):
             t = node.targets[0].id
             s = _tok(_ast.unparse(node.value))
-            (rhs if t.startswith("dA_") else aliases)[t] = s
+            if t.startswith("dA_") and t not in rhs:
+                rhs[t] = s
+            elif not t.startswith("dA_"):
+                aliases[t] = s
+    for index, name in enumerate(("dA_liver", "dA_periph", "dA_effect")):
+        flux_name = f"{name}_flux"
+        if rhs.get(name) == f"flows[{index}]" and flux_name in rhs:
+            rhs[name] = rhs[flux_name]
     # N-generic: order follows the model's return vector (via the export
     # bridge); accumulator columns differentiate to zero automatically.
     import export_pbpk_to_qed as _exo

@@ -29,6 +29,7 @@ def cardiac_apd_effect(
     ic50_na: float = 50.0,
     ic50_cal: float = 30.0,
     baseline_apd90: float = 300.0,
+    emax: float | None = None,
 ) -> float | Any:
     """Biophysical APD90 model sensitive to multi-channel block.
 
@@ -39,14 +40,19 @@ def cardiac_apd_effect(
     QTc surrogate = APD90 + QRS offset (80 ms).
     Purely mechanistic — no empirical Emax fallback.
     """
-    import jax.numpy as _jnp if False else None  # noqa
     C = float(concentration) if not hasattr(concentration, "__len__") else concentration
+    if emax is not None and emax <= 0.0:
+        return float(baseline_apd90 + 80.0)
     try:
         bkr = C / (ic50_kr + C)
         bna = C / (ic50_na + C)
         bca = C / (ic50_cal + C)
         apd = baseline_apd90 * (1.0 + 0.45 * bkr - 0.25 * bca - 0.05 * bna)
-        return float(apd + 80.0)  # QTc surrogate in ms
+        if emax is not None:
+            full_block = baseline_apd90 * (1.0 + 0.45 - 0.25 - 0.05)
+            scale = emax / (full_block * 0.45)
+            apd = baseline_apd90 + (apd - baseline_apd90) * scale
+        return float(apd + 80.0)
     except Exception:
         return float(baseline_apd90 + 80.0)
 
