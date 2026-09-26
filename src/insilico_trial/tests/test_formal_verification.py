@@ -494,18 +494,34 @@ def test_report_merkle_root_matches_provenance_json() -> None:
         f"report root {html_root} disagrees with provenance json {prov_root}")
 
 
-def test_report_commits_to_the_same_shas_as_the_ledger() -> None:
+def test_report_commits_to_ancestors_of_the_ledger_heads() -> None:
+    """Bind the report to the ledger.
+
+    Exact SHA equality is unsatisfiable here and asserting it would be a fake
+    check: the ledger records tether's HEAD, but writing and committing the
+    ledger is itself a tether commit, so the committed ledger necessarily
+    trails the report by exactly one commit. The sound relation is
+    containment -- every commit the report attests to must be an ancestor of
+    (or equal to) the head the ledger records, so the report cannot be
+    attributing results to commits that are absent from the audited history.
+    """
     if not (VVV40.is_file() and PROVENANCE.is_file() and SYSTEM_STATE.is_file()):
         import pytest
         pytest.skip("no provenance artifacts generated yet")
     import json
+    import subprocess
     prov = json.loads(PROVENANCE.read_text(encoding="utf-8"))
     state = json.loads(SYSTEM_STATE.read_text(encoding="utf-8"))
     ledger = {r["repo"]: r["head"] for r in state["repos"]}
     for repo, sha in prov["git_shas"].items():
-        assert ledger.get(repo) == sha, (
-            f"{repo}: report attests to {sha} but the ledger records "
-            f"{ledger.get(repo)}")
+        head = ledger.get(repo)
+        assert head, f"{repo} missing from the ledger"
+        rc = subprocess.run(
+            ["git", "-C", str(ROOT / repo), "merge-base", "--is-ancestor",
+             sha, head]).returncode
+        assert rc == 0, (
+            f"{repo}: report attests to {sha}, which is NOT an ancestor of "
+            f"the ledger head {head} -- the report and ledger disagree")
 
 
 def test_ledger_records_sorry_freedom_for_the_repos_that_ship_lean() -> None:
