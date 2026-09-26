@@ -220,6 +220,25 @@ def cmd_validate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Seal the provenance chain. build_regulatory_provenance() folds the
+    # benchmark metrics, the QED proof traces, the git SHAs and the Lean
+    # digests into a single merkle root and injects it into the V&V report as
+    # <meta name="merkle-root">. It had no call sites at all, so the report
+    # shipped with no provenance root and the chain was decorative. Called
+    # here, after the fail-closed formal gate has passed, so the root only
+    # ever attests to a validated run.
+    try:
+        from insilico_trial.validation import build_regulatory_provenance
+
+        prov = build_regulatory_provenance(
+            output_path=str(out_dir / "validation" / "regulatory_provenance.json"),
+            vvv40_path=str(out_dir / "vvv40_report.html"),
+        )
+        print(f"Provenance merkle root: {prov['merkle_root']}")
+    except Exception as _e:  # noqa: BLE001 - provenance must not mask results
+        print(f"WARNING: could not seal provenance chain: {_e}",
+              file=sys.stderr)
     return 0
 
 
