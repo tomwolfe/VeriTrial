@@ -521,3 +521,26 @@ def test_ledger_records_sorry_freedom_for_the_repos_that_ship_lean() -> None:
     # A control-plane repo with no Lean must say so honestly rather than
     # claiming a soundness property of nothing.
     assert by_repo["tether"]["sorry_free"] in (True, False, "n/a")
+
+
+def test_mathlib_env_override_is_honoured(monkeypatch) -> None:
+    """HAS_MATHLIB/MATHLIB is the documented first check in _detect_mathlib_env.
+
+    It is the branch the tri-repo gate actually takes in a clean room with
+    Mathlib present, and it had no test, so flipping its `return True` to
+    `return False` survived: with the variables unset the branch is never
+    entered and the mutation is invisible.
+    """
+    import importlib.util
+    from pathlib import Path as _P
+    spec = importlib.util.spec_from_file_location(
+        "_gate", _P(__file__).resolve().parents[3] / "scripts" / "verify_formal_gate.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    monkeypatch.setenv("HAS_MATHLIB", "1")
+    assert mod._detect_mathlib_env() is True
+    monkeypatch.delenv("HAS_MATHLIB")
+    monkeypatch.setenv("MATHLIB", "1")
+    assert mod._detect_mathlib_env() is True
