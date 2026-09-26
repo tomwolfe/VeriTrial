@@ -450,3 +450,74 @@ def test_column_sums_still_cover_every_state() -> None:
     central = max(cols, key=len)
     for token in ("Ql/Vc", "Qp/Vc", "Qe/Vc", "CL/Vc", "Qe", "CL +"):
         assert token in central, f"central column lost {token}: {central}"
+
+
+# --- Cross-repo provenance chain -----------------------------------------
+#
+# The HTML report's merkle root and tether/SYSTEM_STATE.json's merkle root
+# are DIFFERENT quantities over different data: the former chains six
+# validation leaves, the latter hashes the three repo audit records. They can
+# never be equal, and asserting equality would be a fake check. The real
+# binding is that the report commits to the same three git SHAs the ledger
+# records -- that is what makes the report attributable to specific commits.
+
+ROOT = Path(__file__).resolve().parents[3].parent
+SYSTEM_STATE = ROOT / "tether" / "SYSTEM_STATE.json"
+VVV40 = ROOT / "VeriTrial" / "output" / "vvv40_report.html"
+PROVENANCE = ROOT / "VeriTrial" / "output" / "validation" / "regulatory_provenance.json"
+
+
+def _meta_merkle(html: str) -> str | None:
+    import re
+    m = re.search(r'<meta name="merkle-root" content="([0-9a-f]{64})">', html)
+    return m.group(1) if m else None
+
+
+def test_vvv40_report_carries_a_merkle_root() -> None:
+    if not VVV40.is_file():
+        import pytest
+        pytest.skip("no V&V report generated yet")
+    root = _meta_merkle(VVV40.read_text(encoding="utf-8"))
+    assert root is not None, (
+        "vvv40_report.html has no <meta name=\"merkle-root\">: the "
+        "provenance chain was never sealed")
+
+
+def test_report_merkle_root_matches_provenance_json() -> None:
+    if not (VVV40.is_file() and PROVENANCE.is_file()):
+        import pytest
+        pytest.skip("no provenance artifacts generated yet")
+    import json
+    html_root = _meta_merkle(VVV40.read_text(encoding="utf-8"))
+    prov_root = json.loads(PROVENANCE.read_text(encoding="utf-8"))["merkle_root"]
+    assert html_root == prov_root, (
+        f"report root {html_root} disagrees with provenance json {prov_root}")
+
+
+def test_report_commits_to_the_same_shas_as_the_ledger() -> None:
+    if not (VVV40.is_file() and PROVENANCE.is_file() and SYSTEM_STATE.is_file()):
+        import pytest
+        pytest.skip("no provenance artifacts generated yet")
+    import json
+    prov = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+    state = json.loads(SYSTEM_STATE.read_text(encoding="utf-8"))
+    ledger = {r["repo"]: r["head"] for r in state["repos"]}
+    for repo, sha in prov["git_shas"].items():
+        assert ledger.get(repo) == sha, (
+            f"{repo}: report attests to {sha} but the ledger records "
+            f"{ledger.get(repo)}")
+
+
+def test_ledger_records_sorry_freedom_for_the_repos_that_ship_lean() -> None:
+    if not SYSTEM_STATE.is_file():
+        import pytest
+        pytest.skip("no ledger yet")
+    import json
+    state = json.loads(SYSTEM_STATE.read_text(encoding="utf-8"))
+    by_repo = {r["repo"]: r for r in state["repos"]}
+    for repo in ("QED", "VeriTrial"):
+        assert by_repo[repo]["sorry_free"] is True, (
+            f"{repo} must be audited sorry-free, not 'unknown'")
+    # A control-plane repo with no Lean must say so honestly rather than
+    # claiming a soundness property of nothing.
+    assert by_repo["tether"]["sorry_free"] in (True, False, "n/a")
