@@ -33,17 +33,19 @@ from insilico_trial.pbpk.model import (
 )
 
 
-def calculate_max_stable_dt(params: dict[str, Any],
-                            organ_network: Any = None) -> float:
-    """Dynamic Metzler positivity bound derived from matrix invariants.
+def _jacobian_diagonal(params: dict[str, Any], spec: dict[str, Any]) -> dict[int, float]:
+    """Diagonal of ``d(ode)/d(y)`` assembled from the organ network spec.
 
-    Δt_max = min(Vc/(sum_perfused_Q + CL), 1/ka, min_i Vi*Kp_i/Qi) over all
-    perfused tissues. Indices resolve from *organ_network* (default: the
-    legacy 6-state layout, identical to previous behavior).
+    This is the Metzler generator the forward-Euler positivity theorem is
+    stated about: ``orthant_invariance_fwdEuler`` requires
+    ``dt * |K_jj| <= 1`` for every state ``j``, so the admissible step is
+    ``min_j 1/|K_jj|``.  Building the diagonal from the network (rather than
+    hardcoding the six-organ layout) is what keeps the bound honest for an
+    N-state system, and assembling it per-index is what keeps it honest if the
+    ODE's algebra ever changes -- ``test_fixed_step.py`` pins every entry
+    against ``jax.jacfwd`` on the real ODE.
     """
     import numpy as _np
-
-    from insilico_trial.pbpk.model import organ_indices
 
     def _get(arr: Any, idx: int) -> float:
         try:
@@ -54,10 +56,53 @@ def calculate_max_stable_dt(params: dict[str, Any],
     Q = params.get("Q")
     V = params.get("V")
     Kp = params.get("Kp")
+    CL = float(params.get("CL", 0.0))
+    ka = float(params.get("ka", 1.0))
+
+    gut, central, elim = int(spec["gut"]), int(spec["central"]), int(spec["elim"])
+    perfused = [int(k) for k in spec["perfused"]]
+    Vc = _get(V, central)
+
+    diag: dict[int, float] = {}
+    diag[gut] = -ka                                    # d(A_gut)/dA_gut
+    for k in perfused:                                 # d(A_k)/dA_k
+        vi, ki = _get(V, k), _get(Kp, k)
+        diag[k] = -_get(Q, k) / (vi * ki)
+    q_sum = sum(_get(Q, k) for k in perfused)
+    diag[central] = -(q_sum + CL) / Vc                  # d(A_central)/dA_central
+    # d(A_elim) = CL * y_central / V_central does not depend on A_elim, so
+    # the eliminated compartment's own diagonal is 0 and 1/|K_jj| = inf: it
+    # imposes no step-size constraint. (CL/Vc is the OFF-diagonal entry
+    # J[elim, central], not a diagonal term.)
+    diag[elim] = 0.0
+    return diag
+
+
+def calculate_max_stable_dt(params: dict[str, Any],
+                            organ_network: Any = None) -> float:
+    """Δt_max from the Metzler Jacobian diagonal: ``min_j 1/|K_jj|``.
+
+    This is exactly the bound proved in QED ``Compartmental``:
+    ``orthant_invariance_fwdEuler`` sends the non-negative orthant into
+    itself whenever ``dt * |K_jj| ≤ 1`` for all ``j``, so no concentration is
+    ever clamped and non-negativity is a consequence of the step size alone.
+    ``K_jj`` is read from the ODE's own Jacobian for *organ_network*, so the
+    bound tracks the N-state model rather than a constant or the legacy
+    six-organ shape.
+    """
+    import numpy as _np
+
+    from insilico_trial.pbpk.model import organ_indices
+
+    Q = params.get("Q")
+    V = params.get("V")
+    Kp = params.get("Kp")
     try:
-        CL = float(params.get("CL", 0.0))
-        ka = float(params.get("ka", 1.0))
+        float(params.get("CL", 0.0))
+        float(params.get("ka", 1.0))
     except TypeError:
+        return 0.01
+    if Q is None or V is None or Kp is None:
         return 0.01
     n = int(_np.asarray(Q).ravel().shape[0])
     if organ_network is None:
@@ -68,16 +113,14 @@ def calculate_max_stable_dt(params: dict[str, Any],
                 "n_states": n}
     else:
         spec = organ_indices(tuple(organ_network))
-    central = int(spec["central"])
-    perfused = [int(k) for k in spec["perfused"]]
-    Vc = _get(V, central)
-    q_sum = sum(_get(Q, k) for k in perfused)
-    cands = [Vc / (q_sum + CL), 1.0 / ka]
-    for k in perfused:
-        qi, vi, ki = _get(Q, k), _get(V, k), _get(Kp, k)
-        if qi > 0 and vi > 0 and ki > 0:
-            cands.append(vi * ki / qi)
-    return float(min(c for c in cands if c > 0))
+
+    diag = _jacobian_diagonal(params, spec)
+    # 1/|K_jj|; entries with K_jj = 0 impose no constraint (1/0 = inf).
+    cands = [1.0 / abs(v) for v in diag.values() if v != 0.0]
+    positive = [c for c in cands if c > 0 and c == c]  # drop 0, NaN
+    if not positive:
+        return 0.01
+    return float(min(positive))
 
 
 def assert_dt_stable(dt: float, params: dict[str, Any] | None = None) -> None:

@@ -136,3 +136,100 @@ def test_fixed_step_batch_shape():
     # Also verify they're close
     max_rel_diff = onp.max(onp.abs(C_batch_fixed - C_batch_diffrax) / (C_batch_diffrax + 1e-9))
     assert max_rel_diff < 0.05, f"Max relative difference in batch {max_rel_diff:.4f} >= 5%"
+
+
+# --- dt bound is read from the ODE's own Jacobian, not a constant ---------
+#
+# Non-negativity in this codebase is a PROVED consequence of the step size
+# (QED Compartmental.orthant_invariance_fwdEuler: dt * |K_jj| <= 1 for all j),
+# not a clamp. That only holds if the bound is derived from the Jacobian the
+# solver actually integrates. These tests pin the assembled diagonal against
+# jax.jacfwd on the real ODE, so the two can never drift apart.
+
+def _jacobian_diag_for(network: tuple[str, ...], params: dict[str, Any]):
+    import jax
+    import jax.numpy as jnp
+    from insilico_trial.pbpk.model import make_pbpk_ode, organ_indices
+
+    spec = organ_indices(network)
+    n = int(spec["n_states"])
+    ode = make_pbpk_ode(network)
+    args = {k: jnp.asarray(params[k]) for k in ("Q", "V", "Kp")}
+    args["CL"] = float(params["CL"])
+    args["ka"] = float(params["ka"])
+    y = jnp.ones(n, dtype=jnp.float64) * 0.5
+    J = jax.jacfwd(lambda yy: ode(0.0, yy, args))(y)
+    return spec, onp.asarray(J)
+
+
+def test_jacobian_diagonal_matches_autodiff_for_default_network() -> None:
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK, organ_indices
+
+    params = _build_warfarin_params()[0]
+    spec, J = _jacobian_diag_for(DEFAULT_ORGAN_NETWORK, params)
+    ours = _jacobian_diagonal(params, organ_indices(DEFAULT_ORGAN_NETWORK))
+    for j in range(len(ours)):
+        assert abs(ours[j] - J[j, j]) < 1e-9, (
+            f"state {j}: assembled {ours[j]} vs autodiff {J[j, j]}")
+
+
+def test_jacobian_diagonal_matches_autodiff_for_14_organ_network() -> None:
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+    from insilico_trial.pbpk.model import STANDARD_14_ORGAN_NETWORK, organ_indices
+
+    params = _build_warfarin_params()[0]
+    spec = organ_indices(STANDARD_14_ORGAN_NETWORK)
+    n = int(spec["n_states"])
+    params14 = dict(params)
+    for key in ("Q", "V", "Kp"):
+        base = onp.asarray(params[key], dtype=onp.float64).ravel()
+        params14[key] = onp.concatenate([base, onp.linspace(0.5, 2.0, n - len(base))])
+    _, J = _jacobian_diag_for(STANDARD_14_ORGAN_NETWORK, params14)
+    ours = _jacobian_diagonal(params14, spec)
+    assert len(ours) == n
+    for j in range(n):
+        assert abs(ours[j] - J[j, j]) < 1e-9, (
+            f"state {j}: assembled {ours[j]} vs autodiff {J[j, j]}")
+
+
+def test_dt_bound_is_the_jacobian_diagonal_minimum() -> None:
+    from insilico_trial.pbpk.fixed_step import (
+        _jacobian_diagonal,
+        calculate_max_stable_dt,
+    )
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK, organ_indices
+
+    params = _build_warfarin_params()[0]
+    spec = organ_indices(DEFAULT_ORGAN_NETWORK)
+    diag = _jacobian_diagonal(params, spec)
+    expected = min(1.0 / abs(v) for v in diag.values() if v != 0.0)
+    got = calculate_max_stable_dt(params)
+    assert abs(got - expected) <= 1e-12 * max(1.0, abs(expected))
+
+
+def test_dt_bound_tracks_network_not_a_constant() -> None:
+    # A stiffer perfused compartment must tighten the bound; if this returns a
+    # fixed number the "dynamic" claim is false and clamping would be hiding.
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK
+
+    params = _build_warfarin_params()[0]
+    base = calculate_max_stable_dt(params)
+    stiffer = dict(params)
+    stiffer["Q"] = onp.asarray(params["Q"], dtype=onp.float64) * 50.0
+    assert calculate_max_stable_dt(stiffer) < base
+
+
+def test_dt_violating_jacobian_bound_fails_closed() -> None:
+    # The physical-bound invariant: exceeding dt <= min_j 1/|K_jj| must raise,
+    # not silently clamp. Proved bound, enforced at runtime.
+    import pytest
+    from insilico_trial.pbpk.fixed_step import assert_dt_stable
+
+    params = _build_warfarin_params()[0]
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    bound = calculate_max_stable_dt(params)
+    assert_dt_stable(0.9 * bound, params)
+    with pytest.raises(ValueError, match="exceeds stability bound"):
+        assert_dt_stable(1.5 * bound, params)

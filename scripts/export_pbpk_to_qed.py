@@ -194,14 +194,27 @@ def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True) -> li
         for index in spec["perfused"]
     }
     lemmas = [
-        f"Q_{names[index]} / (V_{names[index]} * Kp_{names[index]}) >= 0"
+        f"Q_{names[index]} / (V_{names[index]} * Kp_{names[index]}) > 0"
         for index in perfused
     ]
     lemmas.extend(
         f"(Q_{names[index]} / (V_central * Kp_{names[index]})) * A_central >= 0"
         for index in perfused
     )
+    # The PRIMARY theorem: the parametric sum of every compartment derivative.
+    # This is the one lemma that is not a componentwise inequality -- it is
+    # the algebraic mass-conservation identity, in Q_i/V_i/Kp_i, that QED
+    # discharges with field_simp/ring. It used to be dropped entirely on the
+    # `make_pbpk_ode` fast path (build_lemmas returned before reaching it),
+    # which left the gate asserting only sign conditions and no conservation
+    # at all. Guarded: a model that does not cancel must fail the export.
+    if parametric:
+        lemmas.append(build_parametric_sum_lemma(model_path))
     lemmas.append("CL * C_p > 0")
+    lemmas.extend(
+        f"Q_{names[index]} / (V_{names[index]} * Kp_{names[index]}) >= 0"
+        for index in perfused
+    )
     if parametric:
         lemmas.append("(ka_rate) + (-ka_rate) = 0")
         lemmas.extend(extract_column_sum_lemmas(model_path))
@@ -388,6 +401,39 @@ def extract_symbolic_derivatives(model_path: Path,
 
     if not expand:
         return derivs
+
+    # Resolve `flows[<i>]` into the expression actually stored there.
+    #
+    # The six-organ fast path builds `flows` from the named *_flux variables
+    # and then only ever references it positionally (`dA_liver = flows[0]`,
+    # `- (flows[0])` inside dA_central). Without this substitution the
+    # parametric mass-conservation sum comes out as
+    #     `... + flows[0] - (flows[0]) + flows[1] - (flows[1]) ... = 0`
+    # whose terms cancel *as opaque names* and therefore prove nothing -- a
+    # closed identity, i.e. exactly the verification theater this gate exists
+    # to prevent. Substituting the real perfusion term makes the sum an
+    # identity in Q_i/V_i/Kp_i that `field_simp`/`ring` must actually verify.
+    flows_values: dict[str, str] = {}
+    for node in ast.walk(pbpk_ode):
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        name = node.targets[0].id
+        if name.endswith("_flux") and name not in flows_values:
+            flows_values[name] = ast.unparse(node.value)
+
+    def _resolve_flows(expr: str) -> str:
+        if "flows[" not in expr or not flows_values:
+            return expr
+        # flows is built in perfused order, so position i selects the i-th
+        # *_flux assignment in source order.
+        ordered = list(flows_values.values())
+        for i, value in enumerate(ordered):
+            expr = expr.replace(f"flows[{i}]", f"({value})")
+        return expr
+
+    derivs = {name: _resolve_flows(rhs) for name, rhs in derivs.items()}
 
     # Recursively expand intermediate derivative references so that each
     # RHS is expressed only in terms of state variables and parameters.

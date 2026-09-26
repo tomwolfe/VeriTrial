@@ -374,3 +374,79 @@ def test_crosscheck_rejects_zeroed_column_sums(tmp_path: Path) -> None:
     zeroed = ["(0) + (0) = 0"] * 6
     with pytest.raises(SystemExit):
         gate._check_column_sum_crosscheck(zeroed, model_path)
+
+
+# --- The exported lemma set is the primary mass-conservation theorem -------
+#
+# Regression guards for two silent ways this gate used to degrade to theater:
+#   1. `build_lemmas` short-circuited on the `make_pbpk_ode` fast path and
+#      returned before `build_parametric_sum_lemma`, so the ONE lemma that is
+#      an actual conservation identity was never emitted.
+#   2. the sum itself came out as `... + flows[0] - (flows[0]) ... = 0`, whose
+#      terms cancel as opaque names and prove nothing.
+
+MODEL_PATH = Path(__file__).resolve().parents[2] / "insilico_trial" / "pbpk" / "model.py"
+
+
+def _dynamic_lemmas() -> list[str]:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_exp", Path(__file__).resolve().parents[3] / "scripts" / "export_pbpk_to_qed.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod._dynamic_lemmas(MODEL_PATH, 6, True)
+
+
+def test_exported_lemma_set_has_eighteen_lemmas() -> None:
+    lemmas = _dynamic_lemmas()
+    assert len(lemmas) == 18, (
+        f"expected the full 18-lemma set, got {len(lemmas)}: {lemmas}")
+
+
+def test_parametric_mass_conservation_sum_is_emitted() -> None:
+    # The primary theorem: an actual algebraic identity, not a sign condition.
+    lemmas = _dynamic_lemmas()
+    sums = [x for x in lemmas if x.endswith("= 0") and "A_gut" in x]
+    assert sums, "the parametric mass-conservation sum is missing"
+    assert any("- CL * C_p" in s and "+ CL * C_p" in s for s in sums), (
+        "mass conservation must appear as clearance in and out")
+
+
+def test_no_emitted_lemma_contains_an_unresolved_flows_reference() -> None:
+    # Non-vacuity: `flows[i]` is an opaque Python list index. A sum that
+    # cancels flows[0] against (flows[0]) is a tautology, not a proof.
+    for lemma in _dynamic_lemmas():
+        assert "flows[" not in lemma, f"unresolved flows reference: {lemma}"
+
+
+def test_parametric_sum_is_an_identity_in_real_parameters() -> None:
+    # Every term must be expressed in compartment-specific Q/V/Kp, so QED's
+    # field_simp/ring has actual algebra to do.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_exp2", Path(__file__).resolve().parents[3] / "scripts" / "export_pbpk_to_qed.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    s = mod.build_parametric_sum_lemma(MODEL_PATH)
+    for token in ("Q_liver", "Q_periph", "Q_effect",
+                  "Kp_liver", "Kp_periph", "Kp_effect", "C_liver"):
+        assert token in s, f"parametric sum lost {token}"
+    assert "flows[" not in s
+
+
+def test_column_sums_still_cover_every_state() -> None:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_exp3", Path(__file__).resolve().parents[3] / "scripts" / "export_pbpk_to_qed.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    cols = mod.extract_column_sum_lemmas(MODEL_PATH)
+    assert len(cols) == 6
+    # The central column is the non-trivial one: it must still contain all
+    # five Jacobian entries, not just the two that used to survive.
+    central = max(cols, key=len)
+    for token in ("Ql/Vc", "Qp/Vc", "Qe/Vc", "CL/Vc", "Qe", "CL +"):
+        assert token in central, f"central column lost {token}: {central}"
