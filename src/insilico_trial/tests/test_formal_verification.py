@@ -404,10 +404,34 @@ def _dynamic_lemmas() -> list[str]:
     return cast("list[str]", mod._dynamic_lemmas(MODEL_PATH, 6, True))
 
 
-def test_exported_lemma_set_has_eighteen_lemmas() -> None:
+def test_exported_lemma_set_is_nine_theorems_with_no_restatements() -> None:
+    # Nine parametric theorems: Metzler off-diagonal positivity for EACH of
+    # the three perfused tissues, Lemma 4 (boundary inflow, likewise one per
+    # tissue), the Jacobian term-accounting certificate, the parametric
+    # mass-conservation sum, and Lemma 5 (mass dissipation).
+    #
+    # The count is deliberately per-tissue, not a family witness: `liver`,
+    # `periph` and `effect` are three instances of one theorem, and collapsing
+    # them to one leaves two tissues with no certificate of their own.
+    # De-duplication is of *restatements* -- no reflexive `Q/(V*Kp) >= 0`
+    # duplicates of the strict Metzler lemmas, no `(ka_rate) + (-ka_rate) = 0`
+    # tautology, no `0 = 0` -- never of coverage.
     lemmas = _dynamic_lemmas()
-    assert len(lemmas) == 18, (
-        f"expected the full 18-lemma set, got {len(lemmas)}: {lemmas}")
+    assert len(lemmas) == 9, (
+        f"expected the nine parametric theorems, got {len(lemmas)}: {lemmas}")
+    assert all(lemma.strip() and "\n" not in lemma for lemma in lemmas)
+    assert not any(lemma.strip() == "0 = 0" for lemma in lemmas)
+    # One Metzler certificate per tissue, distinct, no duplicates standing in.
+    metzler = [x for x in lemmas if x.endswith(") > 0") and "Kp_" in x]
+    assert len(metzler) == 3, (
+        f"expected a Metzler certificate per perfused tissue: {metzler}")
+    assert len(set(metzler)) == 3
+    # Lemma 4 stays PER TISSUE: the gate checks that every perfused
+    # compartment is covered by its own non-negative inflow invariant, which
+    # a single summed line cannot certify.
+    inflows = [x for x in lemmas if "A_central >= 0" in x]
+    assert len(inflows) == 3, (
+        f"expected one boundary inflow invariant per perfused tissue: {inflows}")
 
 
 def test_parametric_mass_conservation_sum_is_emitted() -> None:

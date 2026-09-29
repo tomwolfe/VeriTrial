@@ -101,15 +101,19 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     try:
         emitted = [l for l in _live_model_lemmas(parametric=has_parametric)
                    if not l.strip().startswith("--")]
-        # Certify structural column-sum + theorem path through QED's no-sorry gate.
+        # Certify the structural conservation path through QED's no-sorry
+        # gate: the file must carry the Jacobian term-accounting certificate
+        # and the parametric mass-conservation sum re-derived from the LIVE
+        # model, not just whatever the bridge happens to emit.
         import export_pbpk_to_qed as _ex
         from pathlib import Path as _P
         _mp = _P(__file__).resolve().parents[1] / "src" / "insilico_trial" / "pbpk" / "model.py"
-        _sys = [l for l in _ex.extract_system_matrix_lemmas(_mp)
-                if not l.strip().startswith("--")]
-        for _l in _sys:
-            assert "sorry" not in _l and "sorryAx" not in _l, f"sorry in system lemma {_l!r}"
-            assert _l in emitted, f"system matrix lemma not in gate set: {_l!r}"
+        _required = [_ex.build_column_sum_certificate(_mp)]
+        if has_parametric:
+            _required.append(_ex.build_parametric_sum_lemma(_mp))
+        for _l in _required:
+            assert "sorry" not in _l and "sorryAx" not in _l, f"sorry in conservation lemma {_l!r}"
+            assert _l in emitted, f"conservation lemma not in gate set: {_l!r}"
     except Exception as e:
         print(
             "FORMAL GATE FAILED (fail-closed): could not derive required "
@@ -420,26 +424,35 @@ def _is_trivial_lemma(lemma: str) -> bool:
     return False
 
 
-def _is_metzler_positivity(lemma: str) -> bool:
-    """Generic positivity: ``E >= 0`` with a division (off-diagonal certificate).
+def _metzler_positivity_tissue(lemma: str) -> str | None:
+    """The perfused tissue whose Metzler off-diagonal this lemma certifies.
 
-    Structural regex check first (covers both >= 0 and > 0 forms), with the
-    QED ``is_positivity`` parser as a best-effort secondary check.
+    A Metzler certificate for tissue ``c`` is the *per-tissue partition
+    coefficient* ``Q_c / (V_c * Kp_c) > 0``: its own perfusion, its own
+    volume, its own partition. Returning the subscript (rather than a bool)
+    is what lets the caller demand one per tissue -- a count would be
+    satisfied by repeating one tissue's lemma, and a bare "has a division"
+    test is satisfied by the boundary-flow and parametric-sum lemmas
+    entirely, which is how two of three Metzler lemmas could go missing
+    without the gate noticing.
+
+    Returns ``None`` for any other positivity form.
     """
-    if re.search(r'/\s*\(?\s*[A-Za-z_]\w*.*[>=]?\s*0', lemma):
-        return True
-    try:
-        scripts_dir = _veritrial_root() / "scripts"
-        qed = qed_dir()
-        if str(qed) not in sys.path:
-            sys.path.insert(0, str(qed))
-        from parser import parse_equation, is_positivity  # type: ignore[import-not-found]
-        node, _ = parse_equation(lemma)
-        if node is not None:
-            return bool(is_positivity(node))
-    except Exception:
-        pass
-    return False
+    m = re.search(
+        r'Q_(\w+)\s*/\s*\(\s*V_(\w+)\s*\*\s*Kp_(\w+)\s*\)\s*>\s*0\s*$',
+        lemma.strip(),
+    )
+    if not m:
+        return None
+    q, v, kp = m.groups()
+    if q != v or q != kp:
+        return None  # e.g. a boundary-inflow (Q_c/(V_central*Kp_c)) form
+    return q
+
+
+def _is_metzler_positivity(lemma: str) -> bool:
+    """True iff this lemma is a per-tissue Metzler off-diagonal certificate."""
+    return _metzler_positivity_tissue(lemma) is not None
 
 
 def _is_boundary_flow_positivity(lemma: str) -> bool:
@@ -453,7 +466,7 @@ def _is_boundary_flow_positivity(lemma: str) -> bool:
         qed = qed_dir()
         if str(qed) not in sys.path:
             sys.path.insert(0, str(qed))
-        from parser import parse_equation, is_nonneg_product
+        from parser import parse_equation, is_nonneg_product  # type: ignore[import-not-found]
         node, _ = parse_equation(lemma)
         if node is not None:
             return bool(is_nonneg_product(node))
@@ -691,7 +704,12 @@ def main(argv: list[str] | None = None) -> int:
     # each perfused compartment.  These encode the dynamical invariant that
     # the Jacobian of the PBPK ODE is a Metzler matrix, which is required
     # for positivity preservation.  Their absence is a fail-closed error.
-    metzler_lemmas = [lm for lm in file_lemmas if _is_metzler_positivity(lm)]
+    metzler_tissues = {
+        t for t in (_metzler_positivity_tissue(lm) for lm in file_lemmas) if t
+    }
+    # extract_perfused_compartments reports state names ("A_liver"); the
+    # lemmas are written in organ names ("liver"). Compare on the stem.
+    metzler_tissues = {t[2:] if t.startswith("A_") else t for t in metzler_tissues}
     try:
         import export_pbpk_to_qed as _ex2
         _perfused = _ex2.extract_perfused_compartments(
@@ -700,23 +718,39 @@ def main(argv: list[str] | None = None) -> int:
                     if c not in ("A_gut", "A_central", "A_elim")]
     except Exception:
         perfused = ["c1", "c2", "c3"]
-    if len(metzler_lemmas) < len(perfused):
+    # Per tissue, not a count: Q_c/(V_c*Kp_c) > 0 is what certifies that
+    # tissue's off-diagonal is Metzler, and a count is satisfiable by
+    # repeating one tissue's lemma.
+    metzler_uncovered = [
+        c for c in perfused
+        if (c[2:] if c.startswith("A_") else c) not in metzler_tissues
+    ]
+    if metzler_uncovered:
         print(
-            "FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas "
-            f"are REQUIRED but only {len(metzler_lemmas)} found "
-            f"(expected >= {len(perfused)} for perfused compartments).",
+            "FORMAL GATE FAILED (fail-closed): Metzler positivity lemmas are "
+            f"REQUIRED but perfused compartment(s) {metzler_uncovered} have no "
+            "Q_c / (V_c * Kp_c) > 0 certificate "
+            f"(certified: {sorted(metzler_tissues)}).",
             file=sys.stderr,
         )
         return 1
 
-    # Boundary flow positivity enforcement (Lemma 4): each perfused
-    # compartment must have a non-negative inflow invariant.
+    # Boundary flow positivity enforcement (Lemma 4): every perfused
+    # compartment must be covered by a non-negative inflow invariant. The
+    # bridge states Lemma 4 as ONE summed theorem over the perfused tissues,
+    # so coverage is per tissue (the tissue's own perfusion flow must appear
+    # in a non-negative-flow lemma) rather than a raw lemma count -- a count
+    # would be satisfied by repeating a single tissue's invariant.
     bflow_lemmas = [lm for lm in file_lemmas if _is_boundary_flow_positivity(lm)]
-    if len(bflow_lemmas) < len(perfused):
+    uncovered = [c for c in perfused
+                 if not any(f"Q_{c[2:] if c.startswith('A_') else c}" in lm
+                            for lm in bflow_lemmas)]
+    if uncovered:
         print(
             "FORMAL GATE FAILED (fail-closed): boundary flow positivity "
-            f"lemmas (Lemma 4) REQUIRED but only {len(bflow_lemmas)} found "
-            f"(expected >= {len(perfused)} for perfused compartments).",
+            f"lemmas (Lemma 4) REQUIRED but perfused compartment(s) "
+            f"{uncovered} are not covered by any of the {len(bflow_lemmas)} "
+            "non-negative inflow lemma(s) in the gate set.",
             file=sys.stderr,
         )
         return 1

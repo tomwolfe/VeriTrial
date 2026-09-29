@@ -230,6 +230,40 @@ def test_fast_sym_diff_identities() -> None:
     assert ast.dump(ex._sym_diff(_expr("x + y"), "x")) != zero
 
 
+def test_fast_metzler_coverage_is_per_tissue_not_a_count() -> None:
+    """The gate must name the tissue a lemma certifies, not just count lemmas.
+
+    A count is satisfiable by repeating one tissue's lemma, and a "has a
+    division" test is satisfied by the boundary-flow and parametric-sum
+    lemmas entirely -- so two of three Metzler certificates could go missing
+    with the gate still green. These three together are the teeth.
+    """
+    # Only the per-tissue partition coefficient certifies Metzler positivity.
+    assert gate._metzler_positivity_tissue(
+        "Q_liver / (V_liver * Kp_liver) > 0") == "liver"
+    # A boundary-inflow lemma shares the shape but is a different claim:
+    # its volume is the central compartment, not the tissue's.
+    assert gate._metzler_positivity_tissue(
+        "(Q_liver / (V_central * Kp_liver)) * A_central >= 0") is None
+    # Nor is the mass sum, however many divisions it contains.
+    assert gate._metzler_positivity_tissue(
+        "(Ql/Vc) + (-(CL + Ql)/Vc) + (CL/Vc) = 0") is None
+
+    # And the real export covers every perfused compartment, one each.
+    lemmas = ex.build_lemmas(MODEL)
+    tissues = [t for t in (gate._metzler_positivity_tissue(lm) for lm in lemmas) if t]
+    perfused = [
+        c for c in ex.extract_perfused_compartments(
+            MODEL, ex.extract_state_variables(MODEL))
+        if c not in ("A_gut", "A_central", "A_elim")
+    ]
+    uncovered = [c for c in perfused
+                 if (c[2:] if c.startswith("A_") else c) not in tissues]
+    assert not uncovered, f"perfused tissue(s) with no Metzler certificate: {uncovered}"
+    # One each, not one plus duplicates: duplicates would pass a count check.
+    assert len(tissues) == len(set(tissues)) == len(perfused)
+
+
 def test_fast_gate_sorry_detection() -> None:
     assert gate._is_sorry_placeholder("theorem t : sorry") is True
     assert gate._is_sorry_placeholder("uses sorryAx here") is True
@@ -370,8 +404,11 @@ def test_fast_main_default_run_mentions_parametric(tmp_path: Path, capsys) -> No
     assert ex.main(["--model", str(MODEL), "--out", str(out)]) == 0
     text = out.read_text()
     assert "ka_rate" in text
+    # --out is silent: the file is the artifact, and the enforced gate counts
+    # the exported theorems off the caller's own stdout.
     captured = capsys.readouterr()
-    assert "0 metadata comment" in captured.out
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_fast_main_export_failure_returns_one(tmp_path: Path, monkeypatch) -> None:
