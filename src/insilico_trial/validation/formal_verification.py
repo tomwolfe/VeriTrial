@@ -109,6 +109,12 @@ def _lean_code_sha256(lean_code: str) -> str:
     return hashlib.sha256(lean_code.encode("utf-8")).hexdigest()
 
 
+# Attempt keys that hold raw prover output. `attempts` is serialized into the
+# audit trail, so these are stripped on write: the trail ships digests, not
+# proof sources.
+_RAW_SOURCE_KEYS = frozenset({"lean_code", "lean_source", "proof_source"})
+
+
 def required_lemmas(model_path: Path | None = None) -> list[str]:
     """Return the required lemma set emitted by the VeriTrial -> QED bridge.
 
@@ -210,6 +216,20 @@ def check_qed_proofs(
                     "tactic": result.get("tactic"),
                     "has_sorry": has_sorry,
                     "proof_type": _classify_proof_type(result),
+                    # Hash the prover's Lean output HERE, at the boundary where
+                    # `result` still holds it, and store only the digest.
+                    #
+                    # The `attempts` list is written verbatim into the trail
+                    # JSON, so attaching the raw `lean_code` would embed every
+                    # proof's full source in the audit artifact. Hashing at the
+                    # consumer instead does not work: the key is never on the
+                    # dict by the time `_write_trail` sees it, which is why
+                    # `lean_code_sha256` shipped permanently empty. The digest
+                    # is the tamper-evidence; the source is QED's to keep.
+                    "lean_code_sha256": (
+                        _lean_code_sha256(result["lean_code"])
+                        if result.get("lean_code") else None
+                    ),
                 }
                 attempts.append(attempt)
 
@@ -272,13 +292,25 @@ def _write_trail(
     trail_path = _trace_path()
     try:
         trail_path.parent.mkdir(parents=True, exist_ok=True)
-        # Compute SHA-256 hashes for each verified lemma's Lean code
+        # Compute SHA-256 hashes for each verified lemma's Lean code.
+        # Digs are computed at the boundary (see the attempt dict) and carried
+        # on each attempt; the raw source is deliberately not retained here,
+        # because `attempts` is embedded in the trail JSON.
         lean_hashes: dict[str, str] = {}
         if attempts:
             for attempt in attempts:
-                if attempt.get("success") and attempt.get("lean_code"):
+                if attempt.get("success") and attempt.get("lean_code_sha256"):
                     lemma = attempt.get("lemma", "")
-                    lean_hashes[lemma] = _lean_code_sha256(attempt["lean_code"])
+                    lean_hashes[lemma] = attempt["lean_code_sha256"]
+
+        # `attempts` is embedded verbatim below, so strip any raw proof source
+        # before it reaches the artifact. The digest is the tamper evidence we
+        # ship; the Lean text belongs to QED, and a future caller adding
+        # `lean_code` to an attempt should not silently start exporting it.
+        safe_attempts = [
+            {k: v for k, v in a.items() if k not in _RAW_SOURCE_KEYS}
+            for a in (attempts or [])
+        ]
 
         trail_data = {
             "formal_verification": {
@@ -286,7 +318,7 @@ def _write_trail(
                 "lemmas": lemmas,
                 "verified": results.get("verified_lemmas", []),
                 "failed": results.get("failed_lemmas", []),
-                "attempts": attempts or [],
+                "attempts": safe_attempts,
                 "lean_code_sha256": lean_hashes,
                 "trail_summary": results.get("trail_summary", ""),
             }

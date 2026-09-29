@@ -8,6 +8,7 @@ No Lean compiler is required for these tests.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import sys
 from pathlib import Path
@@ -596,3 +597,165 @@ def test_mathlib_env_override_is_honoured(monkeypatch) -> None:
     monkeypatch.delenv("HAS_MATHLIB")
     monkeypatch.setenv("MATHLIB", "1")
     assert mod._detect_mathlib_env() is True
+
+
+# --- Lean proof digests in the audit trail --------------------------------
+#
+# `lean_code_sha256` shipped permanently empty. The consumer in `_write_trail`
+# read `attempt["lean_code"]`, but the producer never put that key on the dict,
+# so the guard was always false and the field was always `{}`. Nothing tested
+# it, which is why it survived review: the gate still passed, because the
+# digests are not part of the pass/fail condition -- they are tamper
+# evidence, and their absence is silent.
+#
+# ASME V&V 40 asks for the verified proof source to be hash-committed, so an
+# empty map is a real gap, not cosmetic. These pin the map being populated
+# and, just as importantly, pin that the raw proof source is NOT embedded in
+# the artifact (`attempts` is written verbatim into the trail JSON).
+
+def test_write_trail_records_lean_digest_per_verified_lemma(tmp_path: Path) -> None:
+    from insilico_trial.validation import formal_verification as fv
+
+    attempts = [
+        {"lemma": "a = a", "success": True, "lean_code_sha256": "aa" * 32},
+        {"lemma": "b = b", "success": True, "lean_code_sha256": "bb" * 32},
+        # Failed attempt: no digest, and must not appear in the map.
+        {"lemma": "c = c", "success": False, "lean_code_sha256": None},
+    ]
+    trace = tmp_path / "traces.json"
+    with patch.object(fv, "_trace_path", lambda: trace):
+        fv._write_trail({"trail_summary": "ok"}, lemmas=[], attempts=attempts)
+    data = json.loads(trace.read_text())["formal_verification"]
+    assert data["lean_code_sha256"] == {"a = a": "aa" * 32, "b = b": "bb" * 32}
+    assert "c = c" not in data["lean_code_sha256"], "failed attempt got a digest"
+
+
+def test_write_trail_does_not_embed_raw_lean_source(tmp_path: Path) -> None:
+    """The digest is the artifact; the prover's source is not shipped in it."""
+    from insilico_trial.validation import formal_verification as fv
+
+    trace = tmp_path / "traces.json"
+    attempts = [{
+        "lemma": "a = a", "success": True,
+        "lean_code_sha256": "cc" * 32,
+        "lean_code": "theorem a : a = a := by rfl  -- SECRET SOURCE",
+    }]
+    with patch.object(fv, "_trace_path", lambda: trace):
+        fv._write_trail({"trail_summary": "ok"}, lemmas=[], attempts=attempts)
+    raw = trace.read_text()
+    assert "SECRET SOURCE" not in raw, "raw proof source leaked into the trail JSON"
+    assert "cc" * 32 in raw, "digest must still be present"
+
+
+def test_lean_digest_is_stable_and_sensitive() -> None:
+    """The digest is a real SHA-256 of the source, and it is content-sensitive.
+
+    Pinned at the producer, because that is where the bug lived: hashing in
+    the consumer cannot work when the source is no longer on the dict.
+    """
+    import hashlib
+
+    from insilico_trial.validation.formal_verification import _lean_code_sha256
+
+    src = "theorem a : a = a := by rfl"
+    assert _lean_code_sha256(src) == hashlib.sha256(src.encode()).hexdigest()
+    assert len(_lean_code_sha256(src)) == 64
+    # Different proof text must not collide with the first.
+    assert _lean_code_sha256(src) != _lean_code_sha256(src + " ")
+
+
+def test_check_qed_proofs_attaches_digest_to_each_attempt(tmp_path: Path) -> None:
+    """End-to-end at the producer: a real run must yield populated digests.
+
+    The two tests above pin `_write_trail`'s consumer, which passes even when
+    the producer is broken -- that is exactly how `lean_code_sha256` shipped
+    empty. This one drives `check_qed_proofs` itself with a stubbed prover, so
+    the attempt dict is built by the real code path and the digest has to
+    survive from `result["lean_code"]` all the way into the written trail.
+    """
+    import hashlib
+    import sys as _sys
+
+    from insilico_trial.validation import formal_verification as fv
+
+    lean_src = "theorem foo : foo = foo := by rfl"
+
+    class _StubPipeline:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, lemma_expr):
+            return {"success": True, "lean_code": lean_src, "tactic": "rfl"}
+
+    # Inject a stub `agentic_pipeline` module. `patch.dict(sys.modules, ...)`
+    # with a ModuleType whose attribute is set via `patch.object` avoids both
+    # the mypy attr-defined error on a bare ModuleType and ruff's B010, which
+    # is otherwise a direct conflict with no satisfying spelling.
+    import types
+    stub = types.ModuleType("agentic_pipeline")
+    _sys.modules["agentic_pipeline"] = stub
+
+    qed_dir = tmp_path / "QED"
+    qed_dir.mkdir()
+    trace = tmp_path / "traces.json"
+
+    with patch.dict(os.environ, {"QED_DIR": str(qed_dir)}), \
+         patch.object(stub, "LeanAgenticPipeline", _StubPipeline, create=True), \
+         patch.object(fv, "_ensure_qed_importable", lambda: (True, "ok")), \
+         patch.object(fv, "required_lemmas", lambda *a, **k: ["foo = foo"]), \
+         patch.object(fv, "_trace_path", lambda: trace):
+        result = fv.check_qed_proofs()
+
+    assert result["qed_proofs_pass"] is True, result["trail_summary"]
+    data = json.loads(trace.read_text())["formal_verification"]
+    expected = hashlib.sha256(lean_src.encode()).hexdigest()
+    assert data["lean_code_sha256"] == {"foo = foo": expected}, (
+        "lean_code_sha256 is empty: the producer is not carrying lean_code "
+        "across to the attempt dict again"
+    )
+    assert all(a.get("lean_code_sha256") for a in data["attempts"])
+    assert lean_src not in trace.read_text(), "raw proof source must not ship"
+
+
+def test_provenance_replaces_stale_merkle_tag_in_report(tmp_path: Path) -> None:
+    """Re-sealing must REPLACE an existing root, not skip it.
+
+    `run_all_validations` regenerates vvv40_report.html without a merkle-root,
+    and the original sealer only inserted when the tag was absent. Two failure
+    modes followed: a regenerated report lost the chain entirely, and -- the
+    one that hid -- a report that still carried an OLD root kept it, so the
+    HTML and regulatory_provenance.json silently disagreed while every
+    existence check stayed green.
+    """
+    from insilico_trial.validation import build_regulatory_provenance
+
+    stale = "a" * 64
+    report = tmp_path / "vvv40.html"
+    report.write_text(
+        f'<html>\n<head>\n    <meta name="merkle-root" content="{stale}">\n'
+        f'</head>\n<body>report</body>\n</html>\n', encoding="utf-8")
+    out = tmp_path / "provenance.json"
+
+    prov = build_regulatory_provenance(
+        output_path=out, vvv40_path=report, repo_root=tmp_path)
+
+    new_root = prov["merkle_root"]
+    html = report.read_text(encoding="utf-8")
+    assert new_root != stale
+    assert f'<meta name="merkle-root" content="{new_root}">' in html
+    assert stale not in html, "stale merkle root survived re-sealing"
+    # Exactly one tag, or a second copy could shadow the real one in parsers.
+    assert html.count('name="merkle-root"') == 1
+
+
+def test_provenance_seals_report_that_has_no_tag_yet(tmp_path: Path) -> None:
+    """The insert path still works for a freshly generated report."""
+    from insilico_trial.validation import build_regulatory_provenance
+
+    report = tmp_path / "vvv40.html"
+    report.write_text("<html>\n<head>\n</head>\n<body>x</body>\n</html>\n",
+                      encoding="utf-8")
+    prov = build_regulatory_provenance(
+        output_path=tmp_path / "p.json", vvv40_path=report, repo_root=tmp_path)
+    html = report.read_text(encoding="utf-8")
+    assert f'<meta name="merkle-root" content="{prov["merkle_root"]}">' in html

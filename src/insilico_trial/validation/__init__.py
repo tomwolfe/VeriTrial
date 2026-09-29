@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -1234,9 +1235,29 @@ def build_regulatory_provenance(
     if vp.is_file():
         html = vp.read_text(encoding="utf-8")
         meta = f'<meta name="merkle-root" content="{h}">'
-        if "merkle-root" not in html:
+        # REPLACE any existing tag, not just fill in a missing one.
+        #
+        # `run_all_validations` regenerates vvv40_report.html from scratch and
+        # emits no merkle-root, so re-running validations without re-sealing
+        # strips the provenance chain and `test_vvv40_report_carries_a_merkle_root`
+        # goes red. But a stale tag is worse: when the HTML is regenerated in
+        # place and still carries an OLD root, the insert-only branch below
+        # would leave it in place while regulatory_provenance.json records the
+        # new one, and the two would silently disagree -- a green-looking
+        # artifact attesting to a run it no longer describes. Substituting the
+        # value makes the HTML and the JSON agree by construction.
+        if re.search(r'<meta name="merkle-root" content="[0-9a-f]{64}">', html):
+            html = re.sub(
+                r'<meta name="merkle-root" content="[0-9a-f]{64}">',
+                meta, html, count=1)
+        elif "merkle-root" not in html:
             html = html.replace("<head>", f"<head>\n    {meta}", 1)
-            vp.write_text(html, encoding="utf-8")
+        else:
+            # A malformed/foreign merkle-root tag is not silently overwritten.
+            # Leaving it is a lie; overwriting could destroy evidence. Record
+            # it on the returned record so the caller can see the disagreement.
+            out["malformed_merkle_tag"] = True
+        vp.write_text(html, encoding="utf-8")
     return out
 
 
