@@ -786,10 +786,16 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _FakeProc(2, "QED FAIL", ""))
     assert gate.main([str(f), "--no-strict"]) == 1
     # Full pass writes traces with verified flags set.
+    # Redirect into tmp_path: the real output/validation/qed_traces.json is a
+    # Merkle leaf input of build_regulatory_provenance(), and writing tmpdir
+    # lemma content over it desynchronizes it from the root already embedded
+    # in vvv40_report.html. See tests/conftest.py.
+    scratch = tmp_path / "traces" / "qed_traces.json"
+    monkeypatch.setenv("QED_TRACE", str(scratch))
     _patch_full_success(monkeypatch, tmp_path)
     assert gate.main([str(f), "--no-strict"]) == 0
     import json as _json
-    traces = _json.loads((gate._veritrial_root() / "output" / "validation" / "qed_traces.json").read_text())
+    traces = _json.loads(scratch.read_text())
     assert traces["verified"] is True
     assert traces["n_lemmas"] == len(base)
     assert all(v["verified"] is True for v in traces["traces"].values())
@@ -812,11 +818,50 @@ def test_fast_gate_traces_isolated_root(tmp_path: Path, monkeypatch) -> None:
     model_dst.parent.mkdir(parents=True)
     shutil.copy(MODEL, model_dst)
     monkeypatch.setattr(gate, "_veritrial_root", lambda: root)
+    # This test is specifically about deriving the traces path from the
+    # (faked) VeriTrial root and creating it recursively, so the
+    # session-wide QED_TRACE redirect from conftest must be cleared --
+    # otherwise the write is redirected and the assertion below tests
+    # nothing. conftest sets that env var precisely so a test like the one
+    # above cannot clobber the real output/validation/qed_traces.json.
+    monkeypatch.delenv("QED_TRACE", raising=False)
     _patch_full_success(monkeypatch, tmp_path)
     assert gate.main([str(f), "--no-strict"]) == 0
     import json as _json
     traces = _json.loads((root / "output" / "validation" / "qed_traces.json").read_text())
     assert traces["verified"] is True
+
+
+def test_gate_honors_qed_trace_redirect(tmp_path: Path, monkeypatch) -> None:
+    """QED_TRACE redirects the traces write away from the real artifact.
+
+    ``output/validation/qed_traces.json`` is a Merkle *leaf input* of
+    ``build_regulatory_provenance()``. The gate used to write it at a fixed
+    repo-relative path, so any test that drove the gate over a tmpdir lemmas
+    file overwrote the production trace with one whose ``lemmas_file`` pointed
+    into a pytest tmpdir. The damage is silent: the provenance JSON then
+    disagrees with the ``<meta name="merkle-root">`` already embedded in
+    ``vvv40_report.html``, so
+    ``test_report_merkle_root_matches_provenance_json`` goes red on a run
+    where every proof still verified. Assert the redirect is honored, so this
+    cannot come back.
+    """
+    base = _guard_lemmas()
+    f = _write_guard_file(tmp_path, base)
+    _patch_prelean(monkeypatch, base)
+    monkeypatch.setattr(gate, "_detect_mathlib_env", lambda: True)
+    qed = tmp_path / "qed"
+    qed.mkdir()
+    (qed / "verify_pbpk_lemmas.py").write_text("x = 1\n")
+    (qed / "VeriTrialExport.lean").write_text("x = 1\n")
+    monkeypatch.setattr(gate, "qed_dir", lambda: qed)
+    scratch = tmp_path / "elsewhere" / "traces.json"
+    monkeypatch.setenv("QED_TRACE", str(scratch))
+    _patch_full_success(monkeypatch, tmp_path)
+    assert gate.main([str(f), "--no-strict"]) == 0
+    assert scratch.is_file(), "QED_TRACE was not honored; traces went to the repo artifact"
+    import json as _json
+    assert _json.loads(scratch.read_text())["verified"] is True
 
 
 def test_fast_gate_axiom_write_failure_closed(tmp_path: Path, monkeypatch) -> None:

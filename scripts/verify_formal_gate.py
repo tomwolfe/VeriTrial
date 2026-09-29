@@ -941,7 +941,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Record SHA-256 hashes of the verified lemma content into qed_traces.json
-    traces_path = _veritrial_root() / "output" / "validation" / "qed_traces.json"
+    #
+    # QED_TRACE redirects the write, matching
+    # insilico_trial.validation.formal_verification._trace_path(), which has
+    # always honoured it. This path is a Merkle LEAF INPUT of
+    # build_regulatory_provenance(), so writing it unconditionally to the
+    # repo-relative location let a test run -- which gates a lemmas file in a
+    # pytest tmpdir -- overwrite the real provenance chain with a root built
+    # from throwaway data, leaving vvv40_report.html holding a different root
+    # than regulatory_provenance.json. That surfaced as a genuine
+    # test_report_merkle_root_matches_provenance_json failure even though
+    # nothing about the proofs had changed. Tests now set QED_TRACE.
+    _trace_env = os.environ.get("QED_TRACE")
+    traces_path = (Path(_trace_env).resolve() if _trace_env
+                   else _veritrial_root() / "output" / "validation" / "qed_traces.json")
     traces_path.parent.mkdir(parents=True, exist_ok=True)
     lemma_hashes = {}
     for lemma in file_lemmas:
