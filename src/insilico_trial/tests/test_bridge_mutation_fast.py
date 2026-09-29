@@ -428,7 +428,16 @@ def test_fast_gate_qed_dir_resolution(tmp_path: Path, monkeypatch) -> None:
     assert gate.qed_dir() == fake.resolve()
     monkeypatch.delenv("QED_DIR")
     assert gate.qed_dir().name == "QED"
-    assert gate._veritrial_root().name == "VeriTrial"
+    # The repo root is wherever this checkout lives -- a clean-room
+    # materialization is named after the attempt, not ``VeriTrial`` -- so pin
+    # the location-independent property: the root is the directory that
+    # actually holds the gate script and the PBPK model, and the QED fallback
+    # is its sibling.
+    root = gate._veritrial_root()
+    assert root == Path(gate.__file__).resolve().parents[1]
+    assert (root / "scripts" / "verify_formal_gate.py").is_file()
+    assert (root / "src" / "insilico_trial" / "pbpk" / "model.py").is_file()
+    assert gate.qed_dir() == (root.parent / "QED").resolve()
 
 
 def test_fast_gate_live_lemmas_match_bridge() -> None:
