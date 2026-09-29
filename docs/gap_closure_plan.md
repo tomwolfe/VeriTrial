@@ -34,7 +34,8 @@ tool does **not** yet support.
   introduced in jax ≥ 0.6.x. Meanwhile lineax 0.1.1 (latest) requires
   jax ≥ 0.10.0. No version combination satisfies both simultaneously.
 - **Mitigation**: `__init__.py` forces CPU at import. All benchmarks run on
-  CPU (1000 patients ≈ 10 s, ~99 patients/sec single-process).
+  CPU (1000 patients ≈ 1.3 s, ~790 patients/sec single-process; the step
+  is capped at 90% of the QED Metzler bound rather than fixed at 1e-3 h).
 - **Phase 4 plan**: If a future jax-metal supports the current StableHLO IR,
   Metal for diffrax can be re-enabled provided lineax is not on the critical
   path (or by swapping diffrax for a pure-`jax.lax.scan` fixed-step solver

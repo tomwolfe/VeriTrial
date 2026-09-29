@@ -15,6 +15,7 @@ NOTES
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import jax
@@ -22,18 +23,18 @@ import jax.numpy as jnp
 import numpy as onp
 
 from insilico_trial.pbpk.model import (
-    _ALT_IDX,
-    DEFAULT_ORGAN_NETWORK,
-    STANDARD_14_ORGAN_NETWORK,
     _CENTRAL_IDX,
     _LIVER_IDX,
     _QSP_DEFAULTS,
+    DEFAULT_ORGAN_NETWORK,
+    STANDARD_14_ORGAN_NETWORK,
+    OrganSpec,
     pbpk_dili_ode,
     pbpk_ode,
 )
 
 
-def _jacobian_diagonal(params: dict[str, Any], spec: dict[str, Any]) -> dict[int, float]:
+def _jacobian_diagonal(params: dict[str, Any], spec: Mapping[str, Any]) -> dict[int, float]:
     """Diagonal of ``d(ode)/d(y)`` assembled from the organ network spec.
 
     This is the Metzler generator the forward-Euler positivity theorem is
@@ -51,7 +52,7 @@ def _jacobian_diagonal(params: dict[str, Any], spec: dict[str, Any]) -> dict[int
         try:
             return float(_np.asarray(arr).ravel()[idx])
         except Exception:
-            return float(arr)  # type: ignore[arg-type]
+            return float(arr)
 
     Q = params.get("Q")
     V = params.get("V")
@@ -76,6 +77,37 @@ def _jacobian_diagonal(params: dict[str, Any], spec: dict[str, Any]) -> dict[int
     # J[elim, central], not a diagonal term.)
     diag[elim] = 0.0
     return diag
+
+
+def calculate_max_stable_dt_batch(
+    params_batch: dict[str, Any], organ_network: Any = None
+) -> float:
+    """``calculate_max_stable_dt`` over a batch: the tightest patient's bound.
+
+    Every patient in the batch is advanced with the same ``dt``, so the
+    admissible step is the minimum over all of them. A patient whose params
+    cannot be interpreted is skipped rather than allowed to widen the step;
+    if none can be, this raises and the caller keeps its requested ``dt``.
+    """
+    import numpy as _np
+
+    n = int(_np.asarray(params_batch.get("CL", [0.0])).ravel().shape[0])
+    bounds: list[float] = []
+    for i in range(max(n, 1)):
+        single: dict[str, Any] = {}
+        for key, value in params_batch.items():
+            try:
+                arr = _np.asarray(value)
+                single[key] = arr[i] if arr.shape and arr.shape[0] == n else value
+            except Exception:
+                single[key] = value
+        try:
+            bounds.append(calculate_max_stable_dt(single, organ_network))
+        except Exception:
+            continue
+    if not bounds:
+        raise ValueError("no interpretable patient params for the stability bound")
+    return float(min(bounds))
 
 
 def calculate_max_stable_dt(params: dict[str, Any],
@@ -108,9 +140,9 @@ def calculate_max_stable_dt(params: dict[str, Any],
     if organ_network is None:
         organ_network = params.get("organ_network")
     if organ_network is None:
-        spec = {"gut": 0, "central": 2, "elim": n - 1,
-                "perfused": [k for k in range(n) if k not in (0, 2, n - 1)],
-                "n_states": n}
+        spec: OrganSpec = {"gut": 0, "central": 2, "elim": n - 1,
+                           "perfused": tuple(k for k in range(n) if k not in (0, 2, n - 1)),
+                           "n_states": n}
     else:
         spec = organ_indices(tuple(organ_network))
 
@@ -183,10 +215,6 @@ def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.
       - Mass Conservation Monitor: total mass drift < 1e-6
       - Physical Non-negativity Guard: state concentrations >= 0
     """
-    n_state = y.shape[0]
-    n_monitor = min(n_state, 6)  # mass conservation applies to PBPK states only
-    y_initial_dose = jnp.sum(y[:n_monitor])
-
     k1 = _ode_fn(t, y, args)
     k2 = _ode_fn(t + dt / 2.0, y + dt / 2.0 * k1, args)
     k3 = _ode_fn(t + dt / 2.0, y + dt / 2.0 * k2, args)
@@ -196,11 +224,8 @@ def _rk4_step(t: float, y: jnp.ndarray, dt: float, args: dict[str, Any]) -> jnp.
     # Physical non-negativity is guaranteed by the dt bound above
     # (Metzler invariant; see QED diag_nonpos), not by clamping.
 
-    # Mass Conservation Monitor: verify total PBPK mass drift < 1e-6
-    # The ODE is mass-conserving by construction; this catches numerical drift.
-    mass_gain = jnp.sum(y_next[:n_monitor]) - y_initial_dose
-    mass_drift = mass_gain
-
+    # Mass conservation follows from the ODE column sums (proved in QED)
+    # and is checked end-to-end by the mass-balance gate; not re-checked here.
     return y_next
 
 
@@ -585,8 +610,6 @@ def solve_pbpk_batch_multi_dose_fixed_step(
     t0 = float(te[0])
     t_end = float(te[-1])
     te_j = jnp.asarray(te)
-
-    n_doses = len(dt_arr)
 
     # Determine 6- or 9-state from first patient params
     sample_params = {k: v[0] if hasattr(v, '__len__') else v

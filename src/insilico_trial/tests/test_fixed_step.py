@@ -3,8 +3,13 @@
 from typing import Any
 
 import numpy as onp
+import pytest
 
-from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt, solve_pbpk_batch_fixed_step, solve_pbpk_fixed_step
+from insilico_trial.pbpk.fixed_step import (
+    calculate_max_stable_dt,
+    solve_pbpk_batch_fixed_step,
+    solve_pbpk_fixed_step,
+)
 from insilico_trial.pbpk.model import (
     build_pbpk_params,
     run_pbpk,
@@ -149,12 +154,13 @@ def test_fixed_step_batch_shape():
 def _jacobian_diag_for(network: tuple[str, ...], params: dict[str, Any]):
     import jax
     import jax.numpy as jnp
+
     from insilico_trial.pbpk.model import make_pbpk_ode, organ_indices
 
     spec = organ_indices(network)
     n = int(spec["n_states"])
     ode = make_pbpk_ode(network)
-    args = {k: jnp.asarray(params[k]) for k in ("Q", "V", "Kp")}
+    args: dict[str, Any] = {k: jnp.asarray(params[k]) for k in ("Q", "V", "Kp")}
     args["CL"] = float(params["CL"])
     args["ka"] = float(params["ka"])
     y = jnp.ones(n, dtype=jnp.float64) * 0.5
@@ -212,7 +218,6 @@ def test_dt_bound_tracks_network_not_a_constant() -> None:
     # A stiffer perfused compartment must tighten the bound; if this returns a
     # fixed number the "dynamic" claim is false and clamping would be hiding.
     from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
-    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK
 
     params = _build_warfarin_params()[0]
     base = calculate_max_stable_dt(params)
@@ -225,6 +230,7 @@ def test_dt_violating_jacobian_bound_fails_closed() -> None:
     # The physical-bound invariant: exceeding dt <= min_j 1/|K_jj| must raise,
     # not silently clamp. Proved bound, enforced at runtime.
     import pytest
+
     from insilico_trial.pbpk.fixed_step import assert_dt_stable
 
     params = _build_warfarin_params()[0]
@@ -233,3 +239,50 @@ def test_dt_violating_jacobian_bound_fails_closed() -> None:
     assert_dt_stable(0.9 * bound, params)
     with pytest.raises(ValueError, match="exceeds stability bound"):
         assert_dt_stable(1.5 * bound, params)
+
+
+def test_batch_stability_bound_is_the_tightest_patient() -> None:
+    # solve_pbpk_batch must step every patient with one dt, so the admissible
+    # step is the minimum over the batch -- not the first, or the mean.
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt_batch
+
+    params, drug, _t_eval, _dt = _build_warfarin_params()
+    loose = dict(params)
+    stiff = dict(params)
+    stiff["Q"] = onp.asarray(params["Q"], dtype=onp.float64) * 50.0
+    batch = {
+        "Q": onp.stack([loose["Q"], stiff["Q"]]),
+        "V": onp.stack([loose["V"], stiff["V"]]),
+        "Kp": onp.stack([loose["Kp"], stiff["Kp"]]),
+        "CL": onp.array([loose["CL"], stiff["CL"]]),
+        "ka": onp.array([loose["ka"], stiff["ka"]]),
+    }
+    bound = calculate_max_stable_dt_batch(batch)
+    assert bound == pytest.approx(calculate_max_stable_dt(stiff))
+    assert bound < calculate_max_stable_dt(loose)
+    assert drug.ka > 0
+
+
+def test_solve_pbpk_batch_step_matches_a_finer_reference() -> None:
+    # The default step is chosen from the proved bound, not hardcoded. Pin that
+    # it is both honoured and cheap: the coarse run must agree with a 10x finer
+    # step, which is what the 10x throughput is being spent on.
+    params, drug, t_eval, _dt = _build_warfarin_params()
+    n = 8
+    params_batch = {
+        "Q": onp.stack([params["Q"]] * n),
+        "V": onp.stack([params["V"]] * n),
+        "Kp": onp.stack([params["Kp"]] * n),
+        "CL": onp.full(n, params["CL"]),
+        "ka": onp.full(n, params["ka"]),
+    }
+    A_gut_0s = onp.full(n, 10.0 * drug.bioavailability)
+    coarse = onp.asarray(solve_pbpk_batch(t_eval, A_gut_0s, params_batch), dtype=onp.float64)
+    fine = onp.asarray(
+        solve_pbpk_batch_fixed_step(t_eval, A_gut_0s, params_batch, dt=1e-3),
+        dtype=onp.float64,
+    )
+    scale = float(onp.abs(fine).max())
+    assert scale > 0
+    rel = float(onp.abs(coarse - fine).max() / scale)
+    assert rel < 1e-4, f"default step diverges from a 10x finer step: {rel:.2e}"

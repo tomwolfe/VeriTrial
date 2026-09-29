@@ -79,7 +79,8 @@ def test_cardiac_apd_effect_is_finite_and_bounded() -> None:
     # stays finite and grows with concentration.
     lo = cardiac_apd_effect(0.0, 1.0, 50.0, 30.0)
     hi = cardiac_apd_effect(50.0, 1.0, 50.0, 30.0)
-    assert math.isfinite(lo) and math.isfinite(hi)
+    assert math.isfinite(lo)
+    assert math.isfinite(hi)
     assert hi > lo
 
 

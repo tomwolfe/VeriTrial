@@ -42,7 +42,7 @@ def _ikr_inhibition(
     """
     if concentration <= 0 or ic50_ikr <= 0:
         return 0.0
-    return (concentration ** hill_ikr) / (ic50_ikr ** hill_ikr + concentration ** hill_ikr)
+    return float((concentration ** hill_ikr) / (ic50_ikr ** hill_ikr + concentration ** hill_ikr))
 
 
 def _ina_inhibition(
@@ -54,7 +54,7 @@ def _ina_inhibition(
     """
     if concentration <= 0 or ic50_ina <= 0:
         return 0.0
-    return (concentration ** hill_ina) / (ic50_ina ** hill_ina + concentration ** hill_ina)
+    return float((concentration ** hill_ina) / (ic50_ina ** hill_ina + concentration ** hill_ina))
 
 
 def _ical_inhibition(
@@ -66,7 +66,7 @@ def _ical_inhibition(
     """
     if concentration <= 0 or ic50_ical <= 0:
         return 0.0
-    return (concentration ** hill_ical) / (ic50_ical ** hill_ical + concentration ** hill_ical)
+    return float((concentration ** hill_ical) / (ic50_ical ** hill_ical + concentration ** hill_ical))
 
 
 def assess_qtc(

@@ -7,10 +7,19 @@ No Lean compiler is required for these tests.
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
+
+
+def _expr(src: str) -> ast.expr:
+    """Parse ``src`` as a single expression and return its AST node."""
+    node = ast.parse(src).body[0]
+    assert isinstance(node, ast.Expr), f"not an expression: {src!r}"
+    return node.value
 
 
 def test_qed_dir_resolution_env_var(tmp_path: Path) -> None:
@@ -25,7 +34,7 @@ def test_qed_dir_resolution_env_var(tmp_path: Path) -> None:
 
 def test_qed_dir_resolution_sibling() -> None:
     """Without QED_DIR, falls back to sibling QED of repo root."""
-    from insilico_trial.validation.formal_verification import _qed_dir, REPO_ROOT
+    from insilico_trial.validation.formal_verification import REPO_ROOT, _qed_dir
 
     sibling = REPO_ROOT.parent / "QED"
     result = _qed_dir()
@@ -128,11 +137,10 @@ def test_classify_proof_type_unknown() -> None:
 def test_export_parametric_lemma_emission() -> None:
     """The parametric flag causes build_lemmas to emit the symbolic sum identity."""
     from pathlib import Path
-    import sys
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
 
     model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
     lemmas_normal = ex.build_lemmas(model_path, parametric=False)
@@ -140,18 +148,19 @@ def test_export_parametric_lemma_emission() -> None:
     # Parametric mode should emit at least one additional lemma (the sum identity)
     assert len(lemmas_parametric) > len(lemmas_normal)
     # The parametric sum lemma should end with "= 0" and contain symbolic terms
-    parametric_lemmas = [l for l in lemmas_parametric if l.endswith("= 0") and "ka" in l]
+    parametric_lemmas = [
+        lemma for lemma in lemmas_parametric if lemma.endswith("= 0") and "ka" in lemma
+    ]
     assert len(parametric_lemmas) >= 1
 
 
 def test_extract_symbolic_derivatives() -> None:
     """extract_symbolic_derivatives returns derivative names and RHS expressions."""
     from pathlib import Path
-    import sys
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
 
     model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
     derivs = ex.extract_symbolic_derivatives(model_path)
@@ -164,11 +173,10 @@ def test_extract_symbolic_derivatives() -> None:
 def test_verify_symbolic_cancellation() -> None:
     """verify_symbolic_cancellation confirms the PBPK ODE conserves mass."""
     from pathlib import Path
-    import sys
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
 
     model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
     derivs = ex.extract_symbolic_derivatives(model_path)
@@ -178,11 +186,10 @@ def test_verify_symbolic_cancellation() -> None:
 def test_build_parametric_sum_lemma() -> None:
     """build_parametric_sum_lemma returns a valid Lean-parseable sum identity."""
     from pathlib import Path
-    import sys
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
 
     model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
     lemma = ex.build_parametric_sum_lemma(model_path)
@@ -192,7 +199,6 @@ def test_build_parametric_sum_lemma() -> None:
 
 def test_sign_flip_dynamically_alters_lean_and_fails_gate(tmp_path: Path) -> None:
     """Flipping a sign in model.py alters generated Lean and fails the gate."""
-    import shutil, subprocess, sys
     from pathlib import Path
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
@@ -202,6 +208,7 @@ def test_sign_flip_dynamically_alters_lean_and_fails_gate(tmp_path: Path) -> Non
     good_lean = tmp_path / "good.lean"
     ex.emit_lean_export(model_path, good_lean)
     good_text = good_lean.read_text()
+    assert "sorry" not in good_text
     # Mutated copy with liver perfusion sign flipped
     bad_model = tmp_path / "model_bad.py"
     src = model_path.read_text()
@@ -219,30 +226,29 @@ def test_sign_flip_dynamically_alters_lean_and_fails_gate(tmp_path: Path) -> Non
 def test_sym_diff_defensive_fallthroughs() -> None:
     """_sym_diff totality: exotic AST shapes differentiate to zero."""
     import ast
-    from pathlib import Path
     import sys
+    from pathlib import Path
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
 
-    assert ast.dump(ex._sym_diff(ast.parse("x ** 2").body[0].value, "x")) == \
-        ast.dump(ast.parse("0").body[0].value)
-    call_kw = ast.parse("f(x, k=1)").body[0].value
+    assert ast.dump(ex._sym_diff(_expr("x ** 2"), "x")) == \
+        ast.dump(_expr("0"))
+    call_kw = _expr("f(x, k=1)")
     assert ast.dump(ex._sym_diff(call_kw, "x")) == \
-        ast.dump(ast.parse("0").body[0].value)
-    sub = ast.parse("Q[i]").body[0].value
+        ast.dump(_expr("0"))
+    sub = _expr("Q[i]")
     assert ast.dump(ex._sym_diff(sub, "x")) == \
-        ast.dump(ast.parse("0").body[0].value)
+        ast.dump(_expr("0"))
 
 
 def _bridge():
-    import sys
     from pathlib import Path
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
+    import export_pbpk_to_qed as ex
     return ex
 
 
@@ -280,7 +286,6 @@ def test_check_dili_model_delegation(tmp_path: Path) -> None:
 
 def test_main_fails_closed(tmp_path: Path, capsys) -> None:
     """main(): exit 1 on missing model and on mass-conservation violation."""
-    import pytest
     ex = _bridge()
     assert ex.main(["--model", str(tmp_path / "missing.py")]) == 1
     model_path = _model_path()
@@ -346,24 +351,23 @@ def test_sym_diff_scalar_identities() -> None:
     """_sym_diff: d(x)/dx=1, d(y)/dx=0, constants diff to zero."""
     import ast
     ex = _bridge()
-    one = ast.dump(ast.parse("1").body[0].value)
-    zero = ast.dump(ast.parse("0").body[0].value)
-    assert ast.dump(ex._sym_diff(ast.parse("x").body[0].value, "x")) == one
-    assert ast.dump(ex._sym_diff(ast.parse("y").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("3.5").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("-x").body[0].value, "x")) != zero
+    one = ast.dump(_expr("1"))
+    zero = ast.dump(_expr("0"))
+    assert ast.dump(ex._sym_diff(_expr("x"), "x")) == one
+    assert ast.dump(ex._sym_diff(_expr("y"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("3.5"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("-x"), "x")) != zero
 
 
 def test_crosscheck_rejects_zeroed_column_sums(tmp_path: Path) -> None:
     """Gate cross-check: conservation lemmas without model terms fail closed."""
     from pathlib import Path
-    import sys
     scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    import export_pbpk_to_qed as ex  # type: ignore
-    import verify_formal_gate as gate  # type: ignore
+    import export_pbpk_to_qed as ex
     import pytest
+    import verify_formal_gate as gate
 
     model_path = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
     genuine = ex.extract_column_sum_lemmas(model_path)
@@ -393,9 +397,11 @@ def _dynamic_lemmas() -> list[str]:
     spec = importlib.util.spec_from_file_location(
         "_exp", Path(__file__).resolve().parents[3] / "scripts" / "export_pbpk_to_qed.py"
     )
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod._dynamic_lemmas(MODEL_PATH, 6, True)
+    spec.loader.exec_module(mod)
+    return cast("list[str]", mod._dynamic_lemmas(MODEL_PATH, 6, True))
 
 
 def test_exported_lemma_set_has_eighteen_lemmas() -> None:
@@ -427,8 +433,10 @@ def test_parametric_sum_is_an_identity_in_real_parameters() -> None:
     spec = importlib.util.spec_from_file_location(
         "_exp2", Path(__file__).resolve().parents[3] / "scripts" / "export_pbpk_to_qed.py"
     )
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    spec.loader.exec_module(mod)
     s = mod.build_parametric_sum_lemma(MODEL_PATH)
     for token in ("Q_liver", "Q_periph", "Q_effect",
                   "Kp_liver", "Kp_periph", "Kp_effect", "C_liver"):
@@ -441,8 +449,10 @@ def test_column_sums_still_cover_every_state() -> None:
     spec = importlib.util.spec_from_file_location(
         "_exp3", Path(__file__).resolve().parents[3] / "scripts" / "export_pbpk_to_qed.py"
     )
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    spec.loader.exec_module(mod)
     cols = mod.extract_column_sum_lemmas(MODEL_PATH)
     assert len(cols) == 6
     # The central column is the non-trivial one: it must still contain all
@@ -552,8 +562,10 @@ def test_mathlib_env_override_is_honoured(monkeypatch) -> None:
     spec = importlib.util.spec_from_file_location(
         "_gate", _P(__file__).resolve().parents[3] / "scripts" / "verify_formal_gate.py"
     )
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    spec.loader.exec_module(mod)
 
     monkeypatch.setenv("HAS_MATHLIB", "1")
     assert mod._detect_mathlib_env() is True

@@ -653,13 +653,31 @@ def _substitute(expr: ast.expr, env: dict[str, ast.expr]) -> ast.expr:
             if n.id in env:
                 return ast.fix_missing_locations(_substitute(env[n.id], {k: v for k, v in env.items() if k != n.id}))
             return n
-    return ast.fix_missing_locations(_S().visit(ast.parse(ast.unparse(expr)).body[0].value))
+    reparsed = ast.parse(ast.unparse(expr)).body[0]
+    assert isinstance(reparsed, ast.Expr)
+    visited = _S().visit(reparsed.value)
+    assert isinstance(visited, ast.expr)
+    return ast.fix_missing_locations(visited)
+
+
+def _expr(src: str) -> ast.expr:
+    """Parse ``src`` as a single expression and return its AST node."""
+    node = ast.parse(src).body[0]
+    assert isinstance(node, ast.Expr), f"not an expression: {src!r}"
+    return node.value
+
+
+def _roundtrip(node: ast.expr) -> ast.expr:
+    """Re-parse an expression's source, so mutations never alias the input."""
+    reparsed = ast.parse(ast.unparse(node)).body[0]
+    assert isinstance(reparsed, ast.Expr), f"not an expression: {ast.unparse(node)!r}"
+    return reparsed.value
 
 
 def _sym_diff(node: ast.expr, var: str) -> ast.expr:
     """Symbolic d(node)/d(var) over Python AST (linear ODE fragment)."""
-    Z = ast.parse("0").body[0].value
-    O = ast.parse("1").body[0].value
+    Z = _expr("0")
+    O = _expr("1")
     if isinstance(node, ast.Name):
         return ast.copy_location(O if node.id == var else Z, node)
     if isinstance(node, ast.Constant):
@@ -680,7 +698,7 @@ def _sym_diff(node: ast.expr, var: str) -> ast.expr:
             num = ast.BinOp(left=ast.BinOp(left=dL, op=ast.Mult(), right=R),
                             op=ast.Sub(),
                             right=ast.BinOp(left=L, op=ast.Mult(), right=dR))
-            den = ast.BinOp(left=R, op=ast.Mult(), right=ast.copy_location(ast.parse(ast.unparse(R)).body[0].value, R))
+            den = ast.BinOp(left=R, op=ast.Mult(), right=ast.copy_location(_roundtrip(R), R))
             return ast.BinOp(left=num, op=ast.Div(), right=den)
         return Z
     if isinstance(node, ast.Call):
@@ -726,13 +744,17 @@ def _lean_param(expr: str) -> str:
 
 def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
     """Symbolic Jacobian J[i][j] = d f_i / d y_j via AST differentiation."""
-    import sympy as _sp
+    import sympy as _sp  # type: ignore[import-untyped]
     source = model_path.read_text(encoding="utf-8")
     if "def make_pbpk_ode(" in source:
         from insilico_trial.pbpk.model import make_pbpk_ode, organ_indices
-        network = tuple(make_pbpk_ode.__defaults__[0])
+        defaults = make_pbpk_ode.__defaults__ or ()
+        assert defaults, "make_pbpk_ode has no default organ network"
+        network = tuple(defaults[0])
         spec = organ_indices(network)
-        gut, central, elim = (int(spec[key]) for key in ("gut", "central", "elim"))
+        gut = int(spec["gut"])
+        central = int(spec["central"])
+        elim = int(spec["elim"])
         perfused = [int(index) for index in spec["perfused"]]
         result: dict[tuple[int, int], str] = {}
         result[(gut, gut)] = "-ka"
@@ -1140,8 +1162,9 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
     J = compute_jacobian(model_path)
     # N-generic: derive state dimension from the Jacobian itself.
     N = n_states if n_states is not None else (max(max(i, j) for (i, j) in J) + 1 if J else 0)
-    # Dynamically synthesize if-chain from symbolic Jacobian entries
-    arms: list[str] = []
+    # Dynamically synthesize if-chain from symbolic Jacobian entries.
+    # (``arms`` is already a list[str] from the per-organ branch above.)
+    arms = []
     for (i, j), e in sorted(J.items()):
         if e.strip() in ("0",):
             continue

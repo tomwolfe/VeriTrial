@@ -7,12 +7,12 @@ solver adds over the existing fixed-step RK4 solver.
 
 from __future__ import annotations
 
-import jax
+from typing import Any
+
 import jax.numpy as jnp
 import pytest
 
 from insilico_trial.pbpk.solvers import solve_implicit, solve_implicit_batch
-
 
 # ---------------------------------------------------------------------------
 # Reference PBPK ODE (lightweight, no diffrax dependency in this file)
@@ -24,7 +24,7 @@ _EFFECT_SITE_IDX = 4
 _LIVER_IDX = 1
 
 
-def _pbpk_ode_simple(t: float, y: jnp.ndarray, args: dict) -> jnp.ndarray:
+def _pbpk_ode_simple(t: float, y: jnp.ndarray, args: dict[str, Any]) -> jnp.ndarray:
     """Minimal PBPK ODE for solver cross-validation.
 
     State: [A_gut, A_liver, A_central, A_periph, A_effect, A_elim]
@@ -53,7 +53,7 @@ def _pbpk_ode_simple(t: float, y: jnp.ndarray, args: dict) -> jnp.ndarray:
     return jnp.array([dA_gut, dA_liver, dA_central, dA_periph, dA_effect, dA_elim])
 
 
-def _warfarin_params() -> dict:
+def _warfarin_params() -> dict[str, Any]:
     """Representative Warfarin PK parameters (70 kg adult)."""
     return {
         "Q": jnp.array([1.5, 1.5, 1.0, 50.0, 0.5]),
@@ -88,7 +88,7 @@ def test_implicit_matches_diffrax_warfarin_pk():
 
     term = diffrax.ODETerm(_diffrax_rhs)
     solver = diffrax.Tsit5()
-    ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
+    _ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
     sol = diffrax.diffeqsolve(
         term, solver, t0=0.0, t1=48.0, dt0=0.01, y0=y0,
         args=params, saveat=diffrax.SaveAt(ts=t_eval),

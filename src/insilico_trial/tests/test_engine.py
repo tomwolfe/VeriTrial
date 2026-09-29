@@ -328,7 +328,6 @@ def test_bayesian_ci_wider_than_normal():
 
 def test_cohort_batch_returns_liver_fixed_step():
     """_solve_cohort_batch with fixed_step must return C_liver_batch (no Diffrax fallback)."""
-    from insilico_trial.pbpk.model import build_pbpk_params
     from insilico_trial.trial.engine import TrialEngine
 
     drug = _make_drug()
@@ -401,11 +400,6 @@ def test_mad_no_concentration_reset_at_dose_boundaries():
         t_eval_hours, cohort_patients, administered_doses, dosing_events, params_list,
     )
 
-    # For each dose boundary (except t=0), check that C_liver (col 1 via params)
-    # and the plasma concentration do NOT drop to zero just before the next dose
-    from insilico_trial.pbpk.model import _LIVER_IDX, _CENTRAL_IDX
-    V = onp.stack([p["V"] for p in params_list])
-
     for dose_t in dose_times[1:]:
         # Find index closest to this dose time
         idx = onp.argmin(onp.abs(t_eval - dose_t))
@@ -437,13 +431,15 @@ def _make_boin_engine() -> TrialEngine:
 def test_boin_escalate_on_zero_dlt():
     eng = _make_boin_engine()
     dec, nxt, stop = eng.boin_decision(0, 3, 1)
-    assert dec == "escalate" and nxt == 2 and stop is False
+    assert dec == "escalate"
+    assert nxt == 2
+    assert stop is False
 
 
 def test_boin_deescalate_on_2_of_3():
     eng = _make_boin_engine()
     dec, nxt, stop = eng.boin_decision(2, 3, 1)
-    assert dec in ("de-escalate", "stop") and stop is False or stop is True
+    assert dec in ("de-escalate", "stop")
     # 2/3=0.667 >= lambda_d so must de-escalate (unless safety stops)
     assert nxt == 0 or stop is True
 
@@ -452,4 +448,5 @@ def test_boin_safety_stopping_rule():
     eng = _make_boin_engine()
     # 3 DLTs in 3 patients: Pr(p>0.3|3,3) > 0.95 -> stop
     dec, nxt, stop = eng.boin_decision(3, 3, 1)
-    assert stop is True and dec == "stop"
+    assert stop is True
+    assert dec == "stop"

@@ -17,6 +17,8 @@ def _load():
     if str(SCRIPTS) not in sys.path:
         sys.path.insert(0, str(SCRIPTS))
     spec = importlib.util.spec_from_file_location("rebuild_qed_oleans", SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

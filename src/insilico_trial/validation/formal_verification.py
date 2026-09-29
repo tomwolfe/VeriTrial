@@ -19,12 +19,12 @@ Design guarantees (mission requirement C -- FAIL CLOSED):
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../VeriTrial
 
@@ -42,7 +42,7 @@ def _qed_dir() -> Path:
     return (REPO_ROOT.parent / "QED").resolve()
 
 
-def _ensure_qed_importable() -> Tuple[bool, str]:
+def _ensure_qed_importable() -> tuple[bool, str]:
     """Add QED to ``sys.path`` and import its agentic pipeline.
 
     Returns ``(ok, reason)``. On failure ``ok`` is ``False`` and the gate must
@@ -54,21 +54,21 @@ def _ensure_qed_importable() -> Tuple[bool, str]:
     if str(qed_dir) not in sys.path:
         sys.path.insert(0, str(qed_dir))
     try:
-        import agentic_pipeline  # noqa: F401
+        import agentic_pipeline  # type: ignore[import-not-found]  # noqa: F401
         return True, ""
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, f"cannot import QED agentic_pipeline: {e}"
 
 
-def _load_export_module():
+def _load_export_module() -> Any:
     """Import ``export_pbpk_to_qed`` from VeriTrial/scripts (single source)."""
     scripts_dir = REPO_ROOT / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     try:
-        import export_pbpk_to_qed as ex  # type: ignore
+        import export_pbpk_to_qed as ex
         return ex
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise RuntimeError(f"cannot import VeriTrial export bridge: {e}") from e
 
 
@@ -109,7 +109,7 @@ def _lean_code_sha256(lean_code: str) -> str:
     return hashlib.sha256(lean_code.encode("utf-8")).hexdigest()
 
 
-def required_lemmas(model_path: Optional[Path] = None) -> List[str]:
+def required_lemmas(model_path: Path | None = None) -> list[str]:
     """Return the required lemma set emitted by the VeriTrial -> QED bridge.
 
     These are exactly the lemmas ``export_pbpk_to_qed.build_lemmas`` produces
@@ -119,13 +119,13 @@ def required_lemmas(model_path: Optional[Path] = None) -> List[str]:
     ex = _load_export_module()
     if model_path is None:
         model_path = REPO_ROOT / "src" / "insilico_trial" / "pbpk" / "model.py"
-    return [l for l in ex.build_lemmas(Path(model_path))
-            if not l.strip().startswith("--")]
+    return [line for line in ex.build_lemmas(Path(model_path))
+            if not line.strip().startswith("--")]
 
 
 def check_qed_proofs(
-    formal_specs_dir: Optional[Path | str] = None,
-    model_path: Optional[Path | str] = None,
+    formal_specs_dir: Path | str | None = None,
+    model_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Check that QED-generated proofs exist and contain no `sorry`.
 
@@ -166,7 +166,7 @@ def check_qed_proofs(
         lemmas = required_lemmas(
             Path(model_path) if model_path is not None else None
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         results["trail_summary"] = (
             f"FORMAL GATE FAILED (fail-closed): lemma export error: {e}"
         )
@@ -221,7 +221,7 @@ def check_qed_proofs(
                     attempt["status"] = "failed"
                     if not result.get("success"):
                         attempt["error"] = result.get("error", "Unknown error")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 failed.append(lemma_expr)
                 attempts.append({
                     "lemma": lemma_expr,
@@ -262,7 +262,7 @@ def check_qed_proofs(
 def _write_trail(
     results: dict[str, Any],
     lemmas: list[str],
-    attempts: Optional[list[dict[str, Any]]] = None,
+    attempts: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write the audit trail to a portable path (never a machine-specific one).
 
@@ -292,14 +292,14 @@ def _write_trail(
             }
         }
         trail_path.write_text(json.dumps(trail_data, indent=2))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # A broken audit trail must surface, not vanish; but never flip the gate.
         results.setdefault("trail_warning", f"could not write trail: {e}")
 
 
 def run_formal_verification(
-    formal_specs_dir: Optional[Path | str] = None,
-    model_path: Optional[Path | str] = None,
+    formal_specs_dir: Path | str | None = None,
+    model_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Run formal verification and integrate results into V&V 40 report.
 

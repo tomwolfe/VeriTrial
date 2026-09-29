@@ -91,6 +91,15 @@ def render_trial_markdown(result: TrialResult) -> str:
     for section, metrics in result.uncertainty.items():
         lines.append(f"### {section}")
         lines.append("")
+        if not isinstance(metrics, dict):
+            # Not a PK-metric summary (e.g. closed_loop_bayesian carries a list
+            # of per-cohort operating-point records). Render it verbatim rather
+            # than pretending its entries are uncertainty dicts.
+            lines.append("```json")
+            lines.append(json.dumps(metrics, indent=2))
+            lines.append("```")
+            lines.append("")
+            continue
         lines.append("| Metric | Median | p5 | p95 |")
         lines.append("| --- | ---: | ---: | ---: |")
         for metric in ("cmax", "auc_inf", "half_life", "cl_f"):
@@ -158,6 +167,11 @@ def render_trial_html(result: TrialResult) -> str:
 
     body_html.append("<h2>Uncertainty (median [p5-p95])</h2>")
     for section, metrics in result.uncertainty.items():
+        if not isinstance(metrics, dict):
+            # See render_trial_markdown: non-dict sections are not PK metrics.
+            body_html.append(f"<h3>{_esc(section)}</h3><pre>"
+                             + _esc(json.dumps(metrics, indent=2)) + "</pre>")
+            continue
         body_html.append(f"<h3>{_esc(section)}</h3><table>"
                          "<tr><th>Metric</th><th>Median</th><th>p5</th><th>p95</th></tr>")
         for metric in ("cmax", "auc_inf", "half_life", "cl_f"):

@@ -196,8 +196,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     # warfarin data via NUTS and attach posterior-predictive summaries so
     # the V&V report carries calibrated uncertainty, not point estimates.
     try:
-        from insilico_trial.stats import calibrate_pbpk_nuts, posterior_predictive_pk
         import jax.numpy as _jnp
+
+        from insilico_trial.stats import calibrate_pbpk_nuts
         _t = _jnp.asarray([0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 24.0])
         _y = _jnp.asarray([1.2, 2.0, 2.6, 2.3, 1.7, 1.2, 0.5])
         _post = calibrate_pbpk_nuts(_t, _y, 10.0, n_samples=100)
@@ -236,7 +237,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             vvv40_path=str(out_dir / "vvv40_report.html"),
         )
         print(f"Provenance merkle root: {prov['merkle_root']}")
-    except Exception as _e:  # noqa: BLE001 - provenance must not mask results
+    except Exception as _e:
         print(f"WARNING: could not seal provenance chain: {_e}",
               file=sys.stderr)
     return 0

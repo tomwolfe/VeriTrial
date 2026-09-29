@@ -28,7 +28,12 @@ make report        # regenerate HTML/Markdown reports for prior runs
   import (`src/insilico_trial/__init__.py`) unless
   `VERITRIAL_ALLOW_METAL=1` is set, but even then diffrax fails on Metal.
   **All runs are CPU-only.** A 1000-patient 7-day SAD run completes in
-  ~10 s on a single CPU thread (~99 patients/sec). See
+  ~1.3 s on a single CPU thread (~790 patients/sec; see
+  `output/benchmark/benchmark_results.json` for the measured figure on
+  the machine that produced this checkout). The step size is not a magic
+  constant: `solve_pbpk_batch` caps `dt` at 90% of the QED Metzler
+  stability bound `min_j 1/|K_jj|`, and the trajectory agrees with a 10x
+  finer step to ~5e-6 relative. See
   `docs/ASSUMPTIONS.md` §5 and `docs/gap_closure_plan.md` §G1.
 
 See [PLAN.md](PLAN.md) for the phased strategy and

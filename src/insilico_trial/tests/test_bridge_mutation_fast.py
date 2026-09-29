@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,6 +23,15 @@ import export_pbpk_to_qed as ex  # noqa: E402
 import verify_formal_gate as gate  # noqa: E402
 
 MODEL = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
+
+
+
+
+def _expr(src: str) -> ast.expr:
+    """Parse ``src`` as a single expression and return its AST node."""
+    node = ast.parse(src).body[0]
+    assert isinstance(node, ast.Expr), f"not an expression: {src!r}"
+    return node.value
 
 
 def test_fast_state_variables() -> None:
@@ -208,16 +218,16 @@ def test_fast_main_writes_lemmas(tmp_path: Path) -> None:
 
 
 def test_fast_sym_diff_identities() -> None:
-    one = ast.dump(ast.parse("1").body[0].value)
-    zero = ast.dump(ast.parse("0").body[0].value)
-    assert ast.dump(ex._sym_diff(ast.parse("x").body[0].value, "x")) == one
-    assert ast.dump(ex._sym_diff(ast.parse("y").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("3.5").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("x ** 2").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("f(x, k=1)").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("Q[i]").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("-x").body[0].value, "x")) != zero
-    assert ast.dump(ex._sym_diff(ast.parse("x + y").body[0].value, "x")) != zero
+    one = ast.dump(_expr("1"))
+    zero = ast.dump(_expr("0"))
+    assert ast.dump(ex._sym_diff(_expr("x"), "x")) == one
+    assert ast.dump(ex._sym_diff(_expr("y"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("3.5"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("x ** 2"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("f(x, k=1)"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("Q[i]"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("-x"), "x")) != zero
+    assert ast.dump(ex._sym_diff(_expr("x + y"), "x")) != zero
 
 
 def test_fast_gate_sorry_detection() -> None:
@@ -312,17 +322,17 @@ def test_fast_parametric_sum_fully_expanded() -> None:
 
 
 def test_fast_sym_diff_call_passthrough() -> None:
-    one = ast.dump(ast.parse("1").body[0].value)
-    node = ast.parse("jnp.asarray(x)").body[0].value
+    one = ast.dump(_expr("1"))
+    node = _expr("jnp.asarray(x)")
     assert ast.dump(ex._sym_diff(node, "x")) == one
 
 
 def test_fast_sym_diff_subscript_of_var() -> None:
-    one = ast.dump(ast.parse("1").body[0].value)
-    zero = ast.dump(ast.parse("0").body[0].value)
-    assert ast.dump(ex._sym_diff(ast.parse("x[i]").body[0].value, "x")) == one
-    assert ast.dump(ex._sym_diff(ast.parse("Q[i]").body[0].value, "x")) == zero
-    assert ast.dump(ex._sym_diff(ast.parse("x.y").body[0].value, "x")) == zero
+    one = ast.dump(_expr("1"))
+    zero = ast.dump(_expr("0"))
+    assert ast.dump(ex._sym_diff(_expr("x[i]"), "x")) == one
+    assert ast.dump(ex._sym_diff(_expr("Q[i]"), "x")) == zero
+    assert ast.dump(ex._sym_diff(_expr("x.y"), "x")) == zero
 
 
 def test_fast_metzler_alias() -> None:
@@ -438,7 +448,7 @@ def test_fast_gate_split_summands() -> None:
 
 
 def test_fast_gate_independent_column_sums() -> None:
-    import sympy as _sp
+    import sympy as _sp  # type: ignore[import-untyped]
     cols = gate._independent_column_sums(MODEL)
     assert len(cols) == 6
     for terms in cols:
@@ -494,7 +504,9 @@ def test_fast_gate_detect_mathlib_env(monkeypatch, tmp_path: Path) -> None:
 
 def test_fast_gate_elan_bin_dir(monkeypatch, tmp_path: Path) -> None:
     import shutil
-    assert gate._elan_bin_dir() == str(Path(shutil.which("elan")).resolve().parent)
+    elan = shutil.which("elan")
+    assert elan is not None
+    assert gate._elan_bin_dir() == str(Path(elan).resolve().parent)
     monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
     monkeypatch.delenv("ELAN_HOME", raising=False)
     assert gate._elan_bin_dir() is None
@@ -653,7 +665,7 @@ def _axiom_stdout(extra_axioms=("[propext, Classical.choice, Quot.sound]")) -> s
 
 
 def _patch_full_success(monkeypatch, tmp_path: Path, axiom_out: str | None = None):
-    calls: list = []
+    calls: list[Any] = []
 
     def _fake_run(qed, args):
         calls.append(args)
@@ -662,7 +674,7 @@ def _patch_full_success(monkeypatch, tmp_path: Path, axiom_out: str | None = Non
         return _FakeProc(0, axiom_out if axiom_out is not None else _axiom_stdout(), "")
 
     monkeypatch.setattr(gate, "_run_lean", _fake_run)
-    monkeypatch.setattr(gate.sys, "executable", sys.executable)
+    monkeypatch.setattr(sys, "executable", sys.executable)
     import subprocess as _sp
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _FakeProc(0, "QED OK", ""))
     return calls
@@ -680,7 +692,7 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     (qed / "VeriTrialExport.lean").write_text("x = 1\n")
     monkeypatch.setattr(gate, "qed_dir", lambda: qed)
     # Lean compile failure (axiom check would succeed: isolates the first guard).
-    calls0: list = []
+    calls0: list[Any] = []
 
     def _fake_compile_fail(qed, args):
         calls0.append(args)
@@ -691,7 +703,7 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gate, "_run_lean", _fake_compile_fail)
     assert gate.main([str(f), "--no-strict"]) == 1
     # Axiom-check compile failure (export compile would succeed).
-    calls0b: list = []
+    calls0b: list[Any] = []
 
     def _fake_axiom_fail(qed, args):
         calls0b.append(args)
@@ -712,13 +724,13 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     _patch_full_success(monkeypatch, tmp_path, "nothing here\n")
     assert gate.main([str(f), "--no-strict"]) == 1
     # Axiom block raising a non-SystemExit error fails closed.
-    calls2: list = []
+    calls2: list[Any] = []
 
     def _fake_none_axiom(qed, args):
         calls2.append(args)
         if len(calls2) == 1:
             return _FakeProc(0, "compiled", "")
-        return _FakeProc(0, None, "")  # type: ignore[arg-type]
+        return _FakeProc(0, None, "")
 
     _patch_prelean(monkeypatch, base)
     monkeypatch.setattr(gate, "_run_lean", _fake_none_axiom)
@@ -798,7 +810,7 @@ def test_fast_gate_subprocess_kwargs_spy(tmp_path: Path, monkeypatch) -> None:
     (qed / "VeriTrialExport.lean").write_text("x = 1\n")
     monkeypatch.setattr(gate, "qed_dir", lambda: qed)
     _patch_full_success(monkeypatch, tmp_path)
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     def _spy(*args, **kwargs):
         seen.update(kwargs)

@@ -12,9 +12,9 @@ stress, ALT leakage, intracellular bile acid accumulation, and hepatocyte stress
 The system captures:
 - GSH depletion by drug-mediated depletion
 - Mitochondrial stress from drug-induced mitochondrial permeability transition
-- ALT leakage driven by GSH depletion × mitochondrial stress × bile-acid stress
+- ALT leakage driven by GSH depletion x mitochondrial stress x bile-acid stress
 - Bile acid (BA) dynamics via BSEP inhibition
-- Hepatocyte stress (HS) from bile acid × mitochondrial stress coupling
+- Hepatocyte stress (HS) from bile acid x mitochondrial stress coupling
 
 The module provides:
 
@@ -25,13 +25,11 @@ The module provides:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
-
-from insilico_trial.pbpk.solvers import solve_implicit
-
 
 # ---------------------------------------------------------------------------
 # Default QSP parameters (literature-derived, 70 kg reference)
@@ -101,7 +99,6 @@ def dili_qsp_ode(
     k_elim = args["k_elim"]
     ALT_base = args["ALT_base"]
 
-    k_bsep = args.get("k_bsep", 0.3)
     IC50_bsep = args.get("IC50_bsep", 2.0)
     k_ba_synth = args.get("k_ba_synth", 0.1)
     k_ba_efflux = args.get("k_ba_efflux", 0.5)
@@ -117,7 +114,7 @@ def dili_qsp_ode(
     # --- BSEP inhibition (fractional block) ---
     bsep_inhib = C_liver / (IC50_bsep + C_liver)
 
-    # --- ALT leakage: driven by GSH depletion × mitochondrial stress ×
+    # --- ALT leakage: driven by GSH depletion x mitochondrial stress x
     #     bile-acid stress ---
     dALT = k_leak * (1.0 - GSH) * S_mito * (1.0 + BA) - k_elim * (ALT - ALT_base)
 
@@ -146,12 +143,18 @@ class DiliQSPResult:
     HS_trajectory: jnp.ndarray  # (n_timepoints,)
     max_ALT: float
     min_GSH: float
-    ALT_3x_uln: bool  # ALT > 3 × ULN (120 U/L)
+    ALT_3x_uln: bool  # ALT > 3 x ULN (120 U/L)
     max_bili: float = 0.0  # max bilirubin proxy
     hy_law_criteria_met: bool = False  # ALT > 3x ULN + Bilirubin > 2x ULN
 
 
-def _rk4_step(f, t, y, dt, args):
+def _rk4_step(
+    f: Callable[[float, jnp.ndarray, Any], jnp.ndarray],
+    t: float,
+    y: jnp.ndarray,
+    dt: float,
+    args: Any,
+) -> jnp.ndarray:
     """Single RK4 step."""
     k1 = f(t, y, args)
     k2 = f(t + dt / 2.0, y + dt / 2.0 * k1, args)
@@ -219,7 +222,7 @@ def solve_dili_qsp(
 
     # RK4 integration loop
     ys = y0[None, :]  # add time dimension
-    t_cur = t_eval[0]
+    t_cur = float(t_eval[0])
     y = y0
     for _ in range(n_steps - 1):
         y = _rk4_step(dili_qsp_ode, t_cur, y, stable_dt, params)
@@ -244,7 +247,7 @@ def solve_dili_qsp(
     max_alt = float(jnp.max(ALT))
     min_gsh = float(jnp.min(GSH))
 
-    # ALT > 3 × ULN = 120 U/L
+    # ALT > 3 x ULN = 120 U/L
     alt_3x_uln = max_alt > 3.0 * 40.0
 
     # Hy's Law: ALT > 3x ULN + bilirubin > 2x ULN

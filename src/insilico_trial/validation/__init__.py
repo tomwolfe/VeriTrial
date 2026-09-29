@@ -15,12 +15,12 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as onp
 
-from insilico_trial.pd import cardiac_apd_effect
 from insilico_trial.pbpk.model import build_pbpk_params, run_pbpk, solve_pbpk_batch
+from insilico_trial.pd import cardiac_apd_effect
 from insilico_trial.population.generator import generate_population
 from insilico_trial.schemas import Observation, load_drug_config, load_population_config
 from insilico_trial.trial.engine import compute_nca
@@ -1133,12 +1133,12 @@ def build_regulatory_provenance(
         files);
       * the Tether session report ID and session Merkle root when present.
     """
-    def _load(p: str | Path | None, defaults: dict) -> dict:
+    def _load(p: str | Path | None, defaults: dict[str, Any]) -> dict[str, Any]:
         if p is None:
             return dict(defaults)
         pp = Path(p)
         if pp.is_file():
-            return json.loads(pp.read_text(encoding="utf-8"))
+            return cast("dict[str, Any]", json.loads(pp.read_text(encoding="utf-8")))
         return dict(defaults)
 
     def _git_sha(repo: Path) -> str | None:

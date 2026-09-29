@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import Any
 from pathlib import Path
 
 
@@ -142,7 +143,7 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     return file_lemmas
 
 
-def _independent_column_sums(model_path: Path) -> list:
+def _independent_column_sums(model_path: Path) -> list[list[Any]]:
     """Re-derive the 6 PBPK Jacobian column sums WITHOUT the export bridge.
 
     Independent oracle (defense in depth): parses ``pbpk_ode`` with its own
@@ -155,7 +156,7 @@ def _independent_column_sums(model_path: Path) -> list:
     """
     import ast as _ast
     import re as _re
-    import sympy as _sp
+    import sympy as _sp  # type: ignore[import-untyped]
 
     def _tok(expr: str) -> str:
         expr = _re.sub(r"Q\s*\[\s*_LIVER_IDX\s*\]", "Ql", expr)
@@ -279,12 +280,12 @@ def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
         raise SystemExit(1)
     states = ("A_gut", "A_liver", "A_central", "A_periph", "A_effect",
               "C_p", "C_liver", "C_periph", "C_effect")
-    expected: list = []
+    expected: list[Any] = []  # sympy expressions, not strings
     for terms in expected_cols:
         for t in terms:
             if t != 0:
                 expected.append(t)
-    found: list = []
+    found: list[Any] = []  # sympy expressions, not strings
     for lemma in file_lemmas:
         if "=" not in lemma or ">" in lemma or "<" in lemma:
             continue
@@ -432,7 +433,7 @@ def _is_metzler_positivity(lemma: str) -> bool:
         qed = qed_dir()
         if str(qed) not in sys.path:
             sys.path.insert(0, str(qed))
-        from parser import parse_equation, is_positivity
+        from parser import parse_equation, is_positivity  # type: ignore[import-not-found]
         node, _ = parse_equation(lemma)
         if node is not None:
             return bool(is_positivity(node))
@@ -744,7 +745,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        from export_pbpk_to_qed import (  # type: ignore
+        from export_pbpk_to_qed import (
             extract_column_sum_lemmas as _col_sums,
         )
         _genuine_cols = set(_col_sums(_veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"))

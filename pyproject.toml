@@ -99,6 +99,10 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 show_error_codes = true
+# The formal-gate scripts are imported by the tests by their bare name
+# (VeriTrial/scripts is put on sys.path at runtime), so mypy has to be able to
+# find them by the same name.
+mypy_path = "scripts"
 files = ["src/insilico_trial"]
 
 [[tool.mypy.overrides]]

@@ -23,11 +23,11 @@ NOTES
 from __future__ import annotations
 
 import math
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-
 
 # ---------------------------------------------------------------------------
 # SDIRK2 constants (L-stable 2nd-order SDIRK from Hairer-Wanner)
@@ -75,7 +75,7 @@ def _sdirk2_step(
     # ``solve_implicit`` (global gain check), which is the correct
     # fail-closed design: genuine mass creation still yields NaN.
 
-    return y_new
+    return jnp.asarray(y_new)
 
 
 def solve_implicit(
@@ -140,13 +140,12 @@ def solve_implicit(
     ys_internal = jnp.where(poison, jnp.nan * ys_internal, ys_internal)
 
     # Interpolate onto requested output grid
-    interp_fn = jax.vmap(
-        lambda col: jnp.interp(t_eval, t_internal, col),
-        in_axes=1,
-        out_axes=1,
-    )
+    def _interp_col(col: jnp.ndarray) -> jnp.ndarray:
+        return jnp.interp(t_eval, t_internal, col)
+
+    interp_fn = jax.vmap(_interp_col, in_axes=1, out_axes=1)
     ys_out = interp_fn(ys_internal)
-    return ys_out
+    return jnp.asarray(ys_out)
 
 
 def solve_implicit_batch(

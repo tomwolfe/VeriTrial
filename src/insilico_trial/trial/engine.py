@@ -18,14 +18,13 @@ import jax.numpy as jnp
 import numpy as onp
 
 from insilico_trial.pbpk.fixed_step import (
-    solve_pbpk_batch_fixed_step,
     solve_pbpk_batch_multi_dose_fixed_step,
     solve_pbpk_batch_with_compartments,
 )
 from insilico_trial.pbpk.model import (
+    _QSP_DEFAULTS,
     DEFAULT_ORGAN_NETWORK,
     STANDARD_14_ORGAN_NETWORK,
-    _QSP_DEFAULTS,
     build_pbpk_params,
     solve_pbpk_single,
 )
@@ -212,8 +211,9 @@ def boin_pr_toxic_exceeds(d: int, n: int, phi: float = BOIN_PHI) -> float:
 
 def _stable_dt_for_batch(params_batch: dict[str, Any], dt_requested: float = 0.01) -> float:
     """Adaptive dt honoring the QED Metzler bound (fail-closed upstream)."""
-    from insilico_trial.pbpk.fixed_step import _assert_batch_dt_stable, calculate_max_stable_dt
     import numpy as _np
+
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
     try:
         n = len(_np.asarray(params_batch.get("CL", [0.0])).ravel())
     except Exception:
@@ -573,9 +573,9 @@ class TrialEngine:
         elif effective_solver == "sdirk2":
             # SDIRK2 implicit solver (pure JAX, no lineax): batch-solve
             # via solve_implicit_batch which returns full state trajectories.
-            from insilico_trial.pbpk.solvers import solve_implicit_batch
-            from insilico_trial.pbpk.model import pbpk_ode as _pbpk_ode
             from insilico_trial.pbpk.model import _LIVER_IDX as _LI
+            from insilico_trial.pbpk.model import pbpk_ode as _pbpk_ode
+            from insilico_trial.pbpk.solvers import solve_implicit_batch
 
             n_states = len(self._organ_network())
             y0_batch = jnp.zeros((len(cohort_patients), n_states), dtype=jnp.float64)
@@ -642,8 +642,13 @@ class TrialEngine:
         """
         dosing_events = self._get_dosing_events()
         if not dosing_events:
-            # Fall back to single-dose SAD
-            return self._solve_cohort_batch(cohort_patients, administered_doses, solver)
+            # Fall back to single-dose SAD. The cohort solver also returns the
+            # liver trace; this API does not carry it, and the MAD entry point
+            # substitutes zeros there too.
+            t_grid, c_batch, _c_liver = self._solve_cohort_batch(
+                cohort_patients, administered_doses, solver
+            )
+            return t_grid, c_batch
 
         t_end_h = float(self.protocol.observation_period_days * 24)
         t_eval_hours = onp.linspace(0, t_end_h, max(int(t_end_h) + 1, 50))
@@ -710,7 +715,7 @@ class TrialEngine:
         # Build dose_amounts (n_patients, n_doses) - each patient's absorbed dose
         dose_amounts = onp.zeros((n_patients, len(events)), dtype=onp.float64)
         for i in range(n_patients):
-            for j, event in enumerate(events):
+            for j, _event in enumerate(events):
                 dose_amounts[i, j] = administered_doses[i] * self.drug.bioavailability
 
         # Build batched params, including QSP keys for 9-state ODE
@@ -741,8 +746,12 @@ class TrialEngine:
         params_list: list[dict[str, Any]],
     ) -> tuple[onp.ndarray, onp.ndarray]:
         """MAD batch solve using diffrax with event-driven dosing (not yet implemented)."""
-        # Fallback to SAD for now
-        return self._solve_cohort_batch(cohort_patients, administered_doses, "diffrax")
+        # Fallback to SAD for now; the liver trace this 2-tuple API drops is
+        # not consumed on the MAD path.
+        t_grid, c_batch, _c_liver = self._solve_cohort_batch(
+            cohort_patients, administered_doses, "diffrax"
+        )
+        return t_grid, c_batch
 
     def _check_steady_state(
         self,
@@ -884,8 +893,6 @@ class TrialEngine:
         ALT/bilirubin.
         """
         observations: list[Observation] = []
-        liver_exposure = pk_summary.get("auc_last") or 0.0
-
         for visit in self.protocol.visit_schedule:
             target_time = float(visit.time)  # hours from first dose
 

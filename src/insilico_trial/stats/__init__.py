@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
@@ -55,8 +54,8 @@ def calibrate_pbpk_nuts(
     """
     from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
     from insilico_trial.pbpk.model import (
-        DEFAULT_ORGAN_NETWORK,
         _CENTRAL_IDX,
+        DEFAULT_ORGAN_NETWORK,
         build_pbpk_params,
         predict_pbpk_plasma_linear,
     )
