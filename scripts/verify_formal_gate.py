@@ -48,13 +48,21 @@ def _veritrial_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _live_model_lemmas(include_ode: bool = False, parametric: bool = True) -> list[str]:
+def _live_model_lemmas(include_ode: bool = False, parametric: bool = True,
+                       fin_n: int | None = None,
+                       saturable: bool | None = None) -> list[str]:
     """The single source of truth: lemmas ``export_pbpk_to_qed.build_lemmas``
     emits from the CURRENT PBPK model source (``src/insilico_trial/pbpk/model.py``).
 
     Importing the bridge directly (rather than re-declaring a lemma list) is
     what keeps this gate fail-closed against hand-edited / stale lemma files:
     only what the live model actually produces is acceptable.
+
+    ``fin_n`` must be the same organ-network state count the export was
+    produced with. It is required, not optional: the emitted lemma set is a
+    function of the network (one Metzler and one inflow invariant PER perfused
+    tissue), so a gate that defaulted to the six-organ network would compare a
+    14-organ file against 6-organ expectations and fail for the wrong reason.
     """
     scripts_dir = _veritrial_root() / "scripts"
     if str(scripts_dir) not in sys.path:
@@ -64,11 +72,19 @@ def _live_model_lemmas(include_ode: bool = False, parametric: bool = True) -> li
     model_path = (
         _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
     )
+    if fin_n is None:
+        raise SystemExit(
+            "FORMAL GATE FAILED (fail-closed): --fin-n is required. The lemma "
+            "set depends on the organ network, so the gate cannot infer which "
+            "network the supplied file was exported for."
+        )
     return ex.build_lemmas(model_path, include_ode_lemmas=include_ode,
-                           parametric=parametric)
+                           parametric=parametric, fin_n=fin_n,
+                           saturable=saturable)
 
 
-def _check_single_source(lemmas_file: Path) -> list[str]:
+def _check_single_source(lemmas_file: Path, fin_n: int,
+                         saturable: bool | None = None) -> list[str]:
     """Fail-closed consistency check: the supplied lemma file MUST be exactly
     the set of lemmas the live PBPK model emits. Any drift (a hand-maintained
     duplicate, a stale capture, an injected/removed lemma) makes the gate fail
@@ -99,7 +115,9 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
             break
 
     try:
-        emitted = [l for l in _live_model_lemmas(parametric=has_parametric)
+        emitted = [l for l in _live_model_lemmas(parametric=has_parametric,
+                                                 fin_n=fin_n,
+                                                 saturable=saturable)
                    if not l.strip().startswith("--")]
         # Certify the structural conservation path through QED's no-sorry
         # gate: the file must carry the Jacobian term-accounting certificate
@@ -108,7 +126,7 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
         import export_pbpk_to_qed as _ex
         from pathlib import Path as _P
         _mp = _P(__file__).resolve().parents[1] / "src" / "insilico_trial" / "pbpk" / "model.py"
-        _required = [_ex.build_column_sum_certificate(_mp)]
+        _required = [_ex.build_column_sum_certificate(_mp, fin_n)]
         if has_parametric:
             _required.append(_ex.build_parametric_sum_lemma(_mp))
         for _l in _required:
@@ -147,7 +165,8 @@ def _check_single_source(lemmas_file: Path) -> list[str]:
     return file_lemmas
 
 
-def _independent_column_sums(model_path: Path) -> list[list[Any]]:
+def _independent_column_sums(model_path: Path, fin_n: int,
+                             saturable: bool = False) -> list[list[Any]]:
     """Re-derive the 6 PBPK Jacobian column sums WITHOUT the export bridge.
 
     Independent oracle (defense in depth): parses ``pbpk_ode`` with its own
@@ -162,34 +181,105 @@ def _independent_column_sums(model_path: Path) -> list[list[Any]]:
     import re as _re
     import sympy as _sp  # type: ignore[import-untyped]
 
+    # The organ network this re-derivation is for. The index -> role map is
+    # read from the LIVE model (not hardcoded to the six-organ layout), so the
+    # oracle below is N-generic: a 14-organ file is checked against a
+    # 14-organ Jacobian.
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+        organ_indices,
+    )
+    if fin_n == len(DEFAULT_ORGAN_NETWORK):
+        network = DEFAULT_ORGAN_NETWORK
+    elif fin_n == len(STANDARD_14_ORGAN_NETWORK):
+        network = STANDARD_14_ORGAN_NETWORK
+    else:
+        raise ValueError(f"unsupported organ network size: {fin_n}")
+    spec = organ_indices(network)
+
+    def _state_symbol(index: int) -> str:
+        """Symbol for state ``index``: the organ's own name, periph spelled out."""
+        name = network[index]
+        return "A_" + ("periph" if name == "peripheral" else name)
+
+    # Q/V/Kp indexed by the model's symbolic index constants AND by literal
+    # integers: the six-organ branch names its indices (_LIVER_IDX) while the
+    # N-organ comprehension uses bare loop indices that resolve to the same
+    # positions. Both must tokenize to the SAME symbol for a given state, or
+    # the two branches would look like different parameters.
+    idx_const = {
+        "_GUT_IDX": spec["gut"], "_LIVER_IDX": spec.get("liver"),
+        "_PERIPHERAL_IDX": network.index("peripheral")
+        if "peripheral" in network else None,
+        "_EFFECT_SITE_IDX": network.index("effect") if "effect" in network else None,
+        "_CENTRAL_IDX": spec["central"], "_ELIM_IDX": spec["elim"],
+        # The model also indexes by the ROLE NAME, not just a constant.
+        "gut": spec["gut"], "central": spec["central"], "elim": spec["elim"],
+        "liver": spec.get("liver"),
+        "peripheral": network.index("peripheral") if "peripheral" in network else None,
+        "effect": network.index("effect") if "effect" in network else None,
+    }
+
+    # Organ -> symbolic suffix, following the MODEL's own convention: the
+    # liver, peripheral tissue and effect site are the three organs the
+    # perfusion algebra names symbolically, so they keep the l/p/e suffix;
+    # every other organ is named by its state index. The oracle must use the
+    # SAME symbols the bridge emits, or every term would look unmatched.
+    suffix_by_index = {
+        network.index(name): suffix
+        for name, suffix in (("liver", "l"), ("peripheral", "p"),
+                             ("effect", "e"))
+        if name in network
+    }
+
+    def _resolve_index(token: str) -> int | None:
+        token = token.strip()
+        if token.isdigit():
+            return int(token)
+        return idx_const.get(token)
+
+    # The central compartment's own volume is the one the bridge spells ``Vc``
+    # (it is the shared source volume in every inflow term), not ``V<index>``.
+    central = spec["central"]
+
+    def _sym(index: int, prefix: str) -> str:
+        if index == central:
+            return f"{prefix}c"
+        return f"{prefix}{suffix_by_index.get(index, index)}"
+
     def _tok(expr: str) -> str:
-        expr = _re.sub(r"Q\s*\[\s*_LIVER_IDX\s*\]", "Ql", expr)
-        expr = _re.sub(r"Q\s*\[\s*_PERIPHERAL_IDX\s*\]", "Qp", expr)
-        expr = _re.sub(r"Q\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Qe", expr)
-        expr = _re.sub(r"Q\s*\[\s*_CENTRAL_IDX\s*\]", "Qc", expr)
-        expr = _re.sub(r"Kp\s*\[\s*_LIVER_IDX\s*\]", "Kpl", expr)
-        expr = _re.sub(r"Kp\s*\[\s*_PERIPHERAL_IDX\s*\]", "Kpp", expr)
-        expr = _re.sub(r"Kp\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Kpe", expr)
-        expr = _re.sub(r"Kp\s*\[\s*_CENTRAL_IDX\s*\]", "Kpc", expr)
-        expr = _re.sub(r"V\s*\[\s*_LIVER_IDX\s*\]", "Vl", expr)
-        expr = _re.sub(r"V\s*\[\s*_PERIPHERAL_IDX\s*\]", "Vp", expr)
-        expr = _re.sub(r"V\s*\[\s*_EFFECT_SITE_IDX\s*\]", "Ve", expr)
-        expr = _re.sub(r"V\s*\[\s*_CENTRAL_IDX\s*\]", "Vc", expr)
-        state_names = {
-            "gut": "A_gut", "1": "A_liver", "central": "A_central",
-            "2": "A_central", "3": "A_periph", "4": "A_effect", "elim": "A_elim",
-        }
-        expr = _re.sub(
-            r"y\s*\[\s*([A-Za-z_]+|\d+)\s*\]",
-            lambda match: state_names.get(match.group(1), match.group(1)),
-            expr,
-        )
-        expr = _re.sub(r"\bV\s*\[\s*1\s*\]", "Vl", expr)
-        expr = _re.sub(r"\bV\s*\[\s*3\s*\]", "Vp", expr)
-        expr = _re.sub(r"\bV\s*\[\s*4\s*\]", "Ve", expr)
-        expr = _re.sub(r"\bV\s*\[\s*central\s*\]", "Vc", expr)
-        expr = _re.sub(r"\bV\s*\[\s*[^\]]+\s*\]", "V", expr)
+        # The opt-in guard itself (`vmax is not None and km is not None and
+        # vmax > 0 ...`) is a test, never a derivative, but the walk collects
+        # every assignment in the function including ones written in terms of
+        # the guard's locals. Those locals stand for the two metabolic
+        # parameters, so they must be real symbols here or the expression
+        # reaches sympy as attribute access on a Symbol.
+        expr = _re.sub(r"\bvmax\b", "Vmax", expr)
+        expr = _re.sub(r"\bkm\b", "Km", expr)
+        # Resolve the spec's index map FIRST. The saturable arm reaches the
+        # liver through `y[spec['liver']]`, and every index resolver below works
+        # on a literal position; leaving the map unresolved until afterwards
+        # would rewrite it to `y[1]` too late for those resolvers to see it.
+        for _role in ("liver", "gut", "central", "elim"):
+            _idx = spec.get(_role)
+            if _idx is not None:
+                expr = _re.sub(rf"spec\[\s*['\"]{_role}['\"]\s*\]", str(_idx),
+                               expr)
+        # Parameter arrays indexed by a state position.
+        for arr, prefix in (("Q", "Q"), ("V", "V"), ("Kp", "Kp")):
+            def _sub(m: _re.Match[str], arr=arr, prefix=prefix) -> str:
+                index = _resolve_index(m.group(1))
+                return m.group(0) if index is None else _sym(index, prefix)
+            expr = _re.sub(rf"\b{arr}\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]", _sub, expr)
+        # States: y[k] and y[central] alike.
+        def _ysub(m: _re.Match[str]) -> str:
+            index = _resolve_index(m.group(1))
+            return m.group(0) if index is None else _state_symbol(index)
+        expr = _re.sub(r"\by\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]", _ysub, expr)
         expr = _re.sub(r"args\s*\[\s*['\"](\w+)['\"]\s*\]", r"\1", expr)
+        expr = _re.sub(r"args\s*\[\s*['\"]vmax_metabolic['\"]\s*\]", "Vmax", expr)
+        expr = _re.sub(r"args\s*\[\s*['\"]km_metabolic['\"]\s*\]", "Km", expr)
         expr = _re.sub(r"\bka\b", "ka", expr)
         return expr
 
@@ -199,26 +289,178 @@ def _independent_column_sums(model_path: Path) -> list[list[Any]]:
     nested = [n for n in _ast.walk(fn)
               if n is not fn and isinstance(n, _ast.FunctionDef)]
     fn = nested[0] if nested else fn
+    # ``make_pbpk_ode`` keeps BOTH the six-organ and the N-organ algebra in one
+    # function, guarded by ``if len(organ_network) == 6``. Taking assignments
+    # from both would mix two different models (first-wins would silently pick
+    # the six-organ central equation for a 14-organ run), so each assignment is
+    # tagged with the branch that guards it and only the branch that runs for
+    # THIS network is read. Unguarded assignments always run.
+    is_six = fin_n == len(DEFAULT_ORGAN_NETWORK)
+
+    def _in(stmts: list[_ast.stmt]) -> set[int]:
+        return {id(n) for stmt in stmts for n in _ast.walk(stmt)}
+
+    six_ids: set[int] = set()
+    n_ids: set[int] = set()
+    # The saturable opt-in is guarded by a DIFFERENT condition than the
+    # six/N split, so it needs its own bucket: classifying it as "six" or "n"
+    # would pick the wrong arm for a network it has nothing to do with.
+    sat_on_ids: set[int] = set()
+    sat_off_ids: set[int] = set()
+    for anc in _ast.walk(fn):
+        if not isinstance(anc, _ast.If):
+            continue
+        test = _ast.unparse(anc.test)
+        if "organ_network" in test and "== 6" in test:
+            six_ids |= _in(anc.body)
+            n_ids |= _in(anc.orelse)
+        elif "vmax" in test or "km" in test:
+            sat_on_ids |= _in(anc.body)
+            sat_off_ids |= _in(anc.orelse)
+
+    def _branch_of(node: _ast.AST) -> str | None:
+        if id(node) in sat_on_ids:
+            return "sat_on"
+        if id(node) in sat_off_ids:
+            return "sat_off"
+        if id(node) in six_ids:
+            return "six"
+        if id(node) in n_ids:
+            return "n"
+        return None
+
     rhs: dict[str, str] = {}
     aliases: dict[str, str] = {}
     for node in _ast.walk(fn):
         if (isinstance(node, _ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], _ast.Name)):
+            branch = _branch_of(node)
+            if branch == "six" and not is_six:
+                continue
+            if branch == "n" and is_six:
+                continue
             t = node.targets[0].id
             s = _tok(_ast.unparse(node.value))
+            if t == "liver_metabolic":
+                # The ODE assigns this in BOTH arms of its opt-in `if`
+                # (Michaelis-Menten when vmax/km are set, zeros otherwise). A
+                # first-wins walk would take whichever arm it happened to reach,
+                # silently certifying one configuration as the other, so the arm
+                # selects the value: the real flux when the saturable
+                # configuration is certified, and exactly 0 when it is not.
+                # First-wins, deliberately: the walk reaches the opt-in arm
+                # before its `else`, and a plain assignment would let the
+                # always-taken zeros arm overwrite the flux we are certifying.
+                # The value is normalized to 0 in every non-certifying arm, so
+                # an unselected arm can never contribute a term.
+                if t not in aliases:
+                    aliases[t] = s if (saturable and branch == "sat_on") else "0"
+                continue
+            if branch == "sat_off" or (branch == "sat_on" and not saturable):
+                # The excluded arm defines helper aliases (C_liver) that the
+                # selected arm also defines; admitting them would let a
+                # definition from the wrong configuration into the expansion.
+                continue
             if t.startswith("dA_") and t not in rhs:
                 rhs[t] = s
             elif not t.startswith("dA_"):
                 aliases[t] = s
-    for index, name in enumerate(("dA_liver", "dA_periph", "dA_effect")):
-        flux_name = f"{name}_flux"
-        if rhs.get(name) == f"flows[{index}]" and flux_name in rhs:
-            rhs[name] = rhs[flux_name]
+    if fin_n == len(DEFAULT_ORGAN_NETWORK):
+        for index, name in enumerate(("dA_liver", "dA_periph", "dA_effect")):
+            flux_name = f"{name}_flux"
+            if rhs.get(name) == f"flows[{index}]" and flux_name in rhs:
+                rhs[name] = rhs[flux_name]
+        # The six-organ central equation subtracts the perfusion FLUXES
+        # (``flows[0] + flows[1] + flows[2]``) rather than the tissue
+        # derivatives, which is what keeps the saturable term booked once.
+        # _expand's whole-word alias substitution cannot rewrite a subscripted
+        # ``flows[...]`` on its own, so each element is replaced by its flux
+        # here. Central's derivative is otherwise left holding a raw list
+        # subscript that never expands.
+        for _i, _flux_name in enumerate(
+                ("dA_liver_flux", "dA_periph_flux", "dA_effect_flux")):
+            _elem = rhs.get(_flux_name)
+            if _elem is not None:
+                rhs["dA_central"] = rhs.get("dA_central", "").replace(
+                    f"flows[{_i}]", f"({_elem})")
+        # The saturable arm re-derives C_liver inside its own branch (the
+        # six-organ C_liver from the top of the function belongs to the LINEAR
+        # flux, where the subscripted indices are already resolved). Taken
+        # first-wins, that redefinition would either shadow the linear one or
+        # leave a raw `y[1]` subscript behind. Dropping it lets the alias fall
+        # back to the already-resolved linear C_liver, which is the same
+        # quantity.
+        # In the six-organ branch the linear `C_liver` uses literal indices
+        # (already resolved by _tok), while the saturable arm re-derives the
+        # same quantity through `spec['liver']`. Excluding the saturable arm
+        # when it is NOT the certified configuration also drops that
+        # redefinition, so the resolved linear alias is what remains — the
+        # same quantity, without a raw `y[spec[...]]` subscript reaching sympy.
+
+    else:
+        # The N-organ branch states its fluxes as a list comprehension over
+        # ``perfused`` rather than naming each one, so a textual alias cannot
+        # expand it. Unroll the comprehension here against the LIVE network's
+        # perfused indices: that is what makes the oracle independent of the
+        # exporter's own unrolling. ``sum(flows)`` is replaced by the concrete
+        # sum, and each perfused state's own derivative is its flux.
+        for node in _ast.walk(fn):
+            if (isinstance(node, _ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], _ast.Name)
+                    and node.targets[0].id == "flows"
+                    and isinstance(node.value, _ast.ListComp)):
+                var = node.value.generators[0].target.id
+                per_index = [
+                    _tok(_ast.unparse(node.value.elt).replace(var, str(k)))
+                    for k in spec["perfused"]
+                ]
+                break
+        else:
+            raise ValueError(
+                "flows comprehension not found in make_pbpk_ode; the "
+                "N-organ re-derivation cannot proceed (fail-closed)")
+        liver = spec.get("liver")
+        for organ, k in zip(
+                (n for n in network if n not in ("gut", "central", "elim")),
+                spec["perfused"]):
+            flux = per_index[list(spec["perfused"]).index(k)]
+            # The generic branch subtracts the saturable flux from whichever
+            # perfused tissue is the liver (``d[k] = f - liver_metabolic if
+            # k == spec['liver']``). The per-organ derivative names are
+            # synthesized from the comprehension, so the subtraction has to be
+            # re-applied here or the liver's metabolic loss would be certified
+            # as absent while ``dA_elim`` still accounts for it — breaking the
+            # column sum by exactly the metabolic rate.
+            if k == liver:
+                flux = f"({flux}) - liver_metabolic"
+            rhs["dA_" + ("periph" if organ == "peripheral" else organ)] = flux
+        if "flows" in rhs:
+            del rhs["flows"]
+        if "flows" in aliases:
+            aliases["flows"] = "(" + " + ".join(f"({f})" for f in per_index) + ")"
+        # ``sum(flows)`` is a call, not a bare name, so the alias substitution
+        # above cannot reach it. Rewrite the call into the parenthesized sum.
+        for name, val in list(rhs.items()):
+            rhs[name] = val.replace("sum(flows)", aliases.get("flows", "flows"))
+        for name, val in list(aliases.items()):
+            aliases[name] = val.replace("sum(flows)", aliases.get("flows", "flows"))
     # N-generic: order follows the model's return vector (via the export
     # bridge); accumulator columns differentiate to zero automatically.
-    import export_pbpk_to_qed as _exo
-    _rhs, order = _exo._ode_rhs_asts(model_path)
-    states = [d[1:] for d in order]
+    # State order and the derivative assigned to each state. Taken from the
+    # network (the model's own return vector is indexed by state position),
+    # NOT from the set of names the exporter happens to have emitted: for the
+    # N-organ branch the perfused derivatives are written as ``d[k] = f`` in a
+    # loop, so no ``dA_<organ>`` name exists in the source to discover, and an
+    # exporter-driven order would silently certify a 4-column Jacobian for a
+    # 14-state model.
+    order = ["dA_" + ("periph" if name == "peripheral" else name)
+             for name in network]
+    states = [name[1:] for name in order]
+    for name in order:
+        if name not in rhs:
+            raise ValueError(
+                f"no derivative assignment found for {name} in the "
+                f"fin_n={fin_n} branch of make_pbpk_ode (fail-closed)")
 
     def _expand(expr: str) -> str:
         for _ in range(20):
@@ -260,7 +502,8 @@ def _split_summands(lhs: str) -> list[str]:
 
 
 def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
-                                 quiet: bool = False) -> None:
+                                 fin_n: int, quiet: bool = False,
+                                 saturable: bool = False) -> None:
     """Term-accounting cross-check: every nonzero Jacobian entry must be
     certified in the file's conservation lemmas.
 
@@ -276,19 +519,86 @@ def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
     import re as _re
     import sympy as _sp
 
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+    )
+
     try:
-        expected_cols = _independent_column_sums(model_path)
+        expected_cols = _independent_column_sums(model_path, fin_n, saturable)
     except Exception as e:
         print("FORMAL GATE FAILED (fail-closed): independent column-sum "
               f"re-derivation crashed: {e}", file=sys.stderr)
         raise SystemExit(1)
-    states = ("A_gut", "A_liver", "A_central", "A_periph", "A_effect",
-              "C_p", "C_liver", "C_periph", "C_effect")
-    expected: list[Any] = []  # sympy expressions, not strings
-    for terms in expected_cols:
-        for t in terms:
-            if t != 0:
-                expected.append(t)
+    network = (DEFAULT_ORGAN_NETWORK if fin_n == len(DEFAULT_ORGAN_NETWORK)
+               else STANDARD_14_ORGAN_NETWORK)
+    # State symbols are derived from the network, so the parametric mass sum is
+    # still recognised as a mass sum (and excluded from the column
+    # certificates) for an N-organ file, not only for the six-organ one.
+    states = tuple(
+        ["C_p"] +
+        ["A_" + ("periph" if n == "peripheral" else n) for n in network] +
+        ["C_" + ("periph" if n == "peripheral" else n) for n in network]
+    )
+    # A Jacobian entry is either PARAM-ONLY (the linear perfusion/clearance
+    # algebra) or STATE-DEPENDENT (only ever the saturable metabolic term,
+    # whose derivative is Vmax*Km/(Km+C)^2 / V_liver). The params-only
+    # column-sum certificate can only ever speak about the first kind: a
+    # state-dependent entry has no params-only expression to be written as.
+    # Those are accounted for separately, by requiring the two generic
+    # saturable-flux certificates, which is the theorem that actually governs
+    # them -- rather than by pretending they are absent.
+    state_symbols = [_sp.Symbol(s) for s in states]
+
+    def _partition(cols: list[list[Any]]) -> tuple[list[Any], list[Any]]:
+        """Split Jacobian entries into params-only and state-dependent."""
+        linear: list[Any] = []
+        rest: list[Any] = []
+        for terms in cols:
+            for t in terms:
+                if t == 0:
+                    continue
+                (rest if any(t.has(sym) for sym in state_symbols)
+                 else linear).append(t)
+        return linear, rest
+
+    expected, _unused = _partition(expected_cols)
+    if _unused and not saturable:
+        print("FORMAL GATE FAILED (fail-closed): the Jacobian has "
+              f"{len(_unused)} state-dependent term(s) but the saturable "
+              "path was not certified.", file=sys.stderr)
+        raise SystemExit(1)
+    if _unused:
+        # A Jacobian entry may be a SUM of a linear part and the saturable
+        # self-drain, so the state-dependent term is isolated by DIFFERENCING
+        # against the linear Jacobian rather than by pattern-matching the
+        # entry itself. Every difference must be exactly the metabolic
+        # self-drain -- that is what stops any other nonlinearity from hiding
+        # behind the saturable certificate.
+        linear_cols = _independent_column_sums(model_path, fin_n, False)
+        # The self-drain is d/dA_liver [ Vmax*C_liver/(Km + C_liver) ] with
+        # C_liver = A_liver / V_liver, i.e. the metabolic rate DECREASING as
+        # the liver fills. Any sign is therefore acceptable here: what must
+        # hold is that the magnitude is exactly Vmax*Km/(V_liver*(Km+C)^2).
+        # Sign is not something this check should certify -- it is covered by
+        # the Metzler/diagonal-sign and mass-conservation checks.
+        vmax, km, vl = _sp.Symbol("Vmax"), _sp.Symbol("Km"), _sp.Symbol("Vl")
+        aliver = _sp.Symbol("A_liver")
+        metabolic = vmax * km / (vl * (km + aliver / vl) ** 2)
+        deltas = [
+            _sp.simplify(a - b)
+            for sat_col, lin_col in zip(expected_cols, linear_cols)
+            for a, b in zip(sat_col, lin_col)
+            if _sp.simplify(a - b) != 0
+        ]
+        for delta in deltas:
+            if _sp.simplify(_sp.Abs(delta) - _sp.Abs(metabolic)) != 0:
+                print("FORMAL GATE FAILED (fail-closed): the saturable "
+                      f"Jacobian differs from the linear one by {delta}, "
+                      "which is not the metabolic self-drain "
+                      f"({metabolic}); no other nonlinearity may be certified "
+                      "by the saturable theorem.", file=sys.stderr)
+                raise SystemExit(1)
     found: list[Any] = []  # sympy expressions, not strings
     for lemma in file_lemmas:
         if "=" not in lemma or ">" in lemma or "<" in lemma:
@@ -305,6 +615,17 @@ def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
                     found.append(v)
         except Exception:
             continue
+    if _unused:
+        # ...and the model must actually carry the saturable path, so the Lean
+        # export carries its transport certificates. Requiring the OPT-IN to be
+        # visible in the source is what stops a saturable Jacobian from being
+        # certified by a linear model's export.
+        if "liver_metabolic" not in model_path.read_text(encoding="utf-8"):
+            print("FORMAL GATE FAILED (fail-closed): --saturable was requested "
+                  "but the model does not implement the saturable hepatic "
+                  "path.", file=sys.stderr)
+            raise SystemExit(1)
+
     missing = list(expected)
     for v in found:
         for m in list(missing):
@@ -324,7 +645,8 @@ def _check_column_sum_crosscheck(file_lemmas: list[str], model_path: Path,
         raise SystemExit(1)
 
 
-def run_negative_controls(model_path: Path) -> None:
+def run_negative_controls(model_path: Path, fin_n: int,
+                          saturable: bool = False) -> None:
     """Self-sensitivity controls: the bridge AND this gate must reject
     broken inputs fail-closed (built-in mutation testing).
 
@@ -375,7 +697,7 @@ def run_negative_controls(model_path: Path) -> None:
     # 3. Zeroed conservation certificates: cross-check must refuse.
     try:
         _check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, model_path,
-                                     quiet=True)
+                                     fin_n, quiet=True, saturable=saturable)
         failures.append("zeroed column sums accepted by cross-check")
     except SystemExit:
         pass
@@ -651,6 +973,14 @@ def _run_lean(qed: Path, args: list[str]) -> "subprocess.CompletedProcess[str]":
     )
 
 
+def _sp_run(args: list[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
+    """Run a helper script in the QED tree with a clean-ish environment."""
+    import subprocess as _sp
+
+    return _sp.run(args, cwd=str(cwd), capture_output=True, text=True,
+                   shell=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -669,6 +999,26 @@ def main(argv: list[str] | None = None) -> int:
              "non-Mathlib environment (default: ON).",
     )
     parser.add_argument(
+        "--fin-n",
+        type=int,
+        required=True,
+        help="Organ-network state count the lemma file was EXPORTED with. "
+             "Required: the emitted lemma set is a function of the network "
+             "(one Metzler and one inflow invariant per perfused tissue), so "
+             "the gate cannot infer which network a file belongs to and must "
+             "not guess a default.",
+    )
+    parser.add_argument(
+        "--saturable",
+        action="store_true",
+        help="Certify the model WITH opt-in saturable (Michaelis-Menten) "
+             "hepatic metabolic clearance. Off by default, matching the "
+             "default parameterisation. When on, the gate additionally "
+             "requires the two generic saturable-flux certificates "
+             "(non-negativity and capacity-boundedness) and re-derives the "
+             "Jacobian including the metabolic term.",
+    )
+    parser.add_argument(
         "--no-strict",
         action="store_false",
         dest="strict",
@@ -685,19 +1035,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Single-source-of-truth guard: the file must equal exactly what the live
     # PBPK model emits. Fail-closed on any drift.
-    file_lemmas = _check_single_source(lemmas_file)
+    file_lemmas = _check_single_source(lemmas_file, args.fin_n, args.saturable)
 
     # Independent column-sum cross-check: re-derive the Jacobian column sums
     # from model.py WITHOUT the export bridge and require each to appear in
     # the file. Catches exporter bugs/mutations whose output is still
     # Lean-provable but no longer reflects the model (e.g. dropped terms).
     model_path = _veritrial_root() / "src" / "insilico_trial" / "pbpk" / "model.py"
-    _check_column_sum_crosscheck(file_lemmas, model_path)
+    _check_column_sum_crosscheck(file_lemmas, model_path, args.fin_n,
+                                 saturable=args.saturable)
 
     # Negative controls (fast, pre-Lean): the bridge and this gate must
     # refuse broken inputs. A pipeline that accepts theater fails here,
     # before any expensive compilation.
-    run_negative_controls(model_path)
+    run_negative_controls(model_path, args.fin_n, args.saturable)
 
     # Metzler positivity enforcement: the set of required lemmas MUST include
     # at least one Metzler off-diagonal positivity assertion (Q / Kp > 0) for
@@ -710,14 +1061,25 @@ def main(argv: list[str] | None = None) -> int:
     # extract_perfused_compartments reports state names ("A_liver"); the
     # lemmas are written in organ names ("liver"). Compare on the stem.
     metzler_tissues = {t[2:] if t.startswith("A_") else t for t in metzler_tissues}
-    try:
-        import export_pbpk_to_qed as _ex2
-        _perfused = _ex2.extract_perfused_compartments(
-            model_path, _ex2.extract_state_variables(model_path))
-        perfused = [c for c in _perfused
-                    if c not in ("A_gut", "A_central", "A_elim")]
-    except Exception:
-        perfused = ["c1", "c2", "c3"]
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+        organ_indices,
+    )
+    if args.fin_n == len(DEFAULT_ORGAN_NETWORK):
+        network = DEFAULT_ORGAN_NETWORK
+    elif args.fin_n == len(STANDARD_14_ORGAN_NETWORK):
+        network = STANDARD_14_ORGAN_NETWORK
+    else:
+        raise SystemExit(
+            f"FORMAL GATE FAILED (fail-closed): unsupported organ network size "
+            f"{args.fin_n}")
+    # Coverage is per perfused tissue of THIS network. Deriving it from the
+    # six-organ default would demand certificates for organs the 14-organ model
+    # does not have, and demand none at all for the ten it does.
+    spec = organ_indices(network)
+    perfused = ["A_" + ("periph" if network[k] == "peripheral" else network[k])
+                for k in spec["perfused"]]
     # Per tissue, not a count: Q_c/(V_c*Kp_c) > 0 is what certifies that
     # tissue's off-diagonal is Metzler, and a count is satisfiable by
     # repeating one tissue's lemma.
@@ -841,21 +1203,39 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # Isomorphism gate: compile QED/VeriTrialExport.lean and check axioms.
+    # Isomorphism gate: REBUILD QED's oleans from source, then check axioms.
+    #
+    # The rebuild is not optional. The axiom check imports the compiled
+    # modules, so a stale `.olean` from an older source would certify theorems
+    # the current source no longer proves. `lake` is unusable here (SIGTRAP /
+    # exit 133 on this toolchain, even for `lake --version`), so the rebuild
+    # drives `lean -o` directly via QED/scripts/rebuild_qed_oleans.py, which
+    # also deletes each stale artefact before compiling.
     _ensure_lake_on_path()
+    rebuild = qed / "scripts" / "rebuild_qed_oleans.py"
+    if rebuild.is_file():
+        proc_rebuild = _sp_run([sys.executable, str(rebuild)], cwd=qed)
+        sys.stdout.write(proc_rebuild.stdout)
+        if proc_rebuild.stderr:
+            sys.stderr.write(proc_rebuild.stderr)
+        if proc_rebuild.returncode != 0:
+            print("FORMAL GATE FAILED: QED olean rebuild failed; refusing to "
+                  "certify against possibly-stale compiled modules.",
+                  file=sys.stderr)
+            return 1
     lean_export = qed / "VeriTrialExport.lean"
     if lean_export.is_file():
-        for cmd in (
-            [str(lean_export)],
-        ):
-            proc_lean = _run_lean(qed, cmd)
-            sys.stdout.write(proc_lean.stdout)
-            if proc_lean.stderr:
-                sys.stderr.write(proc_lean.stderr)
-            if proc_lean.returncode != 0:
-                print("FORMAL GATE FAILED: VeriTrialExport.lean did not compile.",
-                      file=sys.stderr)
-                return 1
+        # The rebuild above already compiled the module; checking the export
+        # file itself is a separate, explicit assertion that the shipped file
+        # is the thing that compiles (not merely a rebuilt copy of it).
+        proc_lean = _run_lean(qed, [str(lean_export)])
+        sys.stdout.write(proc_lean.stdout)
+        if proc_lean.stderr:
+            sys.stderr.write(proc_lean.stderr)
+        if proc_lean.returncode != 0:
+            print("FORMAL GATE FAILED: VeriTrialExport.lean did not compile.",
+                  file=sys.stderr)
+            return 1
         check_file = qed / "_axiom_check.lean"
         try:
             check_file.write_text(
@@ -865,7 +1245,10 @@ def main(argv: list[str] | None = None) -> int:
                 "#print axioms extracted_colSum_eq_zero\n"
                 "#print axioms veritrial_compartmental\n"
                 "#print axioms veritrial_mass_dissipation\n"
-                "#print axioms veritrial_dili_block\n",
+                "#print axioms veritrial_dili_block\n"
+                + ("#print axioms veritrial_saturable_flux_nonneg\n"
+                   "#print axioms veritrial_saturable_flux_bounded\n"
+                   if args.saturable else ""),
                 encoding="utf-8",
             )
             proc_ax = _run_lean(qed, [str(check_file)])
@@ -896,16 +1279,22 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            required = ("extracted_offDiag_nonneg",
-                          "extracted_colSum_eq_zero",
-                          "veritrial_compartmental",
-                          "veritrial_mass_dissipation",
-                          "veritrial_dili_block")
+            required = ["extracted_offDiag_nonneg",
+                        "extracted_colSum_eq_zero",
+                        "veritrial_compartmental",
+                        "veritrial_mass_dissipation",
+                        "veritrial_dili_block"]
+            if args.saturable:
+                # The saturable flux is certified by TRANSPORT of QED's generic
+                # theorems, so both instantiations must be in the axiom output.
+                # Without this the nonlinear term would be Jacobian-checked but
+                # never actually proved.
+                required += ["veritrial_saturable_flux_nonneg",
+                             "veritrial_saturable_flux_bounded"]
             if any(name not in proc_ax.stdout for name in required):
                 print(
-                    "FORMAL GATE FAILED: off-diagonal, column-sum, "
-                    "compartmental-instance, mass-dissipation, and "
-                    "unified-block certificates must all be verified.",
+                    "FORMAL GATE FAILED: the following certificates must all "
+                    f"be verified: {required}.",
                     file=sys.stderr,
                 )
                 return 1

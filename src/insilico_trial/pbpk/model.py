@@ -127,21 +127,49 @@ def make_pbpk_ode(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK) -> Cal
             flows = [Q[k] * (C_p - (y[k] / V[k]) / Kp[k]) for k in perfused]
         A_gut = y[gut]
         dA_gut = -ka * A_gut
-        dA_elim = CL * C_p
+        # Saturable (Michaelis-Menten) hepatic metabolic clearance, OPT-IN.
+        # Off unless BOTH vmax_metabolic and km_metabolic are present and
+        # positive, so the default model is the linear one the existing
+        # certificates describe. When on, the flux is removed from the liver
+        # and accumulated in the ``elim`` bookkeeping state, so total mass is
+        # still conserved: this is a transfer, not a sink.
+        #
+        # QED certifies the flux itself, generically and for any
+        # Vmax/Km/C: ``saturableFlux_nonneg`` (0 <= Vmax*C/(Km+C)) and
+        # ``saturableFlux_bounded`` (Vmax*C/(Km+C) < Vmax), which is what
+        # makes the removal non-negative (so the liver cannot be driven
+        # negative by elimination) and strictly capacity-bounded.
+        vmax = args.get("vmax_metabolic")
+        km = args.get("km_metabolic")
+        if vmax is not None and km is not None and vmax > 0 and km > 0:
+            C_liver = y[spec["liver"]] / V[spec["liver"]]
+            liver_metabolic = (vmax * C_liver) / (km + C_liver)
+        else:
+            liver_metabolic = jnp.zeros_like(C_p)
+        dA_elim = CL * C_p + liver_metabolic
         if len(organ_network) == 6:
-            dA_liver = flows[0]
+            dA_liver = flows[0] - liver_metabolic
             dA_periph = flows[1]
             dA_effect = flows[2]
+            # NOTE: central subtracts the perfusion FLUXES, not the tissue
+            # derivatives. The saturable flux is internal to the liver -> elim
+            # transfer, so counting it here as well would book it twice and
+            # break mass conservation. ``flows`` (not ``dA_*``) is what makes
+            # the N-organ branch below correct by construction; this branch has
+            # to do the same explicitly.
             dA_central = (ka * A_gut
-        - dA_liver
-        - dA_periph
-        - dA_effect - CL * C_p)
+        - flows[0]
+        - flows[1]
+        - flows[2] - CL * C_p)
         else:
             dA_central = ka * A_gut - sum(flows) - CL * C_p
         d = [0.0] * spec["n_states"]
         d[gut] = dA_gut
         for k, f in zip(perfused, flows, strict=True):
-            d[k] = f
+            # The saturable flux leaves whichever perfused tissue holds the
+            # liver, so the generic branch subtracts it there exactly as the
+            # six-organ branch does in ``dA_liver``.
+            d[k] = f - liver_metabolic if k == spec.get("liver") else f
         d[central] = dA_central
         d[elim] = dA_elim
         return jnp.array(d)

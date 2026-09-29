@@ -374,11 +374,11 @@ def test_crosscheck_rejects_zeroed_column_sums(tmp_path: Path) -> None:
     genuine = ex.extract_column_sum_lemmas(model_path)
     assert len(genuine) == 6
     # Genuine certificates pass the independent cross-check.
-    gate._check_column_sum_crosscheck(genuine, model_path)
+    gate._check_column_sum_crosscheck(genuine, model_path, 6)
     # Zeroed certificates (dropped terms) fail closed.
     zeroed = ["(0) + (0) = 0"] * 6
     with pytest.raises(SystemExit):
-        gate._check_column_sum_crosscheck(zeroed, model_path)
+        gate._check_column_sum_crosscheck(zeroed, model_path, 6)
 
 
 # --- The exported lemma set is the primary mass-conservation theorem -------

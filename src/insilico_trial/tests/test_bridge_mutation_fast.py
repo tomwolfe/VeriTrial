@@ -61,9 +61,49 @@ def test_fast_mass_conservation_rejects_elim_mutant(tmp_path: Path) -> None:
 
 
 def test_fast_mass_conservation_rejects_central_mutant(tmp_path: Path) -> None:
+    # Central must discharge EVERY perfused outflow. Central is written against
+    # the perfusion fluxes (`- flows[i]`), so dropping one drops a tissue's
+    # outflow entirely and mass is no longer conserved.
     bad = tmp_path / "m.py"
-    bad.write_text(MODEL.read_text().replace("        - dA_periph\n", "", 1))
+    bad.write_text(MODEL.read_text().replace("        - flows[1]\n", "", 1))
     assert ex.check_mass_conservation(bad) is False
+
+
+def test_fast_mass_conservation_rejects_saturable_half_transfer(
+        tmp_path: Path) -> None:
+    # The saturable hepatic flux is a TRANSFER: the liver removes it and elim
+    # accumulates it. Booking only one side would create (or destroy) mass, and
+    # the check must refuse both directions.
+    src = MODEL.read_text()
+    only_elim = tmp_path / "elim_only.py"
+    only_elim.write_text(src.replace(
+        "dA_liver = flows[0] - liver_metabolic", "dA_liver = flows[0]", 1))
+    assert ex.check_mass_conservation(only_elim) is False
+
+    only_liver = tmp_path / "liver_only.py"
+    only_liver.write_text(src.replace(
+        "dA_elim = CL * C_p + liver_metabolic", "dA_elim = CL * C_p", 1))
+    assert ex.check_mass_conservation(only_liver) is False
+
+    double = tmp_path / "double.py"
+    double.write_text(src.replace(
+        "dA_central = (ka * A_gut", "dA_central = (ka * A_gut - liver_metabolic", 1))
+    assert ex.check_mass_conservation(double) is False
+
+
+def test_fast_symbolic_cancellation_rejects_saturable_half_transfer(
+        tmp_path: Path) -> None:
+    # The algebraic check must agree with the structural one: a one-sided
+    # saturable transfer is not a conservation identity either.
+    states = ex._state_names(MODEL)
+    for old, new in (
+            ("dA_liver = flows[0] - liver_metabolic", "dA_liver = flows[0]"),
+            ("dA_elim = CL * C_p + liver_metabolic", "dA_elim = CL * C_p"),
+    ):
+        bad = tmp_path / "m.py"
+        bad.write_text(MODEL.read_text().replace(old, new, 1))
+        derivs = ex.extract_symbolic_derivatives(bad, expand=False)
+        assert ex.verify_symbolic_cancellation(derivs, states) is False
 
 
 def test_fast_mass_conservation_missing_fn(tmp_path: Path) -> None:
@@ -290,13 +330,13 @@ def test_fast_gate_classifiers() -> None:
 
 def test_fast_gate_crosscheck(tmp_path: Path) -> None:
     genuine = ex.extract_column_sum_lemmas(MODEL)
-    gate._check_column_sum_crosscheck(genuine, MODEL)
+    gate._check_column_sum_crosscheck(genuine, MODEL, 6)
     with pytest.raises(SystemExit):
-        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL)
+        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL, 6)
 
 
 def test_fast_gate_negative_controls(capsys) -> None:
-    gate.run_negative_controls(MODEL)
+    gate.run_negative_controls(MODEL, 6)
     assert capsys.readouterr().err == ""
 
 
@@ -340,8 +380,13 @@ def test_fast_mass_conservation_missing_derivative(tmp_path: Path) -> None:
 
 
 def test_fast_mass_conservation_central_missing_ka(tmp_path: Path) -> None:
+    # Central is written as `dA_central = (ka * A_gut\n        - flows[0] ...`;
+    # dropping the absorption rate term leaves gut mass unaccounted for.
     bad = tmp_path / "m.py"
-    bad.write_text(MODEL.read_text().replace("ka * A_gut\n        - dA_liver", "A_gut\n        - dA_liver", 1))
+    src = MODEL.read_text()
+    mutated = src.replace("dA_central = (ka * A_gut", "dA_central = (A_gut", 1)
+    assert mutated != src, "fixture did not apply"
+    bad.write_text(mutated)
     assert ex.check_mass_conservation(bad) is False
 
 
@@ -441,17 +486,38 @@ def test_fast_gate_qed_dir_resolution(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_fast_gate_live_lemmas_match_bridge() -> None:
-    assert gate._live_model_lemmas() == ex.build_lemmas(MODEL)
-    assert gate._live_model_lemmas(include_ode=False, parametric=True) == ex.build_lemmas(MODEL)
-    slim = gate._live_model_lemmas(include_ode=False, parametric=False)
-    assert len(slim) < len(gate._live_model_lemmas())
+    # fin_n is required, not defaulted: the lemma set is a function of the
+    # organ network, so the gate must be told which one it is certifying.
+    assert gate._live_model_lemmas(fin_n=6) == ex.build_lemmas(MODEL)
+    assert gate._live_model_lemmas(include_ode=False, parametric=True,
+                                   fin_n=6) == ex.build_lemmas(MODEL)
+    slim = gate._live_model_lemmas(include_ode=False, parametric=False, fin_n=6)
+    assert len(slim) < len(gate._live_model_lemmas(fin_n=6))
+
+
+def test_fast_gate_live_lemmas_differ_by_network() -> None:
+    # The 14-organ model emits strictly more coverage than the 6-organ one:
+    # one Metzler and one inflow invariant per perfused tissue. A gate that
+    # silently used one network for both would under-certify the larger model.
+    six = gate._live_model_lemmas(fin_n=6)
+    fourteen = gate._live_model_lemmas(fin_n=14)
+    assert len(fourteen) > len(six)
+    assert "Q_kidney / (V_kidney * Kp_kidney) > 0" in fourteen
+    assert "Q_kidney / (V_kidney * Kp_kidney) > 0" not in six
+    assert "(Q_kidney / (V_central * Kp_kidney)) * A_central >= 0" in fourteen
+
+
+def test_fast_gate_live_lemmas_requires_fin_n() -> None:
+    # Fail-closed: no default network may be assumed.
+    with pytest.raises(SystemExit):
+        gate._live_model_lemmas()
 
 
 def test_fast_gate_single_source_nonparametric(tmp_path: Path, capsys) -> None:
     slim = ex.build_lemmas(MODEL, include_ode_lemmas=False, parametric=False)
     f = _write_lemmas(tmp_path / "S.txt", slim)
     with pytest.raises(SystemExit):
-        gate._check_single_source(f)
+        gate._check_single_source(f, 6)
     # Non-parametric files fail at the system-matrix certification step
     # (parametric detection must stay False to reach that exact diagnostic).
     assert "not in gate set" in capsys.readouterr().err
@@ -477,13 +543,13 @@ def test_fast_gate_mathlib_fallback_pipeline(tmp_path: Path, monkeypatch) -> Non
 
 def test_fast_gate_single_source_drift(tmp_path: Path) -> None:
     genuine = _write_lemmas(tmp_path / "L.txt", ex.build_lemmas(MODEL))
-    assert gate._check_single_source(genuine) == ex.build_lemmas(MODEL)
+    assert gate._check_single_source(genuine, 6) == ex.build_lemmas(MODEL)
     drifted = _write_lemmas(tmp_path / "D.txt", [*ex.build_lemmas(MODEL), "X = X"])
     with pytest.raises(SystemExit):
-        gate._check_single_source(drifted)
+        gate._check_single_source(drifted, 6)
     short = _write_lemmas(tmp_path / "S.txt", ex.build_lemmas(MODEL)[1:])
     with pytest.raises(SystemExit):
-        gate._check_single_source(short)
+        gate._check_single_source(short, 6)
 
 
 def test_fast_gate_split_summands() -> None:
@@ -495,7 +561,7 @@ def test_fast_gate_split_summands() -> None:
 
 def test_fast_gate_independent_column_sums() -> None:
     import sympy as _sp  # type: ignore[import-untyped]
-    cols = gate._independent_column_sums(MODEL)
+    cols = gate._independent_column_sums(MODEL, 6)
     assert len(cols) == 6
     for terms in cols:
         assert _sp.simplify(sum(terms)) == 0
@@ -503,17 +569,119 @@ def test_fast_gate_independent_column_sums() -> None:
     assert total_nonzero > 10
 
 
+def test_fast_gate_independent_column_sums_14_organ() -> None:
+    # The oracle is N-generic: a 14-organ run must re-derive a 14-column
+    # Jacobian, not silently fall back to the six-organ layout.
+    import sympy as _sp  # type: ignore[import-untyped]
+    cols = gate._independent_column_sums(MODEL, 14)
+    assert len(cols) == 14
+    for terms in cols:
+        assert _sp.simplify(sum(terms)) == 0
+    # Each perfused tissue contributes its own diagonal self-drain and its own
+    # influx from central, so the 14-organ Jacobian is strictly richer.
+    flat = [str(t) for terms in cols for t in terms if t != 0]
+    assert any("Q3/(Kp3*V3)" in s for s in flat)
+    assert any("Q12/(Kp12*V12)" in s for s in flat)
+    assert sum(1 for terms in cols for t in terms if t != 0) > \
+        sum(1 for terms in gate._independent_column_sums(MODEL, 6)
+            for t in terms if t != 0)
+
+
+def test_fast_gate_column_sums_reject_unknown_network() -> None:
+    # Fail-closed: an unsupported state count must refuse, not fall back to 6.
+    with pytest.raises(ValueError):
+        gate._independent_column_sums(MODEL, 9)
+
+
+def test_fast_gate_column_sums_reject_state_dependent_term_unless_saturable(
+        monkeypatch) -> None:
+    # The saturable Jacobian has a state-dependent entry, which a params-only
+    # certificate cannot express. If such a term reaches the cross-check while
+    # the saturable path is NOT being certified, the gate must refuse rather
+    # than quietly drop the term and certify a weaker Jacobian.
+    saturated_cols = gate._independent_column_sums(MODEL, 6, True)
+    monkeypatch.setattr(gate, "_independent_column_sums",
+                        lambda *a, **k: saturated_cols)
+    lemmas = ex.build_lemmas(MODEL, fin_n=6, saturable=False)
+    with pytest.raises(SystemExit):
+        gate._check_column_sum_crosscheck(lemmas, MODEL, 6, saturable=False)
+
+
+def test_fast_gate_saturable_rejects_non_metabolic_nonlinearity(
+        monkeypatch) -> None:
+    # Only the metabolic self-drain may ride on the saturable certificate.
+    # A DIFFERENT nonlinearity must not be laundered through it.
+    import sympy as _sp
+    real = gate._independent_column_sums
+    linear = real(MODEL, 6, False)
+    saturated = [list(c) for c in real(MODEL, 6, True)]
+    saturated[0][0] = saturated[0][0] + _sp.Symbol("A_gut")
+    # The saturable re-derivation is tampered; the linear one stays honest, so
+    # the difference is a nonlinearity that is NOT the metabolic self-drain.
+    def _pick(path, n, sat=False):
+        return saturated if sat else linear
+    monkeypatch.setattr(gate, "_independent_column_sums", _pick)
+    lemmas = ex.build_lemmas(MODEL, fin_n=6, saturable=True)
+    with pytest.raises(SystemExit):
+        gate._check_column_sum_crosscheck(lemmas, MODEL, 6, saturable=True)
+
+
+def test_fast_gate_saturable_certificates_are_proved_in_lean() -> None:
+    # The saturable theorems are Lean TRANSPORTS of QED's generic certificates,
+    # so the gate must require both in the axiom-check output: the nonlinear
+    # term is Jacobian-checked here, but only actually PROVED there. A run that
+    # checked the Jacobian and skipped the proofs would certify an unproved
+    # nonlinearity.
+    src = (SCRIPTS / "verify_formal_gate.py").read_text(encoding="utf-8")
+    assert "veritrial_saturable_flux_nonneg" in src
+    assert "veritrial_saturable_flux_bounded" in src
+    block = ex._saturable_lean_block(True)
+    assert "veritrial_saturable_flux_nonneg" in block
+    assert "veritrial_saturable_flux_bounded" in block
+
+
+
+
+
+def test_fast_saturable_certificates_not_emitted_for_linear_config() -> None:
+    # The saturable theorems are Lean TRANSPORTS (see `_saturable_lean_block`).
+    # They must not be re-emitted as line lemmas: QED's numeric pipeline would
+    # be asked to prove a nonlinear bound it has no hypotheses for.
+    linear = ex.build_lemmas(MODEL, fin_n=6, saturable=False)
+    assert not any("Vmax" in lemma for lemma in linear)
+
+
+def test_fast_saturable_lean_block_only_when_implemented() -> None:
+    assert "veritrial_saturable_flux_nonneg" in ex._saturable_lean_block(True)
+    assert ex._saturable_lean_block(False) == ""
+    # The block must TRANSPORT QED's generic theorems, not re-derive them.
+    block = ex._saturable_lean_block(True)
+    assert "saturableFlux_nonneg hVmax hKm hC" in block
+    assert "saturableFlux_bounded hVmax hKm hC" in block
+    assert "sorry" not in block
+
+
+def test_fast_saturable_export_refuses_when_not_implemented(tmp_path) -> None:
+    # Asking for saturable certificates from a model that has no saturable
+    # path must fail closed rather than certify a term that is not there.
+    stripped = tmp_path / "linear_only.py"
+    src = MODEL.read_text().replace("liver_metabolic", "zero_flux")
+    stripped.write_text(src)
+    with pytest.raises(ValueError):
+        ex.build_lemmas(stripped, fin_n=6, saturable=True)
+
+
 def test_fast_gate_crosscheck_quiet(tmp_path: Path, capsys) -> None:
     genuine = ex.extract_column_sum_lemmas(MODEL)
-    gate._check_column_sum_crosscheck(genuine, MODEL, quiet=True)
+    gate._check_column_sum_crosscheck(genuine, MODEL, 6, quiet=True)
     with pytest.raises(SystemExit):
-        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL, quiet=True)
+        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL, 6, quiet=True)
     assert "cross-check" not in capsys.readouterr().err
     with pytest.raises(SystemExit):
-        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL, quiet=False)
+        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL, 6, quiet=False)
     assert "cross-check" in capsys.readouterr().err
     with pytest.raises(SystemExit):
-        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL)
+        gate._check_column_sum_crosscheck(["(0) + (0) = 0"] * 6, MODEL, 6)
     assert "cross-check" in capsys.readouterr().err
 
 
@@ -647,17 +815,17 @@ def test_fast_gate_main_guards(tmp_path: Path, monkeypatch) -> None:
     (qed / "VeriTrialExport.lean").write_text("x = 1\n")
     monkeypatch.setattr(gate, "qed_dir", lambda: qed)
     _patch_full_success(monkeypatch, tmp_path)
-    assert gate.main([str(f), "--no-strict"]) == 0
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 0
     no_metz = [lemma for lemma in base if not gate._is_metzler_positivity(lemma)]
     assert len(no_metz) < len(base)
     _patch_prelean(monkeypatch, no_metz)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     no_bflow = [lemma for lemma in base if not gate._is_boundary_flow_positivity(lemma)]
     _patch_prelean(monkeypatch, no_bflow)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     no_diss = [lemma for lemma in base if not gate._is_mass_dissipation(lemma)]
     _patch_prelean(monkeypatch, no_diss)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
 
 
 def test_fast_gate_main_sorry_trivial_strict(tmp_path: Path, monkeypatch) -> None:
@@ -666,21 +834,21 @@ def test_fast_gate_main_sorry_trivial_strict(tmp_path: Path, monkeypatch) -> Non
     _patch_prelean(monkeypatch, [*base, "sorry"])
     monkeypatch.setattr(gate, "_detect_mathlib_env", lambda: True)
     _patch_full_success(monkeypatch, tmp_path)
-    assert gate.main([str(f)]) == 1
+    assert gate.main([str(f), "--fin-n", "6"]) == 1
     _patch_prelean(monkeypatch, [*base, "Ql = Ql"])
-    assert gate.main([str(f)]) == 1
+    assert gate.main([str(f), "--fin-n", "6"]) == 1
     _patch_prelean(monkeypatch, [*base, "129 = 129"])
-    assert gate.main([str(f)]) == 1
+    assert gate.main([str(f), "--fin-n", "6"]) == 1
     # Strict-only trigger: passes the non-strict trivial filter but is a
     # numeric shortcut, so --strict must refuse while --no-strict proceeds.
     _patch_prelean(monkeypatch, [*base, "1 + 2 = 3"])
-    assert gate.main([str(f)]) == 1
-    assert gate.main([str(f), "--no-strict"]) == 0
+    assert gate.main([str(f), "--fin-n", "6"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 0
     _patch_prelean(monkeypatch, [*base, "dA_liver/dt = Q * (C_p - C_liver / Kp)"])
     monkeypatch.setattr(gate, "_detect_mathlib_env", lambda: False)
-    assert gate.main([str(f)]) == 1
+    assert gate.main([str(f), "--fin-n", "6"]) == 1
     monkeypatch.setattr(gate, "_detect_mathlib_env", lambda: True)
-    assert gate.main([str(f)]) == 0
+    assert gate.main([str(f), "--fin-n", "6"]) == 0
 
 
 def test_fast_gate_main_qed_missing(tmp_path: Path, monkeypatch) -> None:
@@ -689,7 +857,7 @@ def test_fast_gate_main_qed_missing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gate, "_detect_mathlib_env", lambda: True)
     monkeypatch.setattr(gate, "qed_dir", lambda: tmp_path / "noqed")
     f = _write_guard_file(tmp_path, base)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
 
 
 class _FakeProc:
@@ -747,7 +915,7 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
         return _FakeProc(0, _axiom_stdout(), "")
 
     monkeypatch.setattr(gate, "_run_lean", _fake_compile_fail)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Axiom-check compile failure (export compile would succeed).
     calls0b: list[Any] = []
 
@@ -758,17 +926,17 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
         return _FakeProc(1, _axiom_stdout(), "boom")
 
     monkeypatch.setattr(gate, "_run_lean", _fake_axiom_fail)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Axiom check: sorry in output.
     _patch_full_success(monkeypatch, tmp_path, "sorryAx present\n")
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Axiom check: unexpected axioms (no 'sorry' substring: must reach the
     # axiom-set comparison, not the earlier sorry pre-check).
     _patch_full_success(monkeypatch, tmp_path, _axiom_stdout("[propext, mystery_axiom]"))
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Axiom check: theorems missing.
     _patch_full_success(monkeypatch, tmp_path, "nothing here\n")
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Axiom block raising a non-SystemExit error fails closed.
     calls2: list[Any] = []
 
@@ -780,11 +948,11 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
 
     _patch_prelean(monkeypatch, base)
     monkeypatch.setattr(gate, "_run_lean", _fake_none_axiom)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Verify script failure.
     _patch_full_success(monkeypatch, tmp_path)
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _FakeProc(2, "QED FAIL", ""))
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Full pass writes traces with verified flags set.
     # Redirect into tmp_path: the real output/validation/qed_traces.json is a
     # Merkle leaf input of build_regulatory_provenance(), and writing tmpdir
@@ -793,7 +961,7 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     scratch = tmp_path / "traces" / "qed_traces.json"
     monkeypatch.setenv("QED_TRACE", str(scratch))
     _patch_full_success(monkeypatch, tmp_path)
-    assert gate.main([str(f), "--no-strict"]) == 0
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 0
     import json as _json
     traces = _json.loads(scratch.read_text())
     assert traces["verified"] is True
@@ -826,7 +994,7 @@ def test_fast_gate_traces_isolated_root(tmp_path: Path, monkeypatch) -> None:
     # above cannot clobber the real output/validation/qed_traces.json.
     monkeypatch.delenv("QED_TRACE", raising=False)
     _patch_full_success(monkeypatch, tmp_path)
-    assert gate.main([str(f), "--no-strict"]) == 0
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 0
     import json as _json
     traces = _json.loads((root / "output" / "validation" / "qed_traces.json").read_text())
     assert traces["verified"] is True
@@ -858,7 +1026,7 @@ def test_gate_honors_qed_trace_redirect(tmp_path: Path, monkeypatch) -> None:
     scratch = tmp_path / "elsewhere" / "traces.json"
     monkeypatch.setenv("QED_TRACE", str(scratch))
     _patch_full_success(monkeypatch, tmp_path)
-    assert gate.main([str(f), "--no-strict"]) == 0
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 0
     assert scratch.is_file(), "QED_TRACE was not honored; traces went to the repo artifact"
     import json as _json
     assert _json.loads(scratch.read_text())["verified"] is True
@@ -885,7 +1053,7 @@ def test_fast_gate_axiom_write_failure_closed(tmp_path: Path, monkeypatch) -> No
         return real_write(self, *args, **kwargs)
 
     monkeypatch.setattr(_P, "write_text", _boom)
-    assert gate.main([str(f), "--no-strict"]) == 1
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
 
 
 def test_fast_gate_subprocess_kwargs_spy(tmp_path: Path, monkeypatch) -> None:
@@ -908,7 +1076,7 @@ def test_fast_gate_subprocess_kwargs_spy(tmp_path: Path, monkeypatch) -> None:
         return _FakeProc(0, "QED OK", "")
 
     monkeypatch.setattr(_sp, "run", _spy)
-    assert gate.main([str(f), "--no-strict"]) == 0
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 0
     assert seen.get("capture_output") is True
     assert seen.get("text") is True
     assert seen.get("shell") is False
@@ -923,11 +1091,19 @@ def test_fast_gate_run_lean_real() -> None:
 
 
 def test_fast_gate_main_missing_file(tmp_path: Path) -> None:
-    assert gate.main([str(tmp_path / "missing.txt")]) == 1
+    assert gate.main([str(tmp_path / "missing.txt"), "--fin-n", "6"]) == 1
+
+
+def test_fast_gate_main_requires_fin_n() -> None:
+    # --fin-n is required, so the gate cannot certify a file against an
+    # assumed network. argparse exits 2 on the missing required argument.
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(["whatever.txt"])
+    assert excinfo.value.code == 2
 
 
 def test_fast_gate_single_source(tmp_path: Path) -> None:
     lemmas = ex.build_lemmas(MODEL, include_ode_lemmas=False, parametric=True)
     f = tmp_path / "L.txt"
     f.write_text("\n".join(lemmas) + "\n")
-    assert isinstance(gate._check_single_source(f), list)
+    assert isinstance(gate._check_single_source(f, 6), list)

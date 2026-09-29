@@ -286,3 +286,214 @@ def test_solve_pbpk_batch_step_matches_a_finer_reference() -> None:
     assert scale > 0
     rel = float(onp.abs(coarse - fine).max() / scale)
     assert rel < 1e-4, f"default step diverges from a 10x finer step: {rel:.2e}"
+
+
+# --- saturable (Michaelis-Menten) hepatic clearance ----------------------
+#
+# The saturable flux is a RUNTIME opt-in: the branch is compiled into
+# make_pbpk_ode but is inactive unless vmax_metabolic/km_metabolic are
+# supplied. These tests pin the three properties the design rests on:
+# the flux is a TRANSFER (mass conserved), the stiffness bound covers the
+# state-dependent self-drain at every concentration, and forward Euler at
+# that bound preserves non-negativity without any clamping.
+
+def _saturable_params(network: tuple[str, ...], vmax: float = 4.0,
+                      km: float = 1.0) -> dict[str, Any]:
+    params, _drug, _t, _dt = _build_warfarin_params()
+    n = len(network)
+    out = dict(params)
+    for key in ("Q", "V", "Kp"):
+        base = onp.asarray(params[key], dtype=onp.float64).ravel()
+        out[key] = (base if len(base) == n else
+                    onp.concatenate([base, onp.linspace(0.5, 2.0, n - len(base))]))
+    out["vmax_metabolic"] = vmax
+    out["km_metabolic"] = km
+    return out
+
+
+def _jacobian_at(network, params, y):
+    import jax
+    import jax.numpy as jnp
+
+    from insilico_trial.pbpk.model import make_pbpk_ode
+
+    ode = make_pbpk_ode(network)
+    args: dict[str, Any] = {k: jnp.asarray(params[k]) for k in ("Q", "V", "Kp")}
+    args["CL"] = float(params["CL"])
+    args["ka"] = float(params["ka"])
+    for key in ("vmax_metabolic", "km_metabolic"):
+        if key in params:
+            args[key] = float(params[key])
+    return onp.asarray(jax.jacfwd(lambda yy: ode(0.0, yy, args))(
+        jnp.asarray(y, dtype=jnp.float64)))
+
+
+@pytest.mark.parametrize("network_name", ["default", "14_organ"])
+def test_saturable_is_a_transfer_not_a_sink(network_name: str) -> None:
+    # Total mass (all compartments incl. the elim accumulator) must be
+    # conserved: the liver loses the metabolic flux and elim gains it. A
+    # one-sided term would create mass, and a clamp would hide it.
+    import jax.numpy as jnp
+
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+        make_pbpk_ode,
+    )
+
+    network = (DEFAULT_ORGAN_NETWORK if network_name == "default"
+               else STANDARD_14_ORGAN_NETWORK)
+    params = _saturable_params(network)
+    ode = make_pbpk_ode(network)
+    args: dict[str, Any] = {k: jnp.asarray(params[k]) for k in ("Q", "V", "Kp")}
+    args["CL"] = float(params["CL"])
+    args["ka"] = float(params["ka"])
+    args["vmax_metabolic"] = float(params["vmax_metabolic"])
+    args["km_metabolic"] = float(params["km_metabolic"])
+    y = jnp.asarray(onp.linspace(0.1, 5.0, len(network)), dtype=jnp.float64)
+    total = float(jnp.sum(ode(0.0, y, args)))
+    assert abs(total) < 1e-8, f"mass not conserved: d(total)/dt = {total}"
+
+
+@pytest.mark.parametrize("network_name", ["default", "14_organ"])
+def test_saturable_stiffness_bound_dominates_every_concentration(
+        network_name: str) -> None:
+    # The metabolic self-drain Vmax*Km/(V_liver*(Km+C)^2) is largest at C = 0
+    # and decays as the liver fills. The bound uses that SUPREMUM, so it must
+    # dominate the instantaneous diagonal everywhere -- otherwise a step stable
+    # at a high concentration would be unstable near zero.
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+        organ_indices,
+    )
+
+    network = (DEFAULT_ORGAN_NETWORK if network_name == "default"
+               else STANDARD_14_ORGAN_NETWORK)
+    params = _saturable_params(network)
+    spec = organ_indices(network)
+    bound = _jacobian_diagonal(params, spec)
+    for scale in (1e-6, 1e-3, 1.0, 25.0, 1e3):
+        y = onp.full(len(network), scale)
+        actual = onp.diag(_jacobian_at(network, params, y))
+        for j in range(len(network)):
+            assert abs(bound[j]) + 1e-9 >= abs(actual[j]), (
+                f"concentration {scale}, state {j}: bound |{bound[j]}| < "
+                f"actual |{actual[j]}|")
+
+
+def test_saturable_tightens_the_liver_diagonal() -> None:
+    # The saturable term must reach the liver's own diagonal. Which state then
+    # SETS dt depends on the parameters -- for warfarin the central compartment
+    # binds, so the admissible step is unchanged -- so the claim pinned here is
+    # the diagonal itself, which is what the saturable term is required to move.
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK, organ_indices
+
+    params = _saturable_params(DEFAULT_ORGAN_NETWORK)
+    spec = organ_indices(DEFAULT_ORGAN_NETWORK)
+    liver = int(spec["liver"])
+    linear = _jacobian_diagonal(
+        {k: v for k, v in params.items()
+         if k not in ("vmax_metabolic", "km_metabolic")}, spec)
+    saturable = _jacobian_diagonal(params, spec)
+    assert saturable[liver] < linear[liver] < 0
+    # Only the liver moves: a saturable term leaking into another state would
+    # mean the branch is not tissue-local.
+    for j in linear:
+        if j != liver:
+            assert saturable[j] == linear[j]
+    # ...and by exactly Vmax / (Km * V_liver), the supremum of the self-drain.
+    expected = (params["vmax_metabolic"]
+                / (params["km_metabolic"] * float(params["V"][liver])))
+    assert abs((saturable[liver] - linear[liver]) + expected) < 1e-12
+
+
+def test_saturable_tightens_dt_when_the_liver_binds() -> None:
+    # When the liver IS the binding state, the saturable term must tighten dt:
+    # a bound that ignored it would certify positivity for a step the liver
+    # diagonal cannot take. Central's rate is inflated so the liver binds.
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK
+
+    params = _saturable_params(DEFAULT_ORGAN_NETWORK)
+    liver_bound = dict(params)
+    central = 2
+    # Shrink central's perfusion sum so its diagonal no longer dominates.
+    q = onp.asarray(params["Q"], dtype=onp.float64).copy()
+    perfused = [i for i in range(len(q)) if i not in (0, central, len(q) - 1)]
+    q[perfused] *= 0.01
+    liver_bound["Q"] = q
+    dt_linear = calculate_max_stable_dt(
+        {k: v for k, v in liver_bound.items()
+         if k not in ("vmax_metabolic", "km_metabolic")}, DEFAULT_ORGAN_NETWORK)
+    dt_saturable = calculate_max_stable_dt(liver_bound, DEFAULT_ORGAN_NETWORK)
+    assert dt_saturable < dt_linear
+
+
+def test_saturable_absent_when_not_configured() -> None:
+    # Without the parameters the model is the LINEAR one, so the diagonal must
+    # be bit-identical to the unsaturated case.
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK, organ_indices
+
+    params, _drug, _t, _dt = _build_warfarin_params()
+    spec = organ_indices(DEFAULT_ORGAN_NETWORK)
+    without = _jacobian_diagonal(params, spec)
+    zeroed = dict(params, vmax_metabolic=0.0, km_metabolic=0.0)
+    with_zero = _jacobian_diagonal(zeroed, spec)
+    assert without == with_zero
+
+
+@pytest.mark.parametrize("network_name", ["default", "14_organ"])
+def test_saturable_forward_euler_preserves_nonnegativity(network_name: str) -> None:
+    # The point of the whole exercise: at the PROVED bound, forward Euler keeps
+    # every state non-negative, so non-negativity needs no clamp. This is the
+    # numerical counterpart of QED's orthant_invariance_fwdEuler.
+    import jax.numpy as jnp
+
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+        make_pbpk_ode,
+    )
+
+    network = (DEFAULT_ORGAN_NETWORK if network_name == "default"
+               else STANDARD_14_ORGAN_NETWORK)
+    params = _saturable_params(network)
+    dt = calculate_max_stable_dt(params, network)
+    ode = make_pbpk_ode(network)
+    args: dict[str, Any] = {k: jnp.asarray(params[k]) for k in ("Q", "V", "Kp")}
+    args["CL"] = float(params["CL"])
+    args["ka"] = float(params["ka"])
+    args["vmax_metabolic"] = float(params["vmax_metabolic"])
+    args["km_metabolic"] = float(params["km_metabolic"])
+    rng = onp.random.default_rng(20260929)
+    worst = float("inf")
+    for _ in range(50):
+        # Concentrations spanning ten orders of magnitude, including the
+        # near-empty liver where the metabolic stiffness is largest.
+        scale = 10.0 ** rng.uniform(-5.0, 2.0)
+        y = jnp.asarray(onp.abs(rng.normal(1.0, 0.5, size=len(network))) * scale,
+                        dtype=jnp.float64)
+        for _ in range(25):
+            y = y + dt * ode(0.0, y, args)
+        worst = min(worst, float(onp.min(onp.asarray(y))))
+    assert worst > -1e-9, (
+        f"a state went negative at the proved bound (min {worst:.3e}); "
+        "non-negativity must come from the step size, not a clamp")
+
+
+def test_saturable_step_is_no_smaller_than_the_linear_one() -> None:
+    # Monotonicity sanity: adding a drain can only tighten the admissible step.
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK
+
+    linear = _saturable_params(DEFAULT_ORGAN_NETWORK)
+    small = calculate_max_stable_dt(
+        dict(linear, vmax_metabolic=0.5, km_metabolic=1.0), DEFAULT_ORGAN_NETWORK)
+    large = calculate_max_stable_dt(
+        dict(linear, vmax_metabolic=50.0, km_metabolic=1.0), DEFAULT_ORGAN_NETWORK)
+    assert large < small

@@ -64,11 +64,33 @@ def _jacobian_diagonal(params: dict[str, Any], spec: Mapping[str, Any]) -> dict[
     perfused = [int(k) for k in spec["perfused"]]
     Vc = _get(V, central)
 
+    # Saturable hepatic metabolic clearance tightens the liver's own diagonal.
+    # d/dA_liver [ Vmax*C/(Km+C) ] = Vmax*Km/(V_liver*(Km+C)^2), whose maximum
+    # over C >= 0 is at C = 0 and equals Vmax/(Km*V_liver). Using that
+    # supremum is what keeps the bound valid at EVERY concentration: the
+    # instantaneous rate is state-dependent, and evaluating it at one
+    # operating point would let a step that is stable there turn unstable
+    # where the concentration is lower. QED's ``saturableFlux_nonneg``
+    # (0 <= Vmax*C/(Km+C)) is what makes the term a genuine non-negative
+    # drain, i.e. a Metzler diagonal, so the same orthant-invariance theorem
+    # applies -- no clamping is needed.
+    vmax = params.get("vmax_metabolic")
+    km = params.get("km_metabolic")
+    saturable_rate = 0.0
+    if vmax is not None and km is not None and float(vmax) > 0 and float(km) > 0:
+        liver = spec.get("liver")
+        if liver is not None:
+            saturable_rate = float(vmax) / (float(km) * _get(V, int(liver)))
+
     diag: dict[int, float] = {}
     diag[gut] = -ka                                    # d(A_gut)/dA_gut
     for k in perfused:                                 # d(A_k)/dA_k
         vi, ki = _get(V, k), _get(Kp, k)
         diag[k] = -_get(Q, k) / (vi * ki)
+    if saturable_rate:
+        # Only the liver carries the saturable drain.
+        liver = int(spec["liver"])  # type: ignore[arg-type]
+        diag[liver] -= saturable_rate
     q_sum = sum(_get(Q, k) for k in perfused)
     diag[central] = -(q_sum + CL) / Vc                  # d(A_central)/dA_central
     # d(A_elim) = CL * y_central / V_central does not depend on A_elim, so

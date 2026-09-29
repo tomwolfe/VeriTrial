@@ -64,7 +64,9 @@ def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] = D
 
 
 def extract_perfused_compartments(model_path: Path,
-                                   state_vars: list[str]) -> list[str]:
+                                   state_vars: list[str],
+                                   organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK
+                                   ) -> list[str]:
     """Identify perfused compartments from the ODE source.
 
     A compartment is perfused when its derivative assignment references the
@@ -73,10 +75,17 @@ def extract_perfused_compartments(model_path: Path,
     """
     source = model_path.read_text(encoding="utf-8")
     if "def make_pbpk_ode(" in source:
+        # The N-organ branch assigns perfused derivatives positionally, so the
+        # perfused set is the NETWORK's, not whatever named ``dA_`` the source
+        # happens to spell out: reading only the named derivatives would report
+        # three perfused tissues for a 14-organ model and silently under-certify.
+        from insilico_trial.pbpk.model import organ_indices
+        network = organ_network
+        spec = organ_indices(network)
         aliases = {"peripheral": "periph", "effect": "effect", "elim": "elim"}
         return [
-            f"A_{aliases.get(name, name)}" for name in DEFAULT_ORGAN_NETWORK
-            if name not in ("gut", "central", "elim")
+            "A_" + aliases.get(network[index], network[index])
+            for index in spec["perfused"]
         ]
     tree = ast.parse(source)
 
@@ -183,7 +192,21 @@ def _network_for_fin(n: int) -> tuple[str, ...]:
     raise ValueError(f"unsupported organ network size: {n}")
 
 
-def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True) -> list[str]:
+def _model_implements_saturable(model_path: Path) -> bool:
+    """Does the model CONTAIN the saturable hepatic clearance path at all?
+
+    Read from the ODE source rather than assumed. This is about the code, not
+    about a particular parameterisation: the saturable term is compiled into
+    ``make_pbpk_ode`` and is active only when ``vmax_metabolic``/``km_metabolic``
+    are supplied, so the DEFAULT run (no such parameters) is the linear model
+    even though the code carries the nonlinear branch.
+    """
+    source = model_path.read_text(encoding="utf-8")
+    return "liver_metabolic" in source
+
+
+def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True,
+                    saturable: bool | None = None) -> list[str]:
     """The parametric theorem set certified for the ``make_pbpk_ode`` model.
 
     Seven theorems, one per claim the gate makes, and nothing else:
@@ -231,16 +254,36 @@ def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True) -> li
         f"Q_{names[index]} / (V_{names[index]} * Kp_{names[index]}) > 0"
         for index in perfused
     ]
-    lemmas.extend(extract_boundary_flow_lemmas(model_path))
+    lemmas.extend(extract_boundary_flow_lemmas(model_path, network))
     if parametric:
-        lemmas.append(build_column_sum_certificate(model_path))
+        lemmas.append(build_column_sum_certificate(model_path, fin_n))
         lemmas.append(build_parametric_sum_lemma(model_path))
         lemmas.append("CL * C_p > 0")
+    if saturable is None:
+        # The saturable term is a RUNTIME opt-in: the branch is compiled into
+        # the ODE but is inactive unless vmax_metabolic/km_metabolic are
+        # supplied, and the default parameterisation supplies neither. So the
+        # default certificate set is the LINEAR one; `--saturable` is required
+        # to certify the nonlinear configuration.
+        saturable = False
+    if saturable and not _model_implements_saturable(model_path):
+        raise ValueError(
+            "saturable certificates were requested but the model does not "
+            "implement the saturable hepatic path (fail-closed)")
+    # NOTE: the saturable flux itself is certified in the Lean export, not
+    # here. It is a nonlinear statement over a ratio whose transport is
+    # QED's GENERIC `Compartmental.saturableFlux_nonneg` /
+    # `saturableFlux_bounded` (see `_saturable_lean_block`), so the model-side
+    # theorem is an instantiation rather than a re-derivation. Re-emitting the
+    # raw inequality as a line lemma would ask QED's numeric pipeline to prove
+    # a bound it has no hypothesis for, which is how a certificate degrades
+    # into a guess.
     return lemmas
 
 
 def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
-                  parametric: bool = True, fin_n: int | None = None) -> list[str]:
+                  parametric: bool = True, fin_n: int | None = None,
+                  saturable: bool | None = None) -> list[str]:
     """Build the deterministic list of NON-TRIVIAL QED lemmas.
 
     Retains ONLY:
@@ -255,7 +298,9 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
     """
     source = model_path.read_text(encoding="utf-8")
     if "def make_pbpk_ode(" in source:
-        return _dynamic_lemmas(model_path, fin_n or len(DEFAULT_ORGAN_NETWORK), parametric)
+        return _dynamic_lemmas(
+            model_path, fin_n or len(DEFAULT_ORGAN_NETWORK), parametric,
+            saturable=saturable)
     lemmas: list[str] = []
     if include_ode_lemmas:
         pass  # symbolic ODE targets removed: verification theater.
@@ -338,9 +383,44 @@ def check_mass_conservation(model_path: Path) -> bool:
 # d[gut] = -ka * A_gut (exact form; extra terms break mass conservation)
     if gut not in ("-ka*A_gut", "-ka *A_gut", "-kaA_gut", "-ka *A_gut"):
         return False
-    # d[elim] = CL * C_p (exact form; extra terms break mass conservation)
-    if elim not in ("CL*C_p", "CL *C_p", "CL* C_p", "CL * C_p"):
+    # d[elim] = CL * C_p, optionally plus the saturable hepatic metabolic flux
+    # (exact form; any OTHER extra term breaks mass conservation). The
+    # saturable term is admitted only because it is a TRANSFER: the same
+    # ``liver_metabolic`` is subtracted from the liver derivative, which is
+    # checked below. Booking it in elim without the matching removal would
+    # manufacture mass, so the pair is verified together.
+    linear_elim = ("CL*C_p", "CL *C_p", "CL* C_p", "CL * C_p")
+    if elim not in linear_elim and elim != "CL*C_p+liver_metabolic":
         return False
+    # The saturable term is a TRANSFER, so it is only conservative when the
+    # liver removes exactly what elim accumulates. Requiring the pair keeps
+    # this fail-closed in both directions: booking the flux in elim alone would
+    # manufacture mass, and the check below is what refuses that.
+    liver_forms = {
+        "d_liver": rhs.get("d_liver"),
+        "dA_liver": rhs.get("dA_liver"),
+    }
+    liver_loses_metabolic = any(
+        form is not None and "liver_metabolic" in form
+        for form in liver_forms.values()
+    )
+    if liver_loses_metabolic != ("liver_metabolic" in (elim or "")):
+        # Exactly one side of the transfer, or the two sides disagree: the flux
+        # would be created or destroyed rather than moved. Refusing here is
+        # what keeps the saturable path as conservative as the linear one.
+        return False
+    if liver_loses_metabolic:
+        # ...and central must subtract the perfusion FLUXES, not the tissue
+        # derivatives, or the saturable term would be counted twice.
+        for candidate in [
+                " ".join(ast.unparse(node.value).replace(" ", "").split())
+                for node in ast.walk(pbpk_ode)
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in ("d_central", "dA_central")]:
+            if "liver_metabolic" in candidate:
+                return False
     central_candidates = [
         ast.unparse(node.value).replace(" ", "")
         for node in ast.walk(pbpk_ode)
@@ -358,9 +438,17 @@ def check_mass_conservation(model_path: Path) -> bool:
         if comp not in ("A_gut", "A_central", "A_elim")
     ]
     for candidate in central_candidates:
-        has_perfusion = "sum(flows)" in candidate or all(
-            f"d{comp}" in candidate for comp in perfused
-        )
+        # Central must account for EVERY perfused outflow. Two spellings are
+        # accepted: the N-organ ``sum(flows)``, and the six-organ explicit
+        # ``- flows[0] - flows[1] - ...`` (which subtracts the perfusion fluxes
+        # rather than the tissue derivatives, so the saturable term is booked
+        # exactly once). Requiring one flow per perfused tissue is what keeps
+        # this from accepting a central that drops an organ.
+        has_sum = "sum(flows)" in candidate
+        indexed = [f"flows[{i}]" in candidate for i in range(len(perfused))]
+        has_named = all(f"d{comp}" in candidate for comp in perfused)
+        has_perfusion = has_sum or (all(indexed) if len(perfused) == 3
+                                    else has_named) or has_named
         if not (
             has_perfusion
             and "CL" in candidate
@@ -408,6 +496,7 @@ def extract_symbolic_derivatives(model_path: Path,
         raise ValueError(f"pbpk_ode not found in {model_path}")
 
     derivs: dict[str, str] = {}
+    aux: dict[str, str] = {}
     for node in ast.walk(pbpk_ode):
         if not isinstance(node, ast.Assign):
             continue
@@ -416,9 +505,19 @@ def extract_symbolic_derivatives(model_path: Path,
         target = node.targets[0].id
         if target.startswith("dA_") and target not in derivs:
             derivs[target] = ast.unparse(node.value)
-
+        elif not target.startswith("dA_") and target not in aux:
+            # Intermediate definitions (concentrations, the saturable flux,
+            # the `flows` list) are recorded so a caller that has to expand
+            # them has them. First-wins: the ODE assigns some of these in more
+            # than one arm and the arms are different quantities.
+            aux[target] = ast.unparse(node.value)
     if not expand:
-        return derivs
+        # The raw form also carries the intermediate definitions, so a caller
+        # that must expand them (the algebraic cancellation check) has them.
+        # The EXPANDED form deliberately does not: its recursive substitution
+        # replaces names as plain substrings, so admitting `V` would rewrite
+        # the `V` inside `_LIVER_IDX` and corrupt the expression.
+        return {**derivs, **aux}
 
     # Resolve `flows[<i>]` into the expression actually stored there.
     #
@@ -469,32 +568,137 @@ def extract_symbolic_derivatives(model_path: Path,
     return expanded
 
 
-def verify_symbolic_cancellation(derivs: dict[str, str]) -> bool:
-    """Algebraically verify that the sum of all compartment derivatives is 0.
+def _state_names(model_path: Path) -> list[str]:
+    """Every state of the model's organ network, as the ``dA_``-stripped name.
+
+    The N-organ branch assigns its perfused derivatives positionally, so the
+    state list cannot be read off the AST; it comes from the network instead.
+    Names are the ``dA_``-stripped stems (``gut``, ``periph``, ...), which is
+    the form :func:`verify_symbolic_cancellation` indexes by.
+    """
+    from insilico_trial.pbpk.model import organ_indices
+    network = _network_for_fin_size(None)
+    spec = organ_indices(network)
+    return ["periph" if network[k] == "peripheral" else network[k]
+            for k in range(spec["n_states"])]
+
+
+def verify_symbolic_cancellation(derivs: dict[str, str],
+                                 state_names: list[str] | None = None
+                                 ) -> bool:
+    r"""Algebraically verify that the sum of all compartment derivatives is 0.
 
     The PBPK ODE conserves total drug mass: the sum of every compartment
-    derivative RHS equals zero.  We verify this *structurally* by checking
-    that the central-compartment derivative contains negated forms of every
-    other derivative's key terms, and that the elimination accumulator
-    cancels with the clearance term in the central balance.
+    derivative RHS equals zero.
+
+    This sums the expressions and asks SYMPY whether the result is identically
+    zero, rather than looking for negated substrings. A substring test is a
+    proxy that breaks on any change of spelling: it cannot see that
+    ``-flows[0] - flows[1] - flows[2]`` discharges the same perfusion balance as
+    ``-dA_liver - dA_periph - dA_effect`` (which is how the six-organ branch now
+    writes central, so that the saturable hepatic flux is booked exactly once),
+    and it would happily accept a sum that only LOOKS balanced. A saturable
+    transfer cancels for the same reason a linear one does -- it is removed from
+    the liver and accumulated in elim -- so it needs no special case here.
 
     Returns True only when the algebraic cancellation is confirmed.
     """
-    central = derivs.get("dA_central", "")
+    import re as _re
+    import sympy as _sp  # type: ignore[import-untyped]
 
-    # dA_central must explicitly subtract each perfused compartment's derivative
-    # (the perfusion terms cancel pairwise via the central balance).
-    for deriv_name in derivs:
-        if deriv_name in ("dA_central", "dA_gut", "dA_elim") or deriv_name.endswith("_flux"):
+    # Every non-derivative name is a definition to inline. The `flows` list
+    # needs its elements available individually, so each ``flows[i]`` is
+    # rewritten to the corresponding ``dA_*_flux`` expression BEFORE inlining;
+    # otherwise a list comprehension would be spliced in as one blob.
+    # Definitions are taken FIRST-WINS. The ODE assigns several names in both
+    # arms of a branch (e.g. ``C_liver`` once for the linear flux and again
+    # inside the saturable arm, ``liver_metabolic`` once with the flux and once
+    # as the always-taken zeros), and a later assignment would silently
+    # replace a definition with a different quantity.
+    defs: dict[str, str] = {}
+    for name, expr in derivs.items():
+        # Skip the list-valued ``flows`` and the non-cancelling JX aliases
+        # (``Q``/``V``/``Kp``/``CL``/``ka`` bind the parameter arrays read out of
+        # ``args``). Inlining ``Q`` would splice the whole array expression --
+        # which sympify then tries to subscript -- into every term.
+        if name in ("flows", "Q", "V", "Kp", "CL", "ka", "c_p", "A_gut",
+                    "d", "vmax", "km"):
             continue
-        # The perfused derivative appears as a subtracted term in dA_central.
-        # Both the variable name and its RHS content must be referenced.
-        if deriv_name not in central:
-            return False
+        if not name.startswith("dA_") and name not in defs:
+            defs[name] = expr
+    flux_by_index = [derivs[f"dA_{t}_flux"] for t in
+                     ("liver", "periph", "effect")
+                     if f"dA_{t}_flux" in derivs]
 
-    # dA_elim = CL * C_p; the clearance term CL * C_p must appear in dA_central
-    # so that the elimination accumulator cancels with the central outflow.
-    return "CL" in central and "C_p" in central and "ka" in central and "A_gut" in central
+    # The perfusion algebra is written over INDEXED ARRAYS (``Q[_LIVER_IDX]``,
+    # ``y[1] / V[1]``). Those subscripts are not expressions sympify can parse,
+    # so each access is flattened to one symbol per array slot. This is a
+    # renaming, not an assumption: it neither adds nor removes terms, and a
+    # genuine imbalance still fails to cancel afterwards.
+    def _flatten_arrays(text: str) -> str:
+        for arr, prefix in (("Q", "Q"), ("V", "V"), ("Kp", "K")):
+            text = _re.sub(
+                rf"\b{arr}\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]",
+                lambda m, a=prefix: f"{a}_{_re.sub(r'\\W', '_', m.group(1))}",
+                text)
+        text = _re.sub(
+            r"\by\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]",
+            lambda m: f"A_{_re.sub(r'\\W', '_', m.group(1))}", text)
+        return text
+
+    def _inline(text: str, depth: int = 0) -> str:
+        if depth > 30:
+            return text
+        # The saturable parameters are read through ``args.get(...)``; name them
+        # so the flux expands symbolically. Leaving the call in place makes the
+        # expression unparseable, which would read as "not conserved".
+        text = _re.sub(r"args\.get\(\s*['\"]vmax_metabolic['\"]\s*\)", "Vmax",
+                       text)
+        text = _re.sub(r"args\.get\(\s*['\"]km_metabolic['\"]\s*\)", "Km", text)
+        for i, value in enumerate(flux_by_index):
+            text = _re.sub(rf"\bflows\[{i}\]", f"({value})", text)
+        for name, value in defs.items():
+            if _re.search(r"\b" + _re.escape(name) + r"\b", text):
+                text = _re.sub(r"\b" + _re.escape(name) + r"\b",
+                               f"({value})", text)
+                return _inline(text, depth + 1)
+        return text
+
+    # ``state_names`` is the set of states the sum must cover. It is passed in
+    # rather than sniffed from the AST because the N-organ branch writes its
+    # perfused derivatives positionally (``d[k] = f``) and so has no
+    # ``dA_<organ>`` name in the source at all -- reading the set from the AST
+    # would silently sum three of fourteen states and call it "conserved".
+    if state_names is None:
+        # Strip the `dA_` PREFIX, not two characters: `dA_gut` names the state
+        # `gut`, and slicing `n[2:]` would yield `_gut`, which matches nothing.
+        state_names = [n[len("dA_"):] for n in derivs
+                       if n.startswith("dA_") and not n.endswith("_flux")]
+    terms = []
+    for name in state_names:
+        expr = derivs.get("dA_" + name)
+        if expr is None:
+            return False
+        terms.append(expr)
+    if not terms:
+        return False
+    symbols = {t: _sp.Symbol(t) for t in
+               ("A_gut", "C_p", "ka", "CL", "Vmax", "Km")}
+    symbols.update({f"{p}_{i}": _sp.Symbol(f"{p}_{i}")
+                    for p in ("Q", "V", "K")
+                    for i in list(range(16)) + [
+                        "LIVER_IDX", "PERIPHERAL_IDX", "EFFECT_SITE_IDX",
+                        "CENTRAL_IDX", "GUT_IDX", "ELIM_IDX"]})
+    total = _sp.Integer(0)
+    for expr in terms:
+        try:
+            total += _sp.sympify(_flatten_arrays(_inline(expr)), locals=symbols)
+        except Exception:
+            return False
+    try:
+        return _sp.simplify(total) == 0
+    except Exception:
+        return False
 
 
 
@@ -517,7 +721,9 @@ def extract_metzler_lemmas(model_path: Path) -> list[str]:
     return lemmas
 
 
-def extract_boundary_flow_lemmas(model_path: Path) -> list[str]:
+def extract_boundary_flow_lemmas(model_path: Path,
+                                 organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK
+                                 ) -> list[str]:
     """Compartmental boundary inflow positivity invariants (Lemma 4).
 
     For each perfused compartment *i* (liver, peripheral, effect-site),
@@ -532,8 +738,9 @@ def extract_boundary_flow_lemmas(model_path: Path) -> list[str]:
     with hypotheses ``0 < Q_i``, ``0 < V_central``, ``0 < Kp_i``, and
     ``0 ≤ A_central`` (non-strict for the state variable).
     """
-    state_vars = extract_state_variables(model_path)
-    perfused = extract_perfused_compartments(model_path, state_vars)
+    state_vars = extract_state_variables(model_path, organ_network)
+    perfused = extract_perfused_compartments(model_path, state_vars,
+                                              organ_network)
     lemmas: list[str] = []
     for comp in perfused:
         tissue = comp[2:] if comp.startswith("A_") else comp
@@ -657,10 +864,37 @@ def _ode_rhs_asts(model_path: Path, organ_network: tuple[str, ...] = DEFAULT_ORG
             rhs[t] = node.value
 
     spec = organ_indices(organ_network)
-    order = [
-        name for network_name in organ_network
-        if (name := "dA_" + ("periph" if network_name == "peripheral" else network_name)) in rhs
-    ]
+    # The N-organ branch writes the perfused derivatives as ``d[k] = f`` in a
+    # loop over ``perfused``, so no ``dA_<organ>`` name exists in the source for
+    # those tissues: filtering the network by "names present in rhs" would
+    # silently drop every organ past liver and report a 4-state model for a
+    # 14-organ network. The named-derivative set is therefore the fallback for
+    # the six-organ branch only; the N-organ order IS the network, and the
+    # perfused states are resolved from the flows comprehension instead.
+    n_organ = len(organ_network) != len(DEFAULT_ORGAN_NETWORK)
+    if n_organ:
+        order = [
+            "dA_" + ("periph" if name == "peripheral" else name)
+            for name in organ_network
+        ]
+        missing = [name for name in order
+                   if name not in rhs and name not in ("dA_elim",)]
+        # dA_elim and the perfused states are assigned positionally rather than
+        # by name; everything else must be a real named assignment.
+        unexpected = [name for name in missing
+                      if name not in ("dA_" + ("periph" if n == "peripheral" else n)
+                                      for n in organ_network
+                                      if n not in ("gut", "central", "elim"))]
+        if unexpected:
+            raise ValueError(
+                f"model is missing derivative assignments {unexpected} for "
+                f"the {len(organ_network)}-organ network; refusing to certify")
+    else:
+        order = [
+            name for network_name in organ_network
+            if (name := "dA_" + ("periph" if network_name == "peripheral"
+                                  else network_name)) in rhs
+        ]
     return rhs, order
 
 
@@ -760,15 +994,31 @@ def _lean_param(expr: str) -> str:
     return expr
 
 
-def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
-    """Symbolic Jacobian J[i][j] = d f_i / d y_j via AST differentiation."""
+def _network_for_fin_size(n: int | None) -> tuple[str, ...]:
+    """The organ network for a state count, shared by the bridge and the gate."""
+    from insilico_trial.pbpk.model import (
+        DEFAULT_ORGAN_NETWORK,
+        STANDARD_14_ORGAN_NETWORK,
+    )
+    if n is None:
+        return DEFAULT_ORGAN_NETWORK
+    return _network_for_fin(n)
+
+
+def compute_jacobian(model_path: Path,
+                     fin_n: int | None = None) -> dict[tuple[int, int], str]:
+    """Symbolic Jacobian J[i][j] = d f_i / d y_j via AST differentiation.
+
+    ``fin_n`` selects the organ network. It must be supplied for an N-organ
+    export: defaulting to the six-organ layout would build a 6x6 Jacobian for a
+    14-state model, and the conservation certificate derived from it would
+    certify the wrong system.
+    """
     import sympy as _sp  # type: ignore[import-untyped]
     source = model_path.read_text(encoding="utf-8")
     if "def make_pbpk_ode(" in source:
         from insilico_trial.pbpk.model import make_pbpk_ode, organ_indices
-        defaults = make_pbpk_ode.__defaults__ or ()
-        assert defaults, "make_pbpk_ode has no default organ network"
-        network = tuple(defaults[0])
+        network = _network_for_fin_size(fin_n)
         spec = organ_indices(network)
         gut = int(spec["gut"])
         central = int(spec["central"])
@@ -777,11 +1027,25 @@ def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
         result: dict[tuple[int, int], str] = {}
         result[(gut, gut)] = "-ka"
         result[(central, gut)] = "ka"
-        suffixes = {1: "l", 3: "p", 4: "e"}
-        volumes = {1: "Vl", 3: "Vp", 4: "Ve"}
+        # Symbol naming follows the MODEL's own convention, keyed by organ NAME:
+        # the liver, the peripheral tissue and the effect site are the three
+        # organs the perfusion algebra names symbolically (``Q[_LIVER_IDX]`` is
+        # the liver flow), so they keep the l/p/e suffix; every other organ is
+        # named by its own state index. Keying on the name rather than on a
+        # fixed index is what keeps this honest across topologies: an
+        # index-keyed table would label the 14-organ kidney (index 3) "Qp" and
+        # the lung (index 4) "Qe", i.e. certify a kidney flow under the
+        # peripheral tissue's symbol. Each organ gets its OWN volume symbol --
+        # a shared ``V`` would let a mutation that swaps two volumes pass.
+        suffixes = {
+            network.index(name): suffix
+            for name, suffix in (("liver", "l"), ("peripheral", "p"),
+                                 ("effect", "e"))
+            if name in network
+        }
         for index in perfused:
             suffix = suffixes.get(index, str(index))
-            volume = volumes.get(index, "V")
+            volume = f"V{suffix}"
             result[(index, central)] = f"Q{suffix}/Vc"
             result[(index, index)] = f"-Q{suffix}/(Kp{suffix}*{volume})"
             result[(central, index)] = f"Q{suffix}/(Kp{suffix}*{volume})"
@@ -828,15 +1092,17 @@ def compute_jacobian(model_path: Path) -> dict[tuple[int, int], str]:
     return J
 
 
-def extract_column_sum_lemmas(model_path: Path) -> list[str]:
+def extract_column_sum_lemmas(model_path: Path,
+                              fin_n: int | None = None) -> list[str]:
     """Dynamically generated column-sum conservation lemmas sum_i J[i][j] = 0.
 
     Symbolically sums the AST-differentiated Jacobian columns; each lemma is
     the textual column sum equated to zero. Any sign flip in model.py alters
     the emitted string (verified by test_formal_verification.py).
     """
-    J = compute_jacobian(model_path)
-    _, _order = _ode_rhs_asts(model_path)
+    J = compute_jacobian(model_path, fin_n)
+    _network = _network_for_fin_size(fin_n)
+    _, _order = _ode_rhs_asts(model_path, _network)
     order_n = len(_order)
     lemmas: list[str] = []
     for j in range(order_n):
@@ -848,7 +1114,8 @@ def extract_column_sum_lemmas(model_path: Path) -> list[str]:
     return lemmas
 
 
-def build_column_sum_certificate(model_path: Path) -> str:
+def build_column_sum_certificate(model_path: Path,
+                                 fin_n: int | None = None) -> str:
     """Every nonzero Jacobian entry in ONE params-only conservation identity.
 
     :func:`extract_column_sum_lemmas` emits one identity per state column --
@@ -859,9 +1126,16 @@ def build_column_sum_certificate(model_path: Path) -> str:
     Jacobian independently and account for the export term by term.  Summing
     the columns is exactly that certificate, and it drops the empty column.
     """
-    J = compute_jacobian(model_path)
-    _, _order = _ode_rhs_asts(model_path)
+    J = compute_jacobian(model_path, fin_n)
+    _network = _network_for_fin_size(fin_n)
+    _, _order = _ode_rhs_asts(model_path, _network)
     order_n = len(_order)
+    if order_n != len(_network):
+        raise ValueError(
+            f"expected {len(_network)} states for the organ network but the "
+            f"model yields {order_n}; refusing to certify a conservation "
+            "certificate built for a mismatched state count"
+        )
     entries = [
         J.get((i, j), "0")
         for j in range(order_n)
@@ -991,9 +1265,9 @@ def build_parametric_sum_lemma(model_path: Path) -> str:
     The emitted lemma requires Mathlib (``field_simp``/``ring`` over R)
     and is only used in ``--parametric`` mode.
     """
-    # Verify on raw (unexpanded) forms so substring checks work correctly.
+    # Verify on raw (unexpanded) forms, inlining definitions as it goes.
     raw_derivs = extract_symbolic_derivatives(model_path, expand=False)
-    if not verify_symbolic_cancellation(raw_derivs):
+    if not verify_symbolic_cancellation(raw_derivs, _state_names(model_path)):
         raise ValueError(
             "Symbolic cancellation verification failed: the PBPK ODE does "
             "not conserve total drug mass in symbolic form."
@@ -1051,6 +1325,38 @@ def emit_verified_lean_export(model_path: Path, out_path: Path) -> Path:
     return out_path
 
 
+def _saturable_lean_block(saturable: bool) -> str:
+    """Lean certificates for the saturable hepatic metabolic flux.
+
+    These are TRANSPORTS of QED's generic ``Compartmental`` theorems, not
+    re-derivations: the flux is stated once, generically, in
+    ``Compartmental.lean`` (``saturableFlux_nonneg`` / ``saturableFlux_bounded``)
+    and the model-side theorem instantiates it at the liver concentration. That
+    is what keeps ``QED/`` domain-agnostic — the engine knows only "a saturable
+    flux", and VeriTrial supplies its own ``C_liver``.
+
+    Nothing is emitted when the model does not opt into the saturable path, so
+    a linear model cannot acquire a certificate for a term it lacks.
+    """
+    if not saturable:
+        return ""
+    return (
+        "\n/-- Saturable hepatic metabolic flux, instantiated at the liver.\n"
+        "    The generic theorems are discharged in `Compartmental`; this is the\n"
+        "    model's own instantiation. -/\n"
+        "theorem veritrial_saturable_flux_nonneg (Vmax Km C_liver : ℝ)\n"
+        "    (hVmax : 0 < Vmax) (hKm : 0 < Km) (hC : 0 ≤ C_liver) :\n"
+        "    0 ≤ saturableFlux Vmax Km C_liver :=\n"
+        "  saturableFlux_nonneg hVmax hKm hC\n\n"
+        "/-- The saturable flux is strictly capacity-bounded, so no step size\n"
+        "    can make metabolic elimination exceed `Vmax`. -/\n"
+        "theorem veritrial_saturable_flux_bounded (Vmax Km C_liver : ℝ)\n"
+        "    (hVmax : 0 < Vmax) (hKm : 0 < Km) (hC : 0 ≤ C_liver) :\n"
+        "    saturableFlux Vmax Km C_liver < Vmax :=\n"
+        "  saturableFlux_bounded hVmax hKm hC\n"
+    )
+
+
 def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = None) -> None:
     """AST-to-Lean transpiler: emit self-contained extracted matrix + certificates.
 
@@ -1099,6 +1405,12 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
         M = N + 3
         body = (
             "import Compartmental\n\nopen Compartmental\n\n"
+            # `fin_cases` over Fin N is O(N^2) cases and `positivity` runs per
+            # case, so the default 200k heartbeats is exhausted somewhere
+            # around N = 14. The budget is scaled with the state count rather
+            # than raised blindly: it is a compile-time allowance, not a
+            # weakening of any hypothesis.
+            f"set_option maxHeartbeats {200000 * max(1, N * N // 4)}\n\n"
             "noncomputable def extracted_matrix (ka CL : ℝ) "
             f"(Q V Kp : Fin {N} → ℝ) : Fin {N} → Fin {N} → ℝ :=\n"
             f"  fun i j =>\n    {chain}\n\n"
@@ -1107,48 +1419,23 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
             f"(hQ : ∀ i, 0 < Q i) (hV : ∀ i, 0 < V i) "
             f"(hKp : ∀ i, 0 < Kp i) (i j : Fin {N}) (hij : i ≠ j) :\n"
             f"  0 ≤ extracted_matrix ka CL Q V Kp i j := by\n"
-            f"  have hQ0 := hQ (0 : Fin {N})\n"
-            f"  have hQ1 := hQ (1 : Fin {N})\n"
-            f"  have hQ2 := hQ (2 : Fin {N})\n"
-            f"  have hQ3 := hQ (3 : Fin {N})\n"
-            f"  have hQ4 := hQ (4 : Fin {N})\n"
-            f"  have hQ5 := hQ (5 : Fin {N})\n"
-            f"  have hV0 := hV (0 : Fin {N})\n"
-            f"  have hV1 := hV (1 : Fin {N})\n"
-            f"  have hV2 := hV (2 : Fin {N})\n"
-            f"  have hV3 := hV (3 : Fin {N})\n"
-            f"  have hV4 := hV (4 : Fin {N})\n"
-            f"  have hKp0 := hKp (0 : Fin {N})\n"
-            f"  have hKp1 := hKp (1 : Fin {N})\n"
-            f"  have hKp2 := hKp (2 : Fin {N})\n"
-            f"  have hKp3 := hKp (3 : Fin {N})\n"
-            f"  have hKp4 := hKp (4 : Fin {N})\n"
-            f"  have hV1ne : V (1 : Fin {N}) ≠ 0 := ne_of_gt hV1\n"
-            f"  have hV2ne : V (2 : Fin {N}) ≠ 0 := ne_of_gt hV2\n"
-            f"  have hV3ne : V (3 : Fin {N}) ≠ 0 := ne_of_gt hV3\n"
-            f"  have hV4ne : V (4 : Fin {N}) ≠ 0 := ne_of_gt hV4\n"
-            f"  have hKp1ne : Kp (1 : Fin {N}) ≠ 0 := ne_of_gt hKp1\n"
-            f"  have hKp2ne : Kp (2 : Fin {N}) ≠ 0 := ne_of_gt hKp2\n"
-            f"  have hKp3ne : Kp (3 : Fin {N}) ≠ 0 := ne_of_gt hKp3\n"
-            f"  have hKp4ne : Kp (4 : Fin {N}) ≠ 0 := ne_of_gt hKp4\n"
-            f"  have hV1inv : 0 < (V (1 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV1\n"
-            f"  have hV3inv : 0 < (V (3 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV3\n"
-            f"  have hV4inv : 0 < (V (4 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV4\n"
-            f"  have hKp1inv : 0 < (Kp (1 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp1\n"
-            f"  have hKp3inv : 0 < (Kp (3 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp3\n"
-            f"  have hKp4inv : 0 < (Kp (4 : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp4\n"
-            f"  have hQ1n : 0 ≤ Q (1 : Fin {N}) := le_of_lt hQ1\n"
-            f"  have hQ2n : 0 ≤ Q (2 : Fin {N}) := le_of_lt hQ2\n"
-            f"  have hQ3n : 0 ≤ Q (3 : Fin {N}) := le_of_lt hQ3\n"
-            f"  have hQ4n : 0 ≤ Q (4 : Fin {N}) := le_of_lt hQ4\n"
-            f"  have hV2n : 0 ≤ V (2 : Fin {N}) := le_of_lt hV2\n"
-            f"  have hV1n : 0 ≤ V (1 : Fin {N}) := le_of_lt hV1\n"
-            f"  have hV3n : 0 ≤ V (3 : Fin {N}) := le_of_lt hV3\n"
-            f"  have hV4n : 0 ≤ V (4 : Fin {N}) := le_of_lt hV4\n"
-            f"  have hKp1n : 0 ≤ Kp (1 : Fin {N}) := le_of_lt hKp1\n"
-            f"  have hKp3n : 0 ≤ Kp (3 : Fin {N}) := le_of_lt hKp3\n"
-            f"  have hKp4n : 0 ≤ Kp (4 : Fin {N}) := le_of_lt hKp4\n"
-            "  fin_cases i <;> fin_cases j <;> simp_all [extracted_matrix] <;>\n"
+            # One hypothesis per state, for EVERY state: the six-organ export
+            # hardcoded indices 0-5, which silently under-specifies a larger
+            # network (positivity would be assumed only for six of fourteen
+            # tissues, so the off-diagonal theorem would not say what it claims).
+            + "".join(
+                f"  have hQ{k} := hQ ({k} : Fin {N})\n"
+                f"  have hV{k} := hV ({k} : Fin {N})\n"
+                f"  have hKp{k} := hKp ({k} : Fin {N})\n"
+                f"  have hV{k}ne : V ({k} : Fin {N}) ≠ 0 := ne_of_gt hV{k}\n"
+                f"  have hKp{k}ne : Kp ({k} : Fin {N}) ≠ 0 := ne_of_gt hKp{k}\n"
+                f"  have hV{k}inv : 0 < (V ({k} : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hV{k}\n"
+                f"  have hKp{k}inv : 0 < (Kp ({k} : Fin {N}) : ℝ)⁻¹ := inv_pos.mpr hKp{k}\n"
+                f"  have hQ{k}n : 0 ≤ Q ({k} : Fin {N}) := le_of_lt hQ{k}\n"
+                f"  have hV{k}n : 0 ≤ V ({k} : Fin {N}) := le_of_lt hV{k}\n"
+                f"  have hKp{k}n : 0 ≤ Kp ({k} : Fin {N}) := le_of_lt hKp{k}\n"
+                for k in range(N))
+            + "  fin_cases i <;> fin_cases j <;> simp_all [extracted_matrix] <;>\n"
             "    positivity\n\n"
             "theorem extracted_colSum_eq_zero (ka CL : ℝ) (Q V Kp : Fin "
             f"{N} → ℝ) (hQ : ∀ i, 0 < Q i) (hV : ∀ i, 0 < V i) "
@@ -1193,7 +1480,7 @@ def emit_lean_export(model_path: Path, lean_out: Path, n_states: int | None = No
             "  split_ifs with h\n"
             "  · rfl\n"
             "  · exact absurd ⟨i.isLt, j.isLt⟩ h\n"
-        )
+        ) + _saturable_lean_block(_model_implements_saturable(model_path))
         lean_out.parent.mkdir(parents=True, exist_ok=True)
         lean_out.write_text(body, encoding="utf-8")
         return
@@ -1357,6 +1644,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Disable parametric export and emit only numeric witnesses.")
     parser.add_argument("--fin-n", type=int, default=None,
                         help="Organ network state count for dynamic export")
+    parser.add_argument(
+        "--saturable", action="store_true",
+        help="Emit the saturable (Michaelis-Menten) hepatic metabolic flux "
+             "certificates. Required when the model opts into the saturable "
+             "path; the gate refuses a file that certifies a configuration "
+             "the model does not implement.")
     parser.add_argument("--lean-out", type=Path, default=None,
                         help="Also emit verified Lean isomorphism file (QED/VeriTrialExport.lean)")
     args = parser.parse_args(argv)
@@ -1381,7 +1674,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         lemmas = build_lemmas(model_path, include_ode_lemmas=include_ode,
-                              parametric=args.parametric, fin_n=args.fin_n)
+                              parametric=args.parametric, fin_n=args.fin_n,
+                              saturable=args.saturable)
     except Exception as e:
         print(f"failed to export lemmas: {e}", file=sys.stderr)
         return 1
