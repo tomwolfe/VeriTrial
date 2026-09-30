@@ -220,6 +220,30 @@ def test_fast_build_lemmas_defaults() -> None:
     assert len(full) > len(slim)
 
 
+def test_fast_emit_lean_export_creates_parents_and_overwrites(tmp_path: Path) -> None:
+    # The gate re-emits over a path that already exists on every run
+    # (`--lean-out ../QED/VeriTrialExport.lean` is a checked-in artifact), so
+    # emit_lean_export must tolerate an existing parent directory and replace
+    # the file rather than fail.
+    #
+    # The nested form also pins `parents=True`. `parents=False` happens to
+    # survive every existing emit test, because they all write into a tmp_path
+    # that already exists and the gate's own --lean-out parent (QED/) exists
+    # too -- so dropping the intermediate-directory creation is invisible to
+    # all of them. It only shows up when an output path has a missing
+    # intermediate component, which is what this exercises.
+    nested = tmp_path / "generated" / "lean" / "E.lean"
+
+    ex.emit_lean_export(MODEL, nested)
+    assert "theorem veritrial_mass_dissipation" in nested.read_text()
+
+    nested.write_text("stale contents that must not survive\n", encoding="utf-8")
+    ex.emit_lean_export(MODEL, nested)
+    text = nested.read_text(encoding="utf-8")
+    assert "stale contents" not in text
+    assert "theorem veritrial_mass_dissipation" in text
+
+
 def test_fast_emit_lean_export(tmp_path: Path) -> None:
     out = tmp_path / "E.lean"
     ex.emit_lean_export(MODEL, out)
