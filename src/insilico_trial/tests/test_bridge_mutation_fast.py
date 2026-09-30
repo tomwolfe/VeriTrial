@@ -51,6 +51,7 @@ def test_fast_mass_conservation_true() -> None:
 def test_fast_mass_conservation_rejects_gut_mutant(tmp_path: Path) -> None:
     bad = tmp_path / "m.py"
     bad.write_text(MODEL.read_text().replace("-ka * A_gut", "-2.0 * ka * A_gut", 1))
+    assert bad.read_text() != MODEL.read_text(), "gut mutant did not apply"
     assert ex.check_mass_conservation(bad) is False
 
 
@@ -76,18 +77,24 @@ def test_fast_mass_conservation_rejects_saturable_half_transfer(
     # the check must refuse both directions.
     src = MODEL.read_text()
     only_elim = tmp_path / "elim_only.py"
-    only_elim.write_text(src.replace(
-        "dA_liver = flows[0] - liver_metabolic", "dA_liver = flows[0]", 1))
+    only_elim_src = src.replace(
+        "dA_liver = flows[0] - liver_metabolic", "dA_liver = flows[0]", 1)
+    assert only_elim_src != src, "liver-only mutant no longer matches the model"
+    only_elim.write_text(only_elim_src)
     assert ex.check_mass_conservation(only_elim) is False
 
     only_liver = tmp_path / "liver_only.py"
-    only_liver.write_text(src.replace(
-        "dA_elim = CL * C_p + liver_metabolic", "dA_elim = CL * C_p", 1))
+    only_liver_src = src.replace(
+        "dA_elim = CL * C_p + liver_metabolic", "dA_elim = CL * C_p", 1)
+    assert only_liver_src != src, "elim-only mutant no longer matches the model"
+    only_liver.write_text(only_liver_src)
     assert ex.check_mass_conservation(only_liver) is False
 
     double = tmp_path / "double.py"
-    double.write_text(src.replace(
-        "dA_central = (ka * A_gut", "dA_central = (ka * A_gut - liver_metabolic", 1))
+    double_src = src.replace(
+        "dA_central = (ka * A_gut", "dA_central = (ka * A_gut - liver_metabolic", 1)
+    assert double_src != src, "double-count mutant no longer matches the model"
+    double.write_text(double_src)
     assert ex.check_mass_conservation(double) is False
 
 
@@ -101,7 +108,10 @@ def test_fast_symbolic_cancellation_rejects_saturable_half_transfer(
             ("dA_elim = CL * C_p + liver_metabolic", "dA_elim = CL * C_p"),
     ):
         bad = tmp_path / "m.py"
-        bad.write_text(MODEL.read_text().replace(old, new, 1))
+        src = MODEL.read_text()
+        mutated = src.replace(old, new, 1)
+        assert mutated != src, f"half-transfer mutant no longer matches: {old!r}"
+        bad.write_text(mutated)
         derivs = ex.extract_symbolic_derivatives(bad, expand=False)
         assert ex.verify_symbolic_cancellation(derivs, states) is False
 
@@ -589,7 +599,7 @@ def test_fast_gate_independent_column_sums_14_organ() -> None:
 
 def test_fast_gate_column_sums_reject_unknown_network() -> None:
     # Fail-closed: an unsupported state count must refuse, not fall back to 6.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unsupported organ network size: 9"):
         gate._independent_column_sums(MODEL, 9)
 
 
@@ -667,7 +677,11 @@ def test_fast_saturable_export_refuses_when_not_implemented(tmp_path) -> None:
     stripped = tmp_path / "linear_only.py"
     src = MODEL.read_text().replace("liver_metabolic", "zero_flux")
     stripped.write_text(src)
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match="saturable certificates were requested but the model does not "
+              "implement the saturable hepatic path",
+    ):
         ex.build_lemmas(stripped, fin_n=6, saturable=True)
 
 
@@ -949,6 +963,20 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     _patch_prelean(monkeypatch, base)
     monkeypatch.setattr(gate, "_run_lean", _fake_none_axiom)
     assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
+    # Axiom check: #print axioms output that parses to an EMPTY axiom set.
+    # This is the vacuous-pass case: the allowlist comparison below it is
+    # `not ax_set <= allowed`, which an empty set satisfies trivially. The
+    # "theorems missing" case above is caught LATER by the required-name
+    # check, so it does not isolate this; only a drift that keeps every
+    # required name but breaks the axiom-line format reaches the hole.
+    _patch_full_success(
+        monkeypatch, tmp_path,
+        "\n".join(
+            f"'{name}' depends on axioms: " for name in (
+                "extracted_offDiag_nonneg", "extracted_colSum_eq_zero",
+                "veritrial_compartmental", "veritrial_mass_dissipation",
+                "veritrial_dili_block")) + "\n")
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
     # Verify script failure.
     _patch_full_success(monkeypatch, tmp_path)
     monkeypatch.setattr(_sp, "run", lambda *a, **k: _FakeProc(2, "QED FAIL", ""))
@@ -967,6 +995,54 @@ def test_fast_gate_main_lean_and_axioms(tmp_path: Path, monkeypatch) -> None:
     assert traces["verified"] is True
     assert traces["n_lemmas"] == len(base)
     assert all(v["verified"] is True for v in traces["traces"].values())
+
+
+def test_fast_gate_rebuild_helper_ships_with_veritrial() -> None:
+    """The olean rebuild must resolve to a file that EXISTS.
+
+    The gate's own comment calls the rebuild "not optional": the axiom check
+    imports compiled modules, so a stale `.olean` would certify theorems the
+    current source no longer proves. It previously looked for the helper under
+    QED/scripts/, but the helper ships with VeriTrial (QED/scripts/ holds only
+    opencode_tty.py), so the lookup missed and the `if rebuild.is_file():`
+    guard skipped the rebuild -- certifying against whatever `.olean` the
+    clean room happened to carry.
+
+    Asserted on the gate's own SOURCE, not on a recomputed path: a path that
+    merely exists next to the script proves nothing about what the gate
+    actually opens, which is precisely how the wrong-path version stayed
+    green. The resolution must be anchored to the gate's own directory.
+    """
+    src = (SCRIPTS / "verify_formal_gate.py").read_text(encoding="utf-8")
+    assert 'Path(__file__).resolve().parent / "rebuild_qed_oleans.py"' in src, (
+        "gate must resolve the rebuild helper relative to its own directory")
+    assert 'qed / "scripts" / "rebuild_qed_oleans.py"' not in src, (
+        "gate regressed to the QED/scripts/ lookup, which does not exist")
+    # And the helper really is next to the gate, so the resolved path is live.
+    assert (SCRIPTS / "rebuild_qed_oleans.py").is_file()
+    assert (SCRIPTS / "verify_formal_gate.py").is_file()
+
+
+def test_fast_gate_rebuild_failure_fails_closed(tmp_path: Path,
+                                                monkeypatch, capsys) -> None:
+    """A failing rebuild must fail the gate, not warn and continue."""
+    base = _guard_lemmas()
+    f = _write_guard_file(tmp_path, base)
+    _patch_prelean(monkeypatch, base)
+    monkeypatch.setattr(gate, "_detect_mathlib_env", lambda: True)
+    qed = tmp_path / "qed"
+    qed.mkdir()
+    (qed / "verify_pbpk_lemmas.py").write_text("x = 1\n")
+    (qed / "VeriTrialExport.lean").write_text("x = 1\n")
+    monkeypatch.setattr(gate, "qed_dir", lambda: qed)
+    import subprocess as _sp
+
+    def _rebuild_fails(*a, **k):
+        return _FakeProc(1, "", "lean: error")
+
+    monkeypatch.setattr(_sp, "run", _rebuild_fails)
+    assert gate.main([str(f), "--fin-n", "6", "--no-strict"]) == 1
+    assert "rebuild failed" in capsys.readouterr().err
 
 
 def test_fast_gate_traces_isolated_root(tmp_path: Path, monkeypatch) -> None:

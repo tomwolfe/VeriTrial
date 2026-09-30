@@ -148,9 +148,18 @@ def make_pbpk_ode(organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK) -> Cal
             liver_metabolic = jnp.zeros_like(C_p)
         dA_elim = CL * C_p + liver_metabolic
         if len(organ_network) == 6:
-            dA_liver = flows[0] - liver_metabolic
-            dA_periph = flows[1]
-            dA_effect = flows[2]
+            # These three bindings look dead -- the generic loop below is what
+            # actually writes ``d[k]``, so nothing here reads them. They are
+            # nonetheless load-bearing and must NOT be deleted or inlined:
+            # ``export_pbpk_to_qed._ode_rhs_asts`` derives the six-organ state
+            # ORDER from which ``dA_*`` names appear in this function's AST, so
+            # removing them silently collapses the exported model from 6 states
+            # to 3 and the formal gate then refuses the column-sum certificate
+            # ("expected 6 states ... the model yields 3"). Deleting them is
+            # physics-neutral and certificate-breaking, hence the noqa.
+            dA_liver = flows[0] - liver_metabolic  # noqa: F841
+            dA_periph = flows[1]  # noqa: F841
+            dA_effect = flows[2]  # noqa: F841
             # NOTE: central subtracts the perfusion FLUXES, not the tissue
             # derivatives. The saturable flux is internal to the liver -> elim
             # transfer, so counting it here as well would book it twice and
