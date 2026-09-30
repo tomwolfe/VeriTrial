@@ -1,0 +1,43 @@
+# Tether project configuration for the VeriTrial checkout.
+# Precedence: CLI flags > mission file > this file > defaults.
+#
+# This file was missing entirely, which silently cost the two VeriTrial-scoped
+# missions their budgets. tether run --project-dir ../VeriTrial looks for a
+# config in that project directory; finding none, it fell back to the built-in
+# defaults -- command_timeout_seconds 1800. qed-veritrial-formal-pipeline.yaml
+# declares budget.max_wall_seconds: 3600 precisely because 1800 is too small to
+# finish a single attempt, and its own comment records that a repair send
+# "would die of budget_exceeded after the first attempt alone had spent ~700 s,
+# with recovery.max_attempts: 2". Instead the agent send was SIGTERM'd at
+# 1800.03 s (usage exit_code -15), the mission reported failed, and the
+# declared 3600 s ceiling was never in force. A config that silently does not
+# exist is worse than one that is wrong out loud.
+default_adapter: opencode
+audit_dir: .tether/sessions
+dry_run: false
+log_level: INFO
+# Aligned with the missions' own declared ceilings. veritrial-formal-gate
+# samples 40 mutants and re-runs a Lean rebuild per mutant; the pipeline
+# mission declares max_wall_seconds: 3600 and recovery.max_attempts: 2.
+command_timeout_seconds: 3600
+verification_timeout_seconds: 1800
+max_attempts: 3
+# Enforce, not the default "warn", matching tether/ and QED/. The opencode
+# preset runs with `--auto`, so the model-side approval is off and the sandbox
+# is the auditable layer that actually holds the line. `enforce` also widens
+# detection to gitignored and untracked writes via the filesystem-manifest
+# diff, which is the mode that keeps a mission from certifying a tree it did
+# not verify.
+sandbox_mode: enforce
+verification:
+  commands: []
+adapters:
+  opencode:
+    # `--auto` = "auto-approve permissions that are not explicitly denied".
+    # Needed because the CLI gates its own file access and, run
+    # non-interactively, auto-rejects anything outside the project directory
+    # -- including reads of the sibling QED checkout these missions are
+    # explicitly scoped to. Prompting the model not to reach for the
+    # read-only path is mitigation, not enforcement. The safety that `--auto`
+    # gives up at the model layer is held by `sandbox_mode: enforce` above.
+    command: ["opencode", "run", "--auto", "-m", "opencode/space-bunny-free", "{prompt}"]
