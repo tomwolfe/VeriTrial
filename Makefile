@@ -39,11 +39,11 @@ demo:
 validate:
 	python -m insilico_trial.cli validate --warfarin-n 300
 	python3 scripts/export_pbpk_to_qed.py --out /tmp/pbpk_lemmas.txt --parametric
-	python3 scripts/verify_formal_gate.py /tmp/pbpk_lemmas.txt
+	python3 scripts/verify_formal_gate.py /tmp/pbpk_lemmas.txt --fin-n 6 --strict
 
 formal-gate:
 	python3 scripts/export_pbpk_to_qed.py --out /tmp/pbpk_lemmas.txt --parametric
-	python3 scripts/verify_formal_gate.py /tmp/pbpk_lemmas.txt
+	python3 scripts/verify_formal_gate.py /tmp/pbpk_lemmas.txt --fin-n 6 --strict
 
 benchmark:
 	python -m insilico_trial.cli benchmark

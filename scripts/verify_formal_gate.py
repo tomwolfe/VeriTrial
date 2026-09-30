@@ -1209,20 +1209,35 @@ def main(argv: list[str] | None = None) -> int:
     # modules, so a stale `.olean` from an older source would certify theorems
     # the current source no longer proves. `lake` is unusable here (SIGTRAP /
     # exit 133 on this toolchain, even for `lake --version`), so the rebuild
-    # drives `lean -o` directly via QED/scripts/rebuild_qed_oleans.py, which
-    # also deletes each stale artefact before compiling.
+    # drives `lean -o` directly via this repo's own scripts/rebuild_qed_oleans.py,
+    # which also deletes each stale artefact before compiling.
+    #
+    # Resolved relative to THIS file, not to QED: the rebuild helper ships with
+    # VeriTrial (QED/scripts/ holds only opencode_tty.py), so a `qed / "scripts"`
+    # path is always absent and a `if rebuild.is_file():` guard would silently
+    # skip the rebuild -- certifying against whatever `.olean` the clean room
+    # happened to carry, which is exactly the hole the rebuild exists to close.
+    # Missing helper is therefore a hard failure, not a skip.
     _ensure_lake_on_path()
-    rebuild = qed / "scripts" / "rebuild_qed_oleans.py"
-    if rebuild.is_file():
-        proc_rebuild = _sp_run([sys.executable, str(rebuild)], cwd=qed)
-        sys.stdout.write(proc_rebuild.stdout)
-        if proc_rebuild.stderr:
-            sys.stderr.write(proc_rebuild.stderr)
-        if proc_rebuild.returncode != 0:
-            print("FORMAL GATE FAILED: QED olean rebuild failed; refusing to "
-                  "certify against possibly-stale compiled modules.",
-                  file=sys.stderr)
-            return 1
+    rebuild = Path(__file__).resolve().parent / "rebuild_qed_oleans.py"
+    if not rebuild.is_file():
+        print(
+            f"FORMAL GATE FAILED (fail-closed): olean rebuild helper not found "
+            f"at {rebuild}; refusing to certify against possibly-stale "
+            f"compiled modules.",
+            file=sys.stderr,
+        )
+        return 1
+    proc_rebuild = _sp_run([sys.executable, str(rebuild), "--qed-dir", str(qed)],
+                           cwd=qed)
+    sys.stdout.write(proc_rebuild.stdout)
+    if proc_rebuild.stderr:
+        sys.stderr.write(proc_rebuild.stderr)
+    if proc_rebuild.returncode != 0:
+        print("FORMAL GATE FAILED: QED olean rebuild failed; refusing to "
+              "certify against possibly-stale compiled modules.",
+              file=sys.stderr)
+        return 1
     lean_export = qed / "VeriTrialExport.lean"
     if lean_export.is_file():
         # The rebuild above already compiled the module; checking the export
@@ -1272,7 +1287,21 @@ def main(argv: list[str] | None = None) -> int:
             ax_set = set()
             for grp in m:
                 ax_set |= {a.strip().strip("'") for a in grp.split(",") if a.strip()}
-            if m and not ax_set <= allowed:
+            # Every printed constant must yield a parseable axiom line. If the
+            # count is short, Lean's output format drifted and the allowlist
+            # comparison below would pass VACUOUSLY on an empty set -- i.e. a
+            # silently unparsed #print axioms block would read as "no
+            # unexpected axioms". An empty/unmatched set is a hard failure.
+            printed = len(re.findall(r"depends on axioms", proc_ax.stdout))
+            if not m or len(m) < printed:
+                print(
+                    f"FORMAL GATE FAILED: could not parse the #print axioms "
+                    f"output ({len(m)} parsed of {printed} lines); refusing to "
+                    f"certify an unverified axiom set.",
+                    file=sys.stderr,
+                )
+                return 1
+            if not ax_set <= allowed:
                 print(
                     f"FORMAL GATE FAILED: unexpected axioms {sorted(ax_set)}; "
                     f"allowed {sorted(allowed)}.",

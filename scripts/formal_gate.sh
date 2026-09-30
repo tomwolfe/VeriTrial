@@ -22,7 +22,10 @@ python3 "$SCRIPT_DIR/export_pbpk_to_qed.py" --out "$LEMMA_FILE"
 echo ""
 
 echo "=== [3/3] QED formal verification (no sorry) ==="
-python3 "$SCRIPT_DIR/verify_formal_gate.py" "$LEMMA_FILE"
+# --fin-n is REQUIRED (the gate refuses to certify a file against an assumed
+# network) and --strict is the fail-closed mode. The export above uses the
+# default six-organ network, hence 6.
+python3 "$SCRIPT_DIR/verify_formal_gate.py" "$LEMMA_FILE" --fin-n 6 --strict
 echo ""
 
 # Record pass into validation output (only reached if all steps above succeeded
