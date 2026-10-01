@@ -497,3 +497,253 @@ def test_saturable_step_is_no_smaller_than_the_linear_one() -> None:
     large = calculate_max_stable_dt(
         dict(linear, vmax_metabolic=50.0, km_metabolic=1.0), DEFAULT_ORGAN_NETWORK)
     assert large < small
+
+
+# --- step-count derivation and grid interpolation --------------------------
+#
+# ``_solve_on_grid_fixed`` builds ``t_internal = jnp.linspace(t0, t1,
+# n_steps)``, runs ``n_steps - 1`` RK4 steps under ``jax.lax.scan``, and then
+# resamples the stored states onto ``t_eval`` with ``jnp.interp``.  The step
+# count itself lives in a local, so the only outside observable of that
+# arithmetic is the number of iterations the scan is actually handed.  These
+# tests recover it by swapping the solver module's ``jax`` binding for a
+# recording proxy -- a patch applied from the test, so the solver source is
+# never edited to make its own locals visible.
+
+
+class _LaxProxy:
+    """``jax.lax`` whose ``scan`` records the ``length`` it is handed."""
+
+    def __init__(self, lax: Any, lengths: list[int]) -> None:
+        self._lax = lax
+        self._lengths = lengths
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._lax, name)
+
+    def scan(self, f: Any, init: Any, xs: Any, length: Any = None, **kwargs: Any) -> Any:
+        if length is not None:
+            self._lengths.append(int(length))
+        return self._lax.scan(f, init, xs, length=length, **kwargs)
+
+
+class _JaxProxy:
+    """``jax`` with a recording ``lax``; every other attribute delegates."""
+
+    def __init__(self, jax_module: Any, lengths: list[int]) -> None:
+        self._jax = jax_module
+        self._lengths = lengths
+
+    @property
+    def lax(self) -> _LaxProxy:
+        return _LaxProxy(self._jax.lax, self._lengths)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._jax, name)
+
+
+def _record_scan_lengths(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Return the list that collects every ``lax.scan`` length the solver asks for."""
+    import jax
+
+    from insilico_trial.pbpk import fixed_step
+
+    lengths: list[int] = []
+    monkeypatch.setattr(fixed_step, "jax", _JaxProxy(jax, lengths))
+    return lengths
+
+
+def _warfarin_batch(n_patients: int = 2) -> tuple[dict[str, Any], dict[str, Any], float]:
+    """Single-patient and batched warfarin params plus the absorbed dose."""
+    params, _drug, _t_eval, dose = _build_warfarin_params()
+    batch = {
+        "Q": onp.stack([params["Q"]] * n_patients),
+        "V": onp.stack([params["V"]] * n_patients),
+        "Kp": onp.stack([params["Kp"]] * n_patients),
+        "CL": onp.full(n_patients, float(params["CL"])),
+        "ka": onp.full(n_patients, float(params["ka"])),
+    }
+    return params, batch, dose
+
+
+_STEP_COUNT_ENTRY_POINTS = (
+    "solve_pbpk_fixed_step",
+    "solve_pbpk_batch_fixed_step",
+    "solve_pbpk_batch_9state",
+    "solve_pbpk_batch_with_compartments",
+)
+
+
+def _solve_via(entry_point: str, t_eval: onp.ndarray, dose: float,
+               params: dict[str, Any], batch: dict[str, Any], dt: float) -> Any:
+    from insilico_trial.pbpk import fixed_step
+
+    if entry_point == "solve_pbpk_fixed_step":
+        return fixed_step.solve_pbpk_fixed_step(t_eval, dose, params, dt=dt)
+    doses = onp.full(batch["Q"].shape[0], dose)
+    if entry_point == "solve_pbpk_batch_fixed_step":
+        return fixed_step.solve_pbpk_batch_fixed_step(t_eval, doses, batch, dt=dt)
+    if entry_point == "solve_pbpk_batch_9state":
+        return fixed_step.solve_pbpk_batch_9state(t_eval, doses, batch, dt=dt)
+    return fixed_step.solve_pbpk_batch_with_compartments(t_eval, doses, batch, dt=dt)
+
+
+def _all_finite(out: Any) -> bool:
+    parts = out if isinstance(out, tuple) else (out,)
+    return all(bool(onp.all(onp.isfinite(onp.asarray(part)))) for part in parts)
+
+
+@pytest.mark.parametrize("entry_point", _STEP_COUNT_ENTRY_POINTS)
+def test_step_count_over_an_integral_span(monkeypatch: pytest.MonkeyPatch,
+                                          entry_point: str) -> None:
+    # (2.5 - 0.5) / 0.03125 == 64.0 exactly, so the truncating int() keeps all
+    # 64 intervals and the scan runs 64 times.  dt is a power of two so the
+    # quotient is exact rather than 63.99999999999999, and t0 is non-zero so a
+    # (t1 + t0) slip cannot produce the same quotient.
+    assert (2.5 - 0.5) / 0.03125 == 64.0
+    lengths = _record_scan_lengths(monkeypatch)
+    params, batch, dose = _warfarin_batch()
+
+    out = _solve_via(entry_point, onp.linspace(0.5, 2.5, 5), dose, params, batch, 0.03125)
+
+    assert lengths == [64], (
+        f"{entry_point} took {lengths} scan steps for an exactly integral 64-step span")
+    assert _all_finite(out)
+
+
+@pytest.mark.parametrize("entry_point", _STEP_COUNT_ENTRY_POINTS)
+def test_step_count_drops_the_partial_span(monkeypatch: pytest.MonkeyPatch,
+                                          entry_point: str) -> None:
+    # (3.0 - 0.5) / 0.04 == 62.5, and int() truncates rather than rounding, so
+    # the scan runs 62 times: the last whole step lands at 2.98 h and the
+    # remaining 0.02 h of the requested span is never integrated.
+    assert (3.0 - 0.5) / 0.04 == 62.5
+    lengths = _record_scan_lengths(monkeypatch)
+    params, batch, dose = _warfarin_batch()
+
+    out = _solve_via(entry_point, onp.linspace(0.5, 3.0, 5), dose, params, batch, 0.04)
+
+    assert lengths == [62], (
+        f"{entry_point} took {lengths} scan steps; int() must truncate 62.5 to 62")
+    assert _all_finite(out)
+
+
+def test_truncated_step_count_shows_up_in_the_trajectory(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same arithmetic read off the OUTPUT instead of a spy: with the RK4
+    # stage replaced by "add dt", the state after i steps is exactly y0 + i*dt,
+    # so a step count of 62 prints 8.0 + 2.48 in the last row and a count of 63
+    # would print 8.0 + 2.52.
+    from insilico_trial.pbpk import fixed_step
+
+    _params, batch, _dose = _warfarin_batch()
+    monkeypatch.setattr(fixed_step, "_rk4_step", lambda t, y, dt, args: y + dt)
+
+    out = onp.asarray(fixed_step.solve_pbpk_batch_9state(
+        onp.linspace(0.5, 3.0, 3), onp.full(2, 8.0), batch, dt=0.04))
+
+    assert out.shape == (2, 3, 9)
+    # t0 row is the untouched initial state: 8.0 in the gut, nothing integrated
+    assert out[0, 0, 0] == 8.0
+    # the last t_eval sample is past the last integrated state (2.98 h), so
+    # jnp.interp clamps and returns the final state of 62 steps
+    assert onp.allclose(out[0, -1, 0], 8.0 + 62 * 0.04)
+    assert not onp.allclose(out[0, -1, 0], 8.0 + 63 * 0.04)
+
+
+# --- grid interpolation boundaries ----------------------------------------
+
+
+def _grid_setup(n_steps: int = 65, t0: float = 0.5, t1: float = 2.5) -> Any:
+    """``(solver, args, y0, dt, t_internal)`` for a direct grid-interpolation call.
+
+    65 states over a 2 h span is dt = 0.03125 h, comfortably under the 0.0575 h
+    Metzler bound, so the trajectory stays well conditioned and can be compared
+    against a reference stepped outside the solver.
+    """
+    import jax.numpy as jnp
+
+    from insilico_trial.pbpk import fixed_step
+
+    params, _batch, dose = _warfarin_batch()
+    args: dict[str, Any] = {
+        "Q": jnp.asarray(params["Q"]),
+        "V": jnp.asarray(params["V"]),
+        "Kp": jnp.asarray(params["Kp"]),
+        "CL": float(params["CL"]),
+        "ka": float(params["ka"]),
+    }
+    y0 = jnp.asarray(onp.zeros(6)).at[0].set(dose)
+    dt = (t1 - t0) / (n_steps - 1)
+    return fixed_step, args, y0, dt, onp.linspace(t0, t1, n_steps)
+
+
+def test_grid_interpolation_pins_both_window_edges() -> None:
+    # At t_eval == t_internal the interpolant is the identity, so the first
+    # sample is the vstacked y0 and the last is the final integrated state.
+    # The reference is stepped here, outside the solver, one dt at a time.
+    import jax.numpy as jnp
+
+    fixed_step, args, y0, dt, t_internal = _grid_setup()
+    out = onp.asarray(fixed_step._solve_on_grid_fixed(
+        0.5, 2.5, dt, len(t_internal), jnp.asarray(t_internal), y0, args))
+
+    assert out.shape == (len(t_internal), 6)
+    # bit-exact: the t0 sample IS the initial state, not a blend of it
+    assert onp.array_equal(out[0], onp.asarray(y0))
+
+    # The reference is stepped here, outside the solver, one dt at a time: the
+    # stored states must be the RK4 iterates themselves, which at t_eval ==
+    # t_internal is exactly what the interpolant has to reproduce.
+    rows = [onp.asarray(y0)]
+    ref = y0
+    for k in range(len(t_internal) - 1):
+        ref = fixed_step._rk4_step(0.5 + k * dt, ref, dt, args)
+        rows.append(onp.asarray(ref))
+    assert onp.allclose(out, onp.stack(rows), rtol=1e-12, atol=1e-12)
+
+
+def test_grid_interpolation_clamps_outside_the_window() -> None:
+    # jnp.interp saturates: t_eval before t0 returns the t0 state and t_eval
+    # after t1 returns the final state.  It never extrapolates and never raises.
+    import jax.numpy as jnp
+
+    fixed_step, args, y0, dt, t_internal = _grid_setup()
+    t_eval = jnp.asarray(onp.array([0.0, 0.25, 0.5, 1.5, 2.5, 3.0, 99.0]))
+    out = onp.asarray(fixed_step._solve_on_grid_fixed(
+        0.5, 2.5, dt, len(t_internal), t_eval, y0, args))
+
+    assert out.shape == (7, 6)
+    assert onp.all(onp.isfinite(out))
+    # below t0: the edge value, bit-exactly, not a line continued backwards
+    assert onp.array_equal(out[0], onp.asarray(y0))
+    assert onp.array_equal(out[1], onp.asarray(y0))
+    # above t1: the final state, again bit-exactly
+    last = out[4]
+    assert onp.array_equal(out[5], last)
+    assert onp.array_equal(out[6], last)
+
+
+@pytest.mark.parametrize("t_eval", [
+    onp.linspace(0.5, 2.5, 9),
+    onp.array([0.5, 0.75, 0.75, 1.0, 1.0, 2.5]),          # duplicates
+    onp.array([2.5, 1.5, 1.0, 0.5, 0.5]),                   # descending
+    onp.array([1.0]),                                       # single sample
+])
+def test_grid_returns_one_row_per_t_eval_entry(t_eval: onp.ndarray) -> None:
+    import jax.numpy as jnp
+
+    fixed_step, args, y0, dt, t_internal = _grid_setup()
+    out = onp.asarray(fixed_step._solve_on_grid_fixed(
+        0.5, 2.5, dt, len(t_internal), jnp.asarray(t_eval), y0, args))
+
+    assert out.shape == (len(t_eval), 6)
+    assert onp.all(onp.isfinite(out))
+    if len(t_eval) > 1:
+        # duplicates are answered with the identical row
+        for i in range(len(t_eval) - 1):
+            if t_eval[i] == t_eval[i + 1]:
+                assert onp.array_equal(out[i], out[i + 1])
+        # t0 is y0 wherever it is asked for
+        for i, t in enumerate(t_eval):
+            if t == 0.5:
+                assert onp.array_equal(out[i], onp.asarray(y0))
