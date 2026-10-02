@@ -747,3 +747,326 @@ def test_grid_returns_one_row_per_t_eval_entry(t_eval: onp.ndarray) -> None:
         for i, t in enumerate(t_eval):
             if t == 0.5:
                 assert onp.array_equal(out[i], onp.asarray(y0))
+
+
+# --- the RK4 stages themselves, pinned against an independent reference ---
+#
+# Everything above this block checks _rk4_step only INDIRECTLY: a coarse step
+# against a finer one, or a trajectory against an adaptive solver. Both are
+# convergent comparisons, so they still converge when a stage weight or a
+# half-step is perturbed -- the perturbation is an O(dt^2..3) term, invisible
+# next to the O(dt^4) truncation the comparison is already tolerating. The
+# stage arithmetic is what every trajectory in the package is built from, so it
+# gets pinned DIRECTLY here, against classical RK4 written out in this test.
+#
+# The reference deliberately does NOT call _rk4_step: a reference that calls the
+# thing it is checking cannot fail. It is a transcription of the textbook
+# tableau, so the only thing the two share is the ODE.
+
+
+def _classical_rk4(f, t: float, y: Any, dt: float) -> Any:
+    """Textbook RK4 for ``y' = f(t, y)``, written out stage by stage."""
+    k1 = f(t, y)
+    k2 = f(t + dt / 2, y + dt / 2 * k1)
+    k3 = f(t + dt / 2, y + dt / 2 * k2)
+    k4 = f(t + dt, y + dt * k3)
+    return y + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+
+
+def _smooth_time_dependent_ode(t: float, y: Any, args: Any) -> Any:
+    """A smooth, EXPLICITLY time-dependent probe field on the PBPK state.
+
+    The PBPK ODE is autonomous: it never reads ``t``. An autonomous field
+    therefore cannot distinguish ``t + dt/2`` from ``t - dt/2``, so every
+    mutant that perturbs a stage's TIMESTAMP -- ``k2`` evaluated early, ``k4``
+    evaluated late -- is invisible against the real ODE no matter how tight
+    the tolerance. This field has an explicit ``sin`` time dependence, which is
+    what makes those stages observable; it stays smooth, so classical RK4 is
+    still exact to roundoff for one step.
+    """
+    import jax.numpy as jnp
+
+    return jnp.sin(3.0 * t) * args["probe_drive"] - args["probe_rate"] * y
+
+
+def _rk4_pin_setup() -> tuple[dict[str, Any], Any]:
+    """``(args, y0)``: real warfarin PBPK args, plus a real 6-state gut dose."""
+    import jax.numpy as jnp
+
+    from insilico_trial.pbpk import fixed_step
+
+    params, _drug, _t_eval, dose = _build_warfarin_params()
+    args: dict[str, Any] = {
+        "Q": jnp.asarray(params["Q"]),
+        "V": jnp.asarray(params["V"]),
+        "Kp": jnp.asarray(params["Kp"]),
+        "CL": float(params["CL"]),
+        "ka": float(params["ka"]),
+        "probe_drive": jnp.asarray([0.4, 0.7, 0.3, 0.6, 0.5, 0.2]),
+        "probe_rate": jnp.asarray([1.1, 0.8, 1.4, 0.9, 1.2, 0.7]),
+    }
+    # The real initial state of a real 10 mg oral warfarin dose: 10 mg in the
+    # gut (index 0) and nothing else.
+    y0 = fixed_step._initial_state(dose, 6)
+    assert onp.asarray(y0)[0] > 0
+    assert float(onp.sum(onp.asarray(y0)[1:])) == 0.0
+    return args, y0
+
+
+def test_rk4_step_reproduces_classical_rk4_on_the_pbpk_ode(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The real ODE first: this is the path every trajectory in the package
+    # actually takes, and the state-space half-steps and the 1/6-2/2-1
+    # weighting are pinned against the tableau on it.
+    from insilico_trial.pbpk import fixed_step
+
+    args, y0 = _rk4_pin_setup()
+    t0, dt = 1.25, 0.04
+    got = onp.asarray(fixed_step._rk4_step(t0, y0, dt, args))
+    expected = onp.asarray(_classical_rk4(
+        lambda tt, yy: fixed_step._ode_fn(tt, yy, args), t0, y0, dt))
+    scale = float(onp.max(onp.abs(expected)))
+    assert scale > 0
+    assert onp.allclose(got, expected, rtol=1e-13, atol=1e-13 * scale), (
+        f"_rk4_step is not classical RK4: max abs deviation "
+        f"{float(onp.max(onp.abs(got - expected))):.3e} against scale {scale:.3e}")
+
+    # Then the time-dependent probe: a perturbation of dt/2 or of the 2*k2
+    # weighting moves a stage ARGUMENT, and against an autonomous field the
+    # timestamp half of that perturbation is unobservable. Pinned here so the
+    # stage times and the tableau weights are both load-bearing.
+    monkeypatch.setattr(fixed_step, "_ode_fn", _smooth_time_dependent_ode)
+    got_t = onp.asarray(fixed_step._rk4_step(t0, y0, dt, args))
+    expected_t = onp.asarray(_classical_rk4(
+        lambda tt, yy: _smooth_time_dependent_ode(tt, yy, args), t0, y0, dt))
+    scale_t = float(onp.max(onp.abs(expected_t)))
+    assert scale_t > 0
+    # Bit-level: one RK4 step of a smooth field is the tableau and nothing
+    # else, so anything above roundoff means a stage argument is wrong.
+    assert onp.allclose(got_t, expected_t, rtol=0.0, atol=1e-13 * scale_t), (
+        f"RK4 stage times or weights are wrong under a time-dependent field: "
+        f"max abs deviation "
+        f"{float(onp.max(onp.abs(got_t - expected_t))):.3e} against scale "
+        f"{scale_t:.3e}")
+
+
+# --- the degenerate-parameter fallbacks of the Metzler dt bound -------------
+#
+# calculate_max_stable_dt is annotated `-> float` and its callers do
+# `dt <= bound`. Each of its three early returns hands back the LITERAL 0.01 h
+# when the params cannot be interpreted, and every one of them was untested.
+# That is the dangerous shape: a `break_return` there yields None, and then
+# `dt <= bound` raises TypeError inside a routine whose contract is to fail
+# closed with a message -- or, if the comparison is ever reordered, the bound
+# stops constraining anything at all. So these assert the TYPE as well as the
+# value, and then check the caller still gates.
+
+
+def _assert_fallback_bound(bound: Any, label: str) -> float:
+    """The fallback must be the FLOAT 0.01 h -- not None, not a numpy scalar."""
+    assert bound is not None, (
+        f"{label}: the bound came back None, so `dt <= bound` in the caller "
+        "raises TypeError instead of failing closed with a message")
+    assert isinstance(bound, float), (
+        f"{label}: expected a plain float, got {type(bound).__name__}")
+    assert bound == 0.01, f"{label}: expected the 0.01 h fallback, got {bound}"
+    return bound
+
+
+@pytest.mark.parametrize(("bad_key", "bad_value"), [
+    ("CL", None),
+    ("CL", [0.15, 0.2]),
+    ("ka", None),
+    ("ka", [1.0, 2.0]),
+])
+def test_dt_bound_falls_back_to_a_float_when_cl_or_ka_is_not_floatable(
+        bad_key: str, bad_value: Any) -> None:
+    # Path 158: `except TypeError` around float(CL)/float(ka). float(None) and
+    # float(<2-element array>) both raise TypeError; float("0.15") would raise
+    # ValueError instead and is deliberately NOT used, since that is not the
+    # branch under test.
+    from insilico_trial.pbpk.fixed_step import assert_dt_stable, calculate_max_stable_dt
+
+    params = dict(_build_warfarin_params()[0])
+    params[bad_key] = bad_value
+    label = f"calculate_max_stable_dt({bad_key}={bad_value!r})"
+    _assert_fallback_bound(calculate_max_stable_dt(params), label)
+
+    # The caller must still gate on it: 0.01 <= 0.01 is admissible, anything
+    # above the fallback is not.
+    assert_dt_stable(0.01, params)
+    with pytest.raises(ValueError, match="exceeds stability bound"):
+        assert_dt_stable(0.02, params)
+
+
+@pytest.mark.parametrize("missing", ["Q", "V", "Kp"])
+def test_dt_bound_falls_back_to_a_float_when_a_volume_or_flow_is_missing(
+        missing: str) -> None:
+    # Path 160: Q, V or Kp absent, so the Jacobian diagonal cannot be assembled
+    # and the function must not go on to index a None.
+    from insilico_trial.pbpk.fixed_step import assert_dt_stable, calculate_max_stable_dt
+
+    params = {k: v for k, v in _build_warfarin_params()[0].items() if k != missing}
+    label = f"calculate_max_stable_dt(missing {missing})"
+    _assert_fallback_bound(calculate_max_stable_dt(params), label)
+
+    assert_dt_stable(0.01, params)
+    with pytest.raises(ValueError, match="exceeds stability bound"):
+        assert_dt_stable(0.02, params)
+
+
+def test_dt_bound_falls_back_to_a_float_when_no_positive_candidate_survives() -> None:
+    # Path 176: every diagonal entry is 0.0 (or NaN), so `positive` is empty
+    # and min() would raise. The bound has to come back as the float 0.01.
+    #
+    # ka = 0 kills the gut entry, CL = 0 kills the central one, Q = 0 kills
+    # every perfused one, and the elim entry is 0 by construction.
+    from insilico_trial.pbpk.fixed_step import (
+        _jacobian_diagonal,
+        assert_dt_stable,
+        calculate_max_stable_dt,
+    )
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK, organ_indices
+
+    zeros = {
+        "Q": onp.zeros(6), "V": onp.ones(6), "Kp": onp.ones(6),
+        "CL": 0.0, "ka": 0.0,
+    }
+    spec = organ_indices(DEFAULT_ORGAN_NETWORK)
+    diag = _jacobian_diagonal(zeros, spec)
+    assert diag
+    assert all(v == 0.0 for v in diag.values()), (
+        f"setup drifted: the diagonal is no longer all-zero, got {diag}")
+    _assert_fallback_bound(calculate_max_stable_dt(zeros), "all-zero diagonal")
+
+    # NaN is the other way `positive` empties: c == c drops it.
+    nans = dict(zeros, Q=onp.full(6, float("nan")), ka=0.0)
+    _assert_fallback_bound(calculate_max_stable_dt(nans), "NaN diagonal")
+
+    assert_dt_stable(0.01, zeros)
+    with pytest.raises(ValueError, match="exceeds stability bound"):
+        assert_dt_stable(0.02, zeros)
+
+
+# --- the inline organ_network fallback spec --------------------------------
+#
+# With no network anywhere in the params, calculate_max_stable_dt synthesises
+# the layout inline: gut 0, central 2, elim n-1, everything else perfused.
+# That spec is the whole basis of the bound for a network-less call, and it was
+# untested. Two independent things are checked, because either alone is
+# incomplete:
+#
+#   * the SYNTHESISED SPEC, read back off the call, must agree index for index
+#     with organ_indices() on the same layout -- a wrong elim index or a
+#     perfused set that swallows elim is invisible in the returned bound,
+#     because the elim entry is 0.0 and 0.0 entries are filtered out;
+#   * the RETURNED BOUND must equal the bound the explicit network produces.
+#     For that to have teeth the params must make the layout matter, which they
+#     do once the elim index carries a non-zero perfusion flow (real warfarin
+#     has Q_elim = 0, which is exactly why the first version of this test could
+#     not tell a correct perfused set from a wrong one).
+
+
+def _no_network_params(q_elim: float = 7.0) -> dict[str, Any]:
+    """Warfarin params with `organ_network` stripped and a non-zero Q at elim."""
+    params = dict(_build_warfarin_params()[0])
+    q = onp.asarray(params["Q"], dtype=onp.float64).copy()
+    q[-1] = q_elim
+    params["Q"] = q
+    assert "organ_network" in params
+    out = {k: v for k, v in params.items() if k != "organ_network"}
+    assert "organ_network" not in out
+    return out
+
+
+def test_inline_organ_network_fallback_spec_matches_organ_indices(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from insilico_trial.pbpk import fixed_step
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK, organ_indices
+
+    captured: list[dict[str, Any]] = []
+    real_diagonal = fixed_step._jacobian_diagonal
+
+    def _spy(params: dict[str, Any], spec: Any) -> dict[int, float]:
+        captured.append(dict(spec))
+        return real_diagonal(params, spec)
+
+    monkeypatch.setattr(fixed_step, "_jacobian_diagonal", _spy)
+    params = _no_network_params()
+    fixed_step.calculate_max_stable_dt(params)
+
+    assert len(captured) == 1, (
+        f"expected the bound to assemble exactly one diagonal, got {captured}")
+    fallback, expected = captured[0], organ_indices(DEFAULT_ORGAN_NETWORK)
+    assert int(fallback["gut"]) == int(expected["gut"]) == 0
+    assert int(fallback["central"]) == int(expected["central"]) == 2
+    assert int(fallback["elim"]) == int(expected["elim"]) == 5, (
+        f"the fallback put elim at {fallback['elim']}, organ_indices puts it "
+        f"at {expected['elim']}: the eliminated state would be given another "
+        "state's diagonal, so the bound would be computed for a model that "
+        "does not exist")
+    assert tuple(int(k) for k in fallback["perfused"]) == tuple(
+        int(k) for k in expected["perfused"]) == (1, 3, 4), (
+        f"fallback perfused set {tuple(fallback['perfused'])} != "
+        f"{tuple(expected['perfused'])}: a perfused entry at the elim index "
+        "would charge the eliminated compartment a diagonal it does not have")
+    assert int(fallback["n_states"]) == int(expected["n_states"]) == 6
+
+
+def test_inline_organ_network_fallback_bound_matches_the_explicit_network() -> None:
+    from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
+    from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK
+
+    params = _no_network_params()
+    fallback = calculate_max_stable_dt(params)
+    explicit = calculate_max_stable_dt(params, DEFAULT_ORGAN_NETWORK)
+
+    # Not vacuous: the explicit call must actually read a non-zero flow at the
+    # elim index, which is what a wrong perfused set would move.
+    assert float(onp.asarray(params["Q"])[-1]) > 0
+    assert fallback == explicit, (
+        f"the inline fallback spec gives {fallback} but organ_indices on the "
+        f"same layout gives {explicit}: the two disagree about the model")
+
+    # And the honest untouched case, where warfarin's Q_elim = 0 leaves the
+    # bound insensitive to the layout: it still has to agree.
+    plain = {k: v for k, v in _build_warfarin_params()[0].items()
+             if k != "organ_network"}
+    assert float(onp.asarray(plain["Q"])[-1]) == 0.0
+    assert calculate_max_stable_dt(plain) == calculate_max_stable_dt(
+        plain, DEFAULT_ORGAN_NETWORK)
+
+
+# --- _get's except branch --------------------------------------------------
+#
+# _jacobian_diagonal reads every parameter through a nested `_get(arr, idx)`
+# whose except branch falls back to `float(arr)`. That branch runs when the
+# index is out of range but the array is a scalar -- a 0-d value where state
+# 2, 3, ... is asked for -- and it was untested, so the fallback could return
+# anything at all.
+
+
+def test_jacobian_diagonal_falls_back_to_float_for_scalar_parameters() -> None:
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+
+    spec = {"gut": 0, "central": 2, "elim": 5,
+            "perfused": (1, 3, 4), "n_states": 6}
+    q, v, kp, cl, ka = 1.5, 2.0, 3.0, 0.25, 0.5
+    # Scalars, not length-6 arrays: _np.asarray(1.5).ravel()[1] raises, and
+    # float(1.5) succeeds, so every index > 0 goes through the except branch.
+    # A size-2 array would raise from float() too and take the same path; a
+    # length-6 array would never reach it.
+    params = {"Q": q, "V": v, "Kp": kp, "CL": cl, "ka": ka}
+    for key, value in params.items():
+        assert onp.asarray(value).ndim == 0, f"{key} must be a scalar"
+
+    diag = _jacobian_diagonal(params, spec)
+
+    assert diag[0] == -ka
+    for k in spec["perfused"]:
+        assert diag[k] == -q / (v * kp), (
+            f"state {k}: expected the scalar fallback -Q/(V*Kp) = "
+            f"{-q / (v * kp)}, got {diag[k]}")
+    q_sum = q * len(spec["perfused"])
+    assert diag[2] == -(q_sum + cl) / v
+    assert diag[5] == 0.0
+    assert set(diag) == set(spec["perfused"]) | {0, 2, 5}
