@@ -1070,3 +1070,331 @@ def test_jacobian_diagonal_falls_back_to_float_for_scalar_parameters() -> None:
     assert diag[2] == -(q_sum + cl) / v
     assert diag[5] == 0.0
     assert set(diag) == set(spec["perfused"]) | {0, 2, 5}
+
+
+# --- multi-dose bolus boundaries -------------------------------------------
+#
+# solve_pbpk_multi_dose_fixed_step and solve_pbpk_batch_multi_dose_fixed_step
+# carry a `dose_idx` through jax.lax.scan and add a bolus to the gut
+# compartment on the step whose t_cur lands within dt/2 of the boundary. Every
+# piece of that decision is load-bearing and none of it was tested:
+#
+#   at_dose        = dose_idx < n_doses AND |t_cur - boundary| < dt/2
+#   y_with_dose    = y.at[0].add(doses[min(dose_idx, n_doses - 1)])
+#   next_dose_idx  = dose_idx + 1 iff at_dose
+#
+# A boundary window that is too wide applies a dose twice; too narrow never
+# fires it; dropping the `dose_idx < n_doses` guard indexes past the end; and
+# dropping the `min(...)` clamp does the same. Every one of those is
+# invisible to a test that only checks the returned C_p at a few times, so
+# the tests below observe the GUT trajectory itself.
+
+# Deliberately off-grid dose times, distinct amounts, and an ascending order:
+# an amount pattern that is not constant and a time that does not land on a
+# grid point, so a window that is off by a half step still misfires.
+_MULTI_DOSE_TIMES = onp.array([7.3, 23.1, 41.7, 60.9])
+_MULTI_DOSE_AMOUNTS = onp.array([10.0, 5.0, 7.5, 2.5])
+_MULTI_DOSE_SPAN = 72.0
+_MULTI_DOSE_DT = 0.02
+
+
+def _identity_rk4(t: float, y: Any, dt: float, args: dict[str, Any]) -> Any:
+    """A stepper that leaves the state exactly where it found it.
+
+    The multi-dose solvers apply the bolus to the carried state and then hand
+    that state to the stepper. Replacing the stepper with the identity makes
+    the bolus the ONLY thing that can move the trajectory, so the boundary
+    identity becomes exact instead of being buried under one RK4 step of
+    elimination:
+
+        y_gut(t_k+) == y_gut(t_k-) + Dose_k
+
+    This is a probe of the boundary arithmetic, not a substitute for the
+    integrator: the tests that need real dynamics run the real `_rk4_step`.
+    """
+    return y
+
+
+def _gut_via_central_index(
+    monkeypatch: pytest.MonkeyPatch,
+    solver: Any,
+    volume: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> onp.ndarray:
+    """Run a multi-dose solver and return its gut-amount trajectory.
+
+    Both solvers hand back ``ys[:, _CENTRAL_IDX] / V[_CENTRAL_IDX]``. Repointing
+    that module-level index at the gut compartment makes the PUBLIC return
+    value the gut trajectory up to that volume divisor, which is undone here
+    -- no re-implementation of the scan, no reaching into its carry, and no
+    second copy of the boundary rule to drift.
+    """
+    from insilico_trial.pbpk import fixed_step
+    from insilico_trial.pbpk.model import _GUT_IDX
+
+    monkeypatch.setattr(fixed_step, "_rk4_step", _identity_rk4)
+    monkeypatch.setattr(fixed_step, "_CENTRAL_IDX", _GUT_IDX)
+    gut_volume = float(onp.asarray(volume)[_GUT_IDX])
+    assert gut_volume > 0.0, "the gut volume must be positive to read amounts"
+    return onp.asarray(solver(*args, **kwargs)) * gut_volume
+
+
+def _bolus_jumps(profile: onp.ndarray) -> onp.ndarray:
+    """Every non-zero step of the profile: the boluses actually applied."""
+    return onp.diff(profile)[onp.abs(onp.diff(profile)) > 1e-12]
+
+
+def _multi_dose_grid() -> tuple[onp.ndarray, int]:
+    """The internal linspace grid, so jnp.interp is the identity."""
+    n_steps = int(_MULTI_DOSE_SPAN / _MULTI_DOSE_DT) + 1
+    return onp.linspace(0.0, _MULTI_DOSE_SPAN, n_steps), n_steps
+
+
+def test_multi_dose_boundary_adds_exactly_each_dose_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """y_gut(t_k+) == y_gut(t_k-) + Dose_k, for every k, exactly once each."""
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_multi_dose_fixed_step
+
+    t_eval, _n = _multi_dose_grid()
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    gut = _gut_via_central_index(
+        monkeypatch, solve_pbpk_multi_dose_fixed_step, params["V"],
+        t_eval, _MULTI_DOSE_TIMES, _MULTI_DOSE_AMOUNTS, params, _MULTI_DOSE_DT,
+    )
+
+    # Nothing in the gut before the first bolus: the solver seeds y0 = 0, so a
+    # solver that pre-charges the first dose shows up here immediately.
+    assert gut[0] == 0.0, (
+        f"the multi-dose solver seeded the gut with {gut[0]!r} before any "
+        "bolus; its initial state must be empty")
+
+    jumps = _bolus_jumps(gut)
+    assert jumps.size == _MULTI_DOSE_AMOUNTS.size, (
+        f"expected exactly {_MULTI_DOSE_AMOUNTS.size} boluses (one per dose, "
+        f"no double-application and no skipped dose), got {jumps.size}: "
+        f"{jumps.tolist()}")
+    assert onp.allclose(jumps, _MULTI_DOSE_AMOUNTS, rtol=0.0, atol=1e-12), (
+        f"the boluses applied, in order, were {jumps.tolist()}, expected "
+        f"{_MULTI_DOSE_AMOUNTS.tolist()} -- the amount lookup "
+        "`doses[min(dose_idx, n_doses - 1)]` or the `dose_idx` advance is wrong")
+    assert gut[-1] == pytest.approx(float(onp.sum(_MULTI_DOSE_AMOUNTS)), abs=1e-9), (
+        f"gut ended at {gut[-1]!r}, expected the full "
+        f"{float(onp.sum(_MULTI_DOSE_AMOUNTS))!r} of absorbed dose")
+
+
+def test_multi_dose_bolus_lands_within_half_a_step_of_its_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each jump happens at the grid point nearest its dose time, within dt/2."""
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_multi_dose_fixed_step
+
+    t_eval, _n = _multi_dose_grid()
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    gut = _gut_via_central_index(
+        monkeypatch, solve_pbpk_multi_dose_fixed_step, params["V"],
+        t_eval, _MULTI_DOSE_TIMES, _MULTI_DOSE_AMOUNTS, params, _MULTI_DOSE_DT,
+    )
+
+    fired = onp.flatnonzero(onp.abs(onp.diff(gut)) > 1e-12) + 1
+    assert fired.size == _MULTI_DOSE_TIMES.size
+    for k, (row, dose_time) in enumerate(zip(fired, _MULTI_DOSE_TIMES, strict=False)):
+        # ys_full[row] is the state AFTER the step that carried the bolus, so
+        # the step STARTED at t_internal[row - 1].
+        step_start = t_eval[row - 1]
+        assert abs(step_start - dose_time) < _MULTI_DOSE_DT / 2.0, (
+            f"dose {k} (t={dose_time}) fired from t={step_start}, which is more "
+            f"than dt/2={_MULTI_DOSE_DT / 2.0} away -- the boundary window is "
+            "the wrong width")
+    assert onp.all(onp.diff(fired) >= 1), "two doses fired on the same step"
+
+
+def test_multi_dose_single_bolus_matches_the_single_dose_solver() -> None:
+    """One bolus at t=0 through the multi-dose path == the single-dose solver.
+
+    The two solvers build their trajectory independently (different seeds,
+    different scan bodies), so this pins the multi-dose machinery -- the
+    boundary list, the `n_steps_full - 1` scan length, the prepended initial
+    row and the interpolation -- against the plain integrator.
+    """
+    from insilico_trial.pbpk.fixed_step import (
+        solve_pbpk_fixed_step,
+        solve_pbpk_multi_dose_fixed_step,
+    )
+
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    dose = 10.0
+    t_eval, _n = _multi_dose_grid()
+
+    multi = onp.asarray(solve_pbpk_multi_dose_fixed_step(
+        t_eval, onp.array([0.0]), onp.array([dose]), params, _MULTI_DOSE_DT))
+    single = onp.asarray(solve_pbpk_fixed_step(t_eval, dose, params, _MULTI_DOSE_DT))
+
+    assert onp.max(onp.abs(multi - single)) < 1e-12, (
+        "a single t=0 bolus through solve_pbpk_multi_dose_fixed_step must "
+        f"reproduce solve_pbpk_fixed_step exactly, max deviation "
+        f"{float(onp.max(onp.abs(multi - single))):.3e}")
+
+
+def test_multi_dose_never_goes_negative_and_never_exceeds_cumulative_dose() -> None:
+    """On the REAL RK4 path: no clamping, no negatives, no mass from nowhere.
+
+    Non-negativity here comes from the Metzler dt bound (dt <= 0.9/|K_jj|),
+    which `assert_dt_stable` enforces -- not from any `jnp.maximum`. So the
+    test drives the real integrator and reads the trajectory back.
+    """
+    from insilico_trial.pbpk import fixed_step
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_multi_dose_fixed_step
+    from insilico_trial.pbpk.model import _GUT_IDX
+
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    t_eval = onp.linspace(0.0, _MULTI_DOSE_SPAN, 361)
+
+    # Sum every compartment by reading each index in turn: the public return
+    # is one compartment, so total mass is assembled from the real outputs.
+    v = onp.asarray(params["V"])
+    trajectories = []
+    for idx in range(len(v)):
+        saved = fixed_step._CENTRAL_IDX
+        fixed_step._CENTRAL_IDX = idx
+        try:
+            concentrations = onp.asarray(solve_pbpk_multi_dose_fixed_step(
+                t_eval, _MULTI_DOSE_TIMES, _MULTI_DOSE_AMOUNTS,
+                params, _MULTI_DOSE_DT)) * v[idx]
+        finally:
+            fixed_step._CENTRAL_IDX = saved
+        trajectories.append(concentrations)
+
+    amounts = onp.stack(trajectories, axis=1)
+    assert amounts.shape[1] == len(v)
+    assert _GUT_IDX == 0
+    assert onp.all(amounts >= -1e-12), (
+        f"a compartment went negative (min {float(onp.min(amounts)):.3e}); "
+        "non-negativity must come from the Metzler dt bound, not clamping")
+
+    total = onp.sum(amounts, axis=1)
+    total_dose = float(onp.sum(_MULTI_DOSE_AMOUNTS))
+
+    # Mass conservation, the invariant the Lean export certifies: the ODE's
+    # column sums are zero, so the tracked compartments neither create nor
+    # destroy mass. The total may therefore only STEP UP, by exactly the
+    # bolus amounts, and be flat everywhere else. Assembled from the real
+    # outputs rather than from a re-derived flux, so it pins the trajectory.
+    steps = onp.diff(total)
+    fired = onp.abs(steps) > 1e-9
+    assert fired.sum() == _MULTI_DOSE_AMOUNTS.size, (
+        f"total mass changed on {int(fired.sum())} intervals, expected one per "
+        f"bolus ({_MULTI_DOSE_AMOUNTS.size}); flat intervals mean mass drift")
+    assert onp.allclose(steps[fired], _MULTI_DOSE_AMOUNTS, rtol=0.0, atol=1e-9), (
+        f"mass appeared in steps of {steps[fired].tolist()}, expected the "
+        f"bolus amounts {_MULTI_DOSE_AMOUNTS.tolist()}")
+    assert onp.all(steps[~fired] <= 1e-9), (
+        f"total mass fell by up to {float(-onp.min(steps[~fired])):.3e} mg on an "
+        "interval carrying no bolus; the integrator is destroying mass "
+        "instead of conserving it")
+    drift = abs(float(total[-1]) - total_dose)
+    assert drift < 1e-6, (
+        f"final total mass {float(total[-1]):.9f} mg drifted {drift:.3e} mg "
+        f"from the {total_dose:.6f} mg of absorbed dose; mass conservation is "
+        "supposed to hold to 1e-6")
+    assert onp.all(total <= total_dose + 1e-9), (
+        f"total body mass {float(onp.max(total)):.6f} mg exceeded the total "
+        f"absorbed dose {total_dose:.6f} mg -- a bolus was applied more "
+        "than once")
+
+
+def test_multi_dose_batch_boundary_matches_the_single_patient_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batch solver applies the same bolus schedule, on top of its seed.
+
+    `solve_pbpk_batch_multi_dose_fixed_step` seeds the gut with `doses[0]`
+    AND then re-applies dose 0 at its boundary, so its gut profile is the seed
+    plus every bolus in order. That double-count is the existing behaviour of
+    the routine, so it is what gets pinned here: a boundary rule that drifts
+    in either direction moves this profile.
+    """
+
+    from insilico_trial.pbpk.fixed_step import (
+        solve_pbpk_batch_multi_dose_fixed_step,
+    )
+
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    n_patients = 3
+    batch = {
+        "Q": onp.stack([params["Q"]] * n_patients),
+        "V": onp.stack([params["V"]] * n_patients),
+        "Kp": onp.stack([params["Kp"]] * n_patients),
+        "CL": onp.full(n_patients, params["CL"]),
+        "ka": onp.full(n_patients, params["ka"]),
+    }
+    doses = onp.tile(_MULTI_DOSE_AMOUNTS, (n_patients, 1))
+    t_eval, _n = _multi_dose_grid()
+
+    c_p, _c_liver = _gut_via_central_index(
+        monkeypatch, solve_pbpk_batch_multi_dose_fixed_step, params["V"],
+        t_eval, _MULTI_DOSE_TIMES, doses, batch, _MULTI_DOSE_DT,
+    )
+
+    assert c_p.shape == (n_patients, t_eval.size), (
+        f"expected a ({n_patients}, {t_eval.size}) batch, got {c_p.shape}")
+
+    # Identical parameters and identical doses => every row is the same curve,
+    # which also pins that the vmap axes line the per-patient dose schedule up
+    # with the right patient.
+    for i in range(1, n_patients):
+        assert onp.max(onp.abs(c_p[i] - c_p[0])) < 1e-12, (
+            f"patient {i} saw a different bolus schedule from patient 0 "
+            f"(max deviation {float(onp.max(onp.abs(c_p[i] - c_p[0]))):.3e}); "
+            "the batch dose axis is misaligned")
+
+    expected_seed = float(_MULTI_DOSE_AMOUNTS[0])
+    assert c_p[0, 0] == expected_seed, (
+        f"the batch solver seeded the gut with {c_p[0, 0]!r}, expected the "
+        f"first dose {expected_seed!r}")
+    jumps = _bolus_jumps(c_p[0])
+    assert jumps.size == _MULTI_DOSE_AMOUNTS.size, (
+        f"expected {_MULTI_DOSE_AMOUNTS.size} boluses in the batch profile, "
+        f"got {jumps.size}: {jumps.tolist()}")
+    assert onp.allclose(jumps, _MULTI_DOSE_AMOUNTS, rtol=0.0, atol=1e-12), (
+        f"batch boluses were {jumps.tolist()}, expected "
+        f"{_MULTI_DOSE_AMOUNTS.tolist()}")
+    assert c_p[0, -1] == expected_seed + float(onp.sum(_MULTI_DOSE_AMOUNTS))
+
+
+def test_multi_dose_zero_dose_times_integrates_an_empty_gut() -> None:
+    """`n_doses == 0` takes the single-dose 6-state branch with a zero gut."""
+
+    from insilico_trial.pbpk.fixed_step import (
+        solve_pbpk_batch_multi_dose_fixed_step,
+        solve_pbpk_multi_dose_fixed_step,
+    )
+
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    t_eval = onp.linspace(0.0, _MULTI_DOSE_SPAN, 361)
+    empty_times = onp.array([])
+    empty_amounts = onp.array([])
+
+    got = onp.asarray(solve_pbpk_multi_dose_fixed_step(
+        t_eval, empty_times, empty_amounts, params, _MULTI_DOSE_DT))
+    assert got.shape == t_eval.shape
+    assert onp.all(got == 0.0), (
+        f"with no doses and no initial gut amount every concentration must be "
+        f"identically zero, got max {float(onp.max(got)):.3e}")
+
+    batch = {
+        "Q": onp.stack([params["Q"]] * 2),
+        "V": onp.stack([params["V"]] * 2),
+        "Kp": onp.stack([params["Kp"]] * 2),
+        "CL": onp.full(2, params["CL"]),
+        "ka": onp.full(2, params["ka"]),
+    }
+    c_p, c_liver = solve_pbpk_batch_multi_dose_fixed_step(
+        t_eval, empty_times, onp.zeros((2, 0)),
+        batch, _MULTI_DOSE_DT,
+    )
+    assert c_p.shape == (2, t_eval.size)
+    assert c_liver.shape == (2, t_eval.size)
+    assert onp.all(onp.asarray(c_p) == 0.0)
+    assert onp.all(onp.asarray(c_liver) == 0.0)

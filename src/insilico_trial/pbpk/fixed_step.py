@@ -562,7 +562,11 @@ def solve_pbpk_multi_dose_fixed_step(
         )
         next_dose_idx = jnp.where(at_dose, dose_idx + 1, dose_idx)
         # RK4 step
-        y_out = _rk4_step(float(t_cur), y_next, dt, params)
+        # `t_cur` is a scan tracer: converting it with float() raises
+        # ConcretizationTypeError, which made this whole solver unusable. The
+        # PBPK ODE is autonomous so the stepper never reads t numerically, and
+        # the batch path below already passes the tracer straight through.
+        y_out = _rk4_step(t_cur, y_next, dt, params)  # type: ignore[arg-type]
         return (y_out, t_cur + dt, next_dose_idx), y_out
 
     y0 = jnp.zeros(6, dtype=jnp.float64)
@@ -637,6 +641,16 @@ def solve_pbpk_batch_multi_dose_fixed_step(
     sample_params = {k: v[0] if hasattr(v, '__len__') else v
                      for k, v in params_batch.items()}
     n_state = 9 if any(k in sample_params for k in ("k_synth", "k_deplete", "IC50")) else 6
+
+    # An empty dosing schedule: nothing to seed the gut with and nothing to
+    # fire, so every compartment stays at zero. Handled here for the same
+    # reason the single-patient solver guards it -- the seed below reads
+    # dose_amounts[:, 0], which is an out-of-bounds IndexError on an empty
+    # schedule. Mirrors solve_pbpk_multi_dose_fixed_step's n_doses == 0 path.
+    if da_arr.ndim == 2 and da_arr.shape[1] == 0:
+        n_patients = int(onp.asarray(params_batch["V"]).shape[0])
+        zeros = jnp.zeros((n_patients, te_j.shape[0]), dtype=jnp.float64)
+        return zeros, zeros
 
     boundaries = jnp.sort(jnp.concatenate([
         jnp.array([t0]), jnp.asarray(dt_arr), jnp.array([t_end])
