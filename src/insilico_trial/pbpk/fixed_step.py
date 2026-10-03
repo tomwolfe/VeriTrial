@@ -22,6 +22,23 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 
+# ``_CENTRAL_IDX`` is re-exported deliberately: the multi-dose solver reads the
+# central-compartment index through this module, and the tests monkeypatch it
+# here to walk every compartment in turn. Listing it in ``__all__`` makes that
+# a stated part of this module's surface rather than an incidental import.
+__all__ = [
+    "_CENTRAL_IDX",
+    "assert_dt_stable",
+    "calculate_max_stable_dt",
+    "calculate_max_stable_dt_batch",
+    "solve_pbpk_batch_9state",
+    "solve_pbpk_batch_fixed_step",
+    "solve_pbpk_batch_multi_dose_fixed_step",
+    "solve_pbpk_batch_with_compartments",
+    "solve_pbpk_fixed_step",
+    "solve_pbpk_multi_dose_fixed_step",
+]
+
 from insilico_trial.pbpk.model import (
     _CENTRAL_IDX,
     _LIVER_IDX,
@@ -89,7 +106,7 @@ def _jacobian_diagonal(params: dict[str, Any], spec: Mapping[str, Any]) -> dict[
         diag[k] = -_get(Q, k) / (vi * ki)
     if saturable_rate:
         # Only the liver carries the saturable drain.
-        liver = int(spec["liver"])  # type: ignore[arg-type]
+        liver = int(spec["liver"])
         diag[liver] -= saturable_rate
     q_sum = sum(_get(Q, k) for k in perfused)
     diag[central] = -(q_sum + CL) / Vc                  # d(A_central)/dA_central

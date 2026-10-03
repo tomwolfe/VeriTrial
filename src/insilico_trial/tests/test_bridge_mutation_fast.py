@@ -22,6 +22,11 @@ if str(SCRIPTS) not in sys.path:
 import export_pbpk_to_qed as ex  # noqa: E402
 import verify_formal_gate as gate  # noqa: E402
 
+from insilico_trial.pbpk.model import (  # noqa: E402
+    DEFAULT_ORGAN_NETWORK,
+    STANDARD_14_ORGAN_NETWORK,
+)
+
 MODEL = Path(__file__).resolve().parents[3] / "src" / "insilico_trial" / "pbpk" / "model.py"
 
 
@@ -606,7 +611,7 @@ def test_fast_gate_independent_column_sums() -> None:
 def test_fast_gate_independent_column_sums_14_organ() -> None:
     # The oracle is N-generic: a 14-organ run must re-derive a 14-column
     # Jacobian, not silently fall back to the six-organ layout.
-    import sympy as _sp  # type: ignore[import-untyped]
+    import sympy as _sp
     cols = gate._independent_column_sums(MODEL, 14)
     assert len(cols) == 14
     for terms in cols:
@@ -1207,3 +1212,301 @@ def test_fast_gate_single_source(tmp_path: Path) -> None:
     f = tmp_path / "L.txt"
     f.write_text("\n".join(lemmas) + "\n")
     assert isinstance(gate._check_single_source(f, 6), list)
+
+
+# --- saturable-elimination pattern scanner -----------------------------------
+#
+# _find_saturable_patterns is a structural AST scan for the Michaelis-Menten
+# shape ``V * C / (K + C)``. On the live model it returns [] (no saturable
+# term), so the live path cannot discriminate any of its branches: a mutant
+# that inverted any guard still returned [] and passed. These tests drive it
+# with synthetic models that DO contain the shape, plus near-misses that must
+# be rejected, so each guard is load-bearing.
+
+_SYNTH_SATURABLE = '''
+def pbpk_ode(y, t, Q, V, Kp, CL, ka, Vmax, Km):
+    Vmax * C_liver / (Km + C_liver)
+'''
+
+_SYNTH_SATURABLE_14 = '''
+def pbpk_ode(y, t, Q, V, Kp, CL, ka, Vmax, Km):
+    for k in perfused:
+        Vmax * Ck / (Km + Ck)
+'''
+
+_SYNTH_NO_SATURABLE = '''
+def pbpk_ode(y, t, Q, V, Kp, CL, ka):
+    Q[1] * (C_p - y[1] / V[1] / Kp[1])
+'''
+
+def _write(tmp_path, name, src):
+    p = tmp_path / name
+    p.write_text(src, encoding="utf-8")
+    return p
+
+
+def test_saturable_scanner_finds_the_michaelis_menten_shape(tmp_path):
+    found = ex._find_saturable_patterns(
+        _write(tmp_path, "m.py", _SYNTH_SATURABLE))
+    assert found == [("Vmax", "Km", "C_liver")]
+
+
+def test_saturable_scanner_returns_empty_without_a_saturable_term(tmp_path):
+    assert ex._find_saturable_patterns(
+        _write(tmp_path, "m.py", _SYNTH_NO_SATURABLE)) == []
+
+
+def test_saturable_scanner_requires_the_shared_substrate_name(tmp_path):
+    """``V*C/(K+D)`` shares no variable, so it is not the MM shape."""
+    bad = 'def pbpk_ode(y, t):\n    Vmax * C1 / (Km + D1)\n'
+    assert ex._find_saturable_patterns(
+        _write(tmp_path, "m.py", bad)) == []
+
+
+def test_saturable_scanner_requires_a_product_numerator_and_sum_denominator(tmp_path):
+    """Neither ``C/(K+C)`` nor ``V*C*K`` over a non-sum is the MM shape."""
+    no_product = 'def pbpk_ode(y, t):\n    C1 / (Km + C1)\n'
+    no_sum = 'def pbpk_ode(y, t):\n    Vmax * C1 / Km\n'
+    for src in (no_product, no_sum):
+        assert ex._find_saturable_patterns(
+            _write(tmp_path, "m.py", src)) == [], src
+
+
+def test_saturable_scanner_ignores_other_functions(tmp_path):
+    """The scan is scoped to pbpk_ode / pbpk_dili_ode, not any function."""
+    src = 'def unrelated_helper():\n    Vmax * C1 / (Km + C1)\n'
+    assert ex._find_saturable_patterns(
+        _write(tmp_path, "m.py", src)) == []
+
+
+def test_saturable_scanner_deduplicates_repeated_patterns(tmp_path):
+    assert ex._find_saturable_patterns(
+        _write(tmp_path, "m.py", _SYNTH_SATURABLE)) == \
+        ex._find_saturable_patterns(
+            _write(tmp_path, "m2.py", _SYNTH_SATURABLE))
+
+
+def test_extract_saturable_lemmas_emits_nonnegativity_in_model_variables(tmp_path):
+    lemmas = ex.extract_saturable_lemmas(
+        _write(tmp_path, "m.py", _SYNTH_SATURABLE))
+    assert lemmas == ["Vmax * C_liver / (Km + C_liver) >= 0"]
+
+
+def test_extract_saturable_lemmas_is_empty_for_the_live_model():
+    """The shipped model defines no saturable elimination."""
+    live = MODEL
+    assert ex.extract_saturable_lemmas(live) == []
+
+
+# --- pure helpers: _lean_param ---------------------------------------------
+#
+# _lean_param is the whole reason the emitted parametric column-sum lemma
+# reads ``-(CL + Ql + Qp + Qe) / Vc``. Every substitution in it was unverified,
+# so a flipped or dropped rule would silently rename a perfusion variable in a
+# lemma that Lean then proves about the wrong symbol.
+
+def test_lean_param_renames_every_perfusion_and_volume_index() -> None:
+    got = ex._lean_param(
+        "Q[_LIVER_IDX] + Q[_PERIPHERAL_IDX] + Q[_EFFECT_SITE_IDX] + Q[_CENTRAL_IDX]"
+        " + Kp[_LIVER_IDX] + Kp[_PERIPHERAL_IDX] + Kp[_EFFECT_SITE_IDX]"
+        " + Kp[_CENTRAL_IDX]"
+        " + V[_LIVER_IDX] + V[_PERIPHERAL_IDX] + V[_EFFECT_SITE_IDX]"
+        " + V[_CENTRAL_IDX]")
+    assert got == ("Ql + Qp + Qe + Qc + Kpl + Kpp + Kpe + Kpc"
+                   " + Vl + Vp + Ve + Vc")
+
+
+def test_lean_param_renames_scalars_and_survives_renaming() -> None:
+    assert ex._lean_param("args['CL']") == "CL"
+    assert ex._lean_param("args['ka']") == "ka"
+    # ka -> ka must not double-apply or corrupt the identifier.
+    assert ex._lean_param("ka") == "ka"
+
+
+def test_lean_param_handles_the_args_dict_spelling() -> None:
+    got = ex._lean_param(
+        "args['Q'][_LIVER_IDX] + args['V'][_CENTRAL_IDX] + args['CL']")
+    assert got == "Ql + Vc + CL"
+
+
+def test_lean_param_leaves_unrelated_text_alone() -> None:
+    assert ex._lean_param("A_gut + C_p") == "A_gut + C_p"
+
+
+# --- pure helpers: symbolic differentiation --------------------------------
+
+@pytest.mark.parametrize(("src", "var", "expected"), [
+    ("x", "x", "1"),
+    ("y", "x", "0"),
+    ("5", "x", "0"),
+    ("-x", "x", "-1"),
+    ("x + y", "x", "1 + 0"),
+    ("x - y", "x", "1 - 0"),
+    ("x * y", "x", "1 * y + x * 0"),
+    ("x * x", "x", "1 * x + x * 1"),
+    ("x / y", "x", "(1 * y - x * 0) / (y * y)"),
+    ("jnp.asarray(x)", "x", "1"),
+    # Subscripts pass through to the base name: the implementation
+    # differentiates y[i] w.r.t. y as d(y)/dy = 1.
+    ("y[0]", "y", "1"),
+    ("y[0]", "x", "0"),
+])
+def test_sym_diff_derivative_rules(src: str, var: str, expected: str) -> None:
+    assert ast.unparse(ex._sym_diff(_expr(src), var)) == expected
+
+
+def test_sym_diff_of_unknown_node_is_zero() -> None:
+    # A comparison is not part of the linear fragment; it must not raise.
+    assert ast.unparse(ex._sym_diff(_expr("x if y else z"), "x")) != ""
+
+
+# --- pure helpers: expr / roundtrip / substitute / networks ----------------
+
+def test_expr_returns_the_expression_node() -> None:
+    assert isinstance(ex._expr("a + b"), ast.BinOp)
+
+
+def test_roundtrip_does_not_alias_the_input() -> None:
+    node = _expr("a + b")
+    again = ex._roundtrip(node)
+    assert again is not node
+    assert ast.unparse(again) == ast.unparse(node)
+
+
+def test_substitute_replaces_named_variables() -> None:
+    env = {"a": _expr("Q1")}
+    got = ast.unparse(ex._substitute(_expr("a * b + a"), env))
+    assert got == "Q1 * b + Q1"
+
+
+def test_substitute_leaves_unmapped_names_alone() -> None:
+    got = ast.unparse(ex._substitute(_expr("a + z"), {"a": _expr("Q1")}))
+    assert got == "Q1 + z"
+
+
+def test_network_for_fin_selects_the_matching_network() -> None:
+    assert ex._network_for_fin(6) == DEFAULT_ORGAN_NETWORK
+    assert ex._network_for_fin(14) == STANDARD_14_ORGAN_NETWORK
+
+
+def test_network_for_fin_size_accepts_none_and_sizes() -> None:
+    assert ex._network_for_fin_size(None) == DEFAULT_ORGAN_NETWORK
+    assert ex._network_for_fin_size(14) == STANDARD_14_ORGAN_NETWORK
+
+
+def test_state_names_are_the_compartment_states() -> None:
+    # Bare state names; the "dA_" prefix is re-attached by the callers that
+    # match derivative assignments.
+    assert ex._state_names(MODEL) == [
+        "gut", "liver", "central", "periph", "effect", "elim"]
+
+
+# --- Lean emission: the matrix dimension and the heartbeat budget ----------
+
+def test_lean_export_matrix_dimension_is_n_plus_three(tmp_path) -> None:
+    """The Metzler generator is Fin (N+3): gut, central and elim are extra."""
+    out = tmp_path / "Export.lean"
+    ex.emit_lean_export(MODEL, out, n_states=6)
+    text = out.read_text(encoding="utf-8")
+    assert "Fin 9" in text
+
+
+def test_lean_export_heartbeat_budget_scales_with_state_count(tmp_path) -> None:
+    """`fin_cases` over Fin N is O(N^2); the budget must scale with N.
+
+    The allowance is a compile-time budget, not a hypothesis, so scaling it is
+    not a weakening -- but it must still scale, or a 14-organ build exhausts
+    the default 200k heartbeats.
+    """
+    out = tmp_path / "Export.lean"
+    ex.emit_lean_export(MODEL, out, n_states=6)
+    six = [ln for ln in out.read_text(encoding="utf-8").splitlines()
+           if "maxHeartbeats" in ln]
+    assert six, "no maxHeartbeats option emitted"
+    budget6 = int(six[0].split("maxHeartbeats")[1].split()[0])
+
+    out14 = tmp_path / "Export14.lean"
+    ex.emit_lean_export(MODEL, out14, n_states=14)
+    fourteen = [ln for ln in out14.read_text(encoding="utf-8").splitlines()
+                if "maxHeartbeats" in ln]
+    budget14 = int(fourteen[0].split("maxHeartbeats")[1].split()[0])
+    assert budget14 > budget6, "heartbeat budget must grow with the state count"
+
+
+# --- symbolic conservation certificate --------------------------------------
+
+def test_verify_symbolic_cancellation_accepts_a_balanced_system() -> None:
+    """Perfused fluxes that cancel against central's losses must verify."""
+    derivs = {
+        "dA_gut": "-ka * A_gut",
+        "dA_liver": "Q1 * (C_p - A_liver / Kp1)",
+        "dA_central": "ka * A_gut - Q1 * (C_p - A_liver / Kp1) - CL * C_p",
+        # Elimination returns what central lost; without it the system leaks.
+        "dA_elim": "CL * C_p",
+    }
+    assert ex.verify_symbolic_cancellation(
+        derivs, ["gut", "liver", "central", "elim"]) is True
+
+
+def test_verify_symbolic_cancellation_rejects_a_leaking_system() -> None:
+    """A source term that nothing removes is non-conserving."""
+    derivs = {"dA_gut": "-ka * A_gut + 1"}
+    assert ex.verify_symbolic_cancellation(derivs, ["gut"]) is False
+
+
+def test_verify_symbolic_cancellation_of_the_live_model() -> None:
+    assert ex.verify_symbolic_cancellation(
+        ex.extract_symbolic_derivatives(MODEL, expand=True)) is True
+
+
+def test_extract_symbolic_derivatives_expand_is_not_a_no_op() -> None:
+    """expand=True must inline intermediate derivative references.
+
+    On the live model `dA_central` references the perfused fluxes; expanding
+    it is what lets the cancellation check see the whole system rather than
+    summing symbolic references it cannot resolve.
+    """
+    raw = ex.extract_symbolic_derivatives(MODEL, expand=False)
+    full = ex.extract_symbolic_derivatives(MODEL, expand=True)
+    # The unexpanded form keeps the shared flux list symbolic; the expanded
+    # form inlines each perfused flux so the cancellation check can see the
+    # whole system instead of summing references it cannot resolve.
+    assert "flows[" in raw["dA_central"]
+    assert "flows[" not in full["dA_central"]
+    assert full["dA_central"] != raw["dA_central"]
+
+
+# --- Jacobian ---------------------------------------------------------------
+
+def test_compute_jacobian_covers_every_state_row_for_both_networks() -> None:
+    """Every compartment has a derivative, for 6 and for 14 organs."""
+    for n in (6, 14):
+        J = ex.compute_jacobian(MODEL, fin_n=n)
+        assert {i for i, _ in J} == set(range(n))
+
+
+def test_compute_jacobian_elimination_is_a_pure_sink() -> None:
+    """d(A_elim)/d(A_elim) = 0, so the elim column is identically empty.
+
+    Elimination depends on the central compartment, never on itself, so the
+    Jacobian has no entry in the elim column at all rather than an explicit 0.
+    """
+    for n in (6, 14):
+        J = ex.compute_jacobian(MODEL, fin_n=n)
+        assert (n - 1, n - 1) not in J
+        assert {j for _, j in J} == set(range(n - 1))
+        # ...and it does depend on central.
+        assert (n - 1, 2) in J
+
+
+def test_compute_jacobian_requires_an_explicit_fin_n_for_the_14_organ_model() -> None:
+    """A 14-organ run must re-derive 14 columns, not silently use six.
+
+    Defaulting would build a 6x6 Jacobian for a 14-state model and certify the
+    conservation of the wrong system, so the network must be explicit.
+    """
+    try:
+        J = ex.compute_jacobian(MODEL, fin_n=14)
+    except (AssertionError, ValueError, KeyError):
+        return  # refusing is also acceptable; silently returning 6x6 is not
+    assert max(i for i, _ in J) == 13

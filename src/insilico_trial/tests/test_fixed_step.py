@@ -1048,8 +1048,8 @@ def test_inline_organ_network_fallback_bound_matches_the_explicit_network() -> N
 def test_jacobian_diagonal_falls_back_to_float_for_scalar_parameters() -> None:
     from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
 
-    spec = {"gut": 0, "central": 2, "elim": 5,
-            "perfused": (1, 3, 4), "n_states": 6}
+    spec: dict[str, Any] = {"gut": 0, "central": 2, "elim": 5,
+                            "perfused": (1, 3, 4), "n_states": 6}
     q, v, kp, cl, ka = 1.5, 2.0, 3.0, 0.25, 0.5
     # Scalars, not length-6 arrays: _np.asarray(1.5).ravel()[1] raises, and
     # float(1.5) succeeds, so every index > 0 goes through the except branch.

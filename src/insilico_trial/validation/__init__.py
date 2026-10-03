@@ -33,6 +33,21 @@ from insilico_trial.trial.engine import compute_nca
 # Warfarin reference data (70 kg reference adult).
 # CL/F ~ 0.15 L/h, V/F ~ 8.4 L, t1/2 ~ 38 h. These are the *total* values at
 # the 70 kg reference (per-kg: 0.0021 L/h/kg, 0.12 L/kg). See FDA Coumadin
+# Sampling interval for every benchmark that derives PK by NCA, in hours.
+# Absorption runs at ka = 1-2/h in these configs, so a 1 h grid does not
+# resolve the peak: it truncates the estimated AUC and inflates the derived
+# CL/F (metformin ~40%, midazolam ~29%; warfarin is insensitive because its
+# peak carries little of the AUC). 10 minutes puts the NCA estimate within
+# ~1% of the simulator's own clearance.
+NCA_SAMPLE_INTERVAL_H = 1.0 / 6.0
+
+
+def _nca_time_grid(total_hours: float) -> Any:
+    """Uniform ``[0, total_hours]`` grid at :data:`NCA_SAMPLE_INTERVAL_H`."""
+    n = int(round(total_hours / NCA_SAMPLE_INTERVAL_H)) + 1
+    return onp.linspace(0.0, total_hours, n)
+
+
 # label; the per-kg figures in earlier versions of this module were
 # inconsistent with the total-CL/F used by the model.
 WARFARIN_REFERENCE = {
@@ -116,7 +131,7 @@ def validate_warfarin_pgx(
     df, _spec = generate_population(pop_config)
 
     # Batch-solve the PBPK ODE for all patients at once (JAX vmap + jit).
-    t_eval = onp.linspace(0.0, 7.0 * 24.0, 7 * 24)
+    t_eval = _nca_time_grid(7.0 * 24.0)
     n = len(df)
     absorbed_dose = dose_mg * drug.bioavailability
 
@@ -363,8 +378,14 @@ def validate_moxifloxacin_qtc(
 # the concentration-time profile. The reference values here are calibrated to
 # the model's own output at the 70 kg reference point.
 MIDAZOLAM_REFERENCE = {
-    "typical_cl_f_Lh": 20.0,  # NCA-derived CL/F (L/h) at 70 kg ref from PBPK
-    "typical_v_f_L": 6.3,     # total Vz/F (L) at 70 kg
+    # 12 L/h is the value this module's docstring states as the criterion and
+    # the value configs/drug_midazolam.yaml carries as typical_cl_f. It was 20.0
+    # here, which combined with a 1 h NCA grid (see the sampling-interval note
+    # in validate_metformin_renal) let a ~29% grid inflation clear a reference
+    # that was itself 67% high: the benchmark passed at 17.1 L/h against a
+    # documented target of 12.
+    "typical_cl_f_Lh": 12.0,  # NCA-derived CL/F (L/h) for 70 kg ref
+    "typical_v_f_L": 6.3,     # total Vz/F (L) for 70 kg ref
     "cl_tolerance_pct": 30.0,
     "pm_em_auc_ratio_min": 2.0,
 }
@@ -398,7 +419,9 @@ def validate_midazolam_cyp3a4(
     df, _spec = generate_population(pop_config)
 
     # Batch-solve the PBPK ODE for all patients at once (JAX vmap + jit).
-    t_eval = onp.linspace(0.0, 3.0 * 24.0, 3 * 24)  # 3 days for midazolam (short half-life)
+    # Shared NCA grid: at 1 h spacing the midazolam peak (ka = 2/h) is missed
+    # and CL/F inflates ~29% (16.9 vs 13.1 L/h). See NCA_SAMPLE_INTERVAL_H.
+    t_eval = _nca_time_grid(3.0 * 24.0)  # 3 days
     n = len(df)
     absorbed_dose = dose_mg * drug.bioavailability
 
@@ -490,6 +513,22 @@ def validate_midazolam_cyp3a4(
         auc_corr = float("nan")
     pgx_pass = bool(auc_corr < -0.3 and im_em_ratio >= 1.2)
 
+    # PM/EM AUC ratio is a stated criterion in this function's docstring and a
+    # declared constant, but it was never computed: ``overall_pass`` covered
+    # only clearance and the IM/EM separation, so a run in which the poor
+    # metaboliser cohort showed no exposure separation at all still passed.
+    # A PM subject with no CYP3A4 function must show a large exposure increase,
+    # and that is now enforced rather than asserted.
+    pm_em_auc_ratio = (
+        float(pm_median_auc / em_median_auc)
+        if em_median_auc not in (None, 0.0) and pm_median_auc is not None
+        else float("nan")
+    )
+    pm_em_pass = bool(
+        not onp.isnan(pm_em_auc_ratio)
+        and pm_em_auc_ratio >= MIDAZOLAM_REFERENCE["pm_em_auc_ratio_min"]
+    )
+
     def _cohort_summary(rows: list[dict[str, float]]) -> dict[str, Any]:
         if not rows:
             return {"n": 0, "mean_cl_f": None, "median_auc_inf": None}
@@ -513,9 +552,12 @@ def validate_midazolam_cyp3a4(
         "IM_median_auc_inf": im_median_auc,
         "PM_median_auc_inf": pm_median_auc,
         "IM_over_EM_auc_ratio": float(im_em_ratio),
+        "PM_over_EM_auc_ratio": pm_em_auc_ratio,
+        "pm_em_auc_ratio_min": MIDAZOLAM_REFERENCE["pm_em_auc_ratio_min"],
+        "pm_over_em_pass": pm_em_pass,
         "auc_activity_correlation": float(auc_corr),
         "pgx_exposure_separation_pass": pgx_pass,
-        "overall_pass": bool(cl_pass and pgx_pass),
+        "overall_pass": bool(cl_pass and pgx_pass and pm_em_pass),
         "details": {
             "cohorts": {c: _cohort_summary(rows) for c, rows in cohort_pk.items()},
         },
@@ -532,9 +574,15 @@ def validate_midazolam_cyp3a4(
 # scaling and age, not directly via eGFR; the residual eGFR correlation comes
 # from the population age-eGFR correlation propagating through the age factor.
 METFORMIN_REFERENCE = {
-    "typical_cl_f_Lh_at_egfr90": 42.0,  # NCA-derived CL/F (L/h) at eGFR=90
+    "typical_cl_f_Lh_at_egfr90": 35.0,  # NCA-derived CL/F (L/h) at eGFR=90
+    "reference_egfr_ml_min": 90.0,
     "cl_tolerance_pct": 30.0,
-    "egfr_cl_corr_min": 0.2,
+    # Metformin is renally eliminated, so CL/F must track eGFR. The previous
+    # value of 0.2 was a fail-open threshold: it was satisfied by the observed
+    # 0.251 even though the validator was not passing eGFR into the model at
+    # all, so a benchmark whose entire subject is renal elimination could pass
+    # on a correlation that was not renal.
+    "egfr_cl_corr_min": 0.5,
 }
 
 
@@ -560,18 +608,29 @@ def validate_metformin_renal(
 
     df, _spec = generate_population(pop_config)
 
-    t_eval = onp.linspace(0.0, 6.0 * 24.0, 6 * 24)  # 6 days for metformin
+    # Shared NCA grid: at 1 h spacing the metformin peak (ka = 1/h) is
+    # under-resolved, which inflates CL/F ~40%. See NCA_SAMPLE_INTERVAL_H.
+    t_eval = _nca_time_grid(6.0 * 24.0)  # 6 days
     n = len(df)
     absorbed_dose = dose_mg * drug.bioavailability
 
     params_list = []
     for _, row in df.iterrows():
+        # Metformin is eliminated unchanged by the kidney, so renal function
+        # is its dominant clearance determinant. This validator used to leave
+        # ``egfr_scale`` at its default of 1.0, which meant the generated eGFR
+        # never reached the model at all and the eGFR/CL correlation was an
+        # artifact of weight and age rather than of renal elimination. CL is
+        # scaled relative to the reference eGFR of 90 mL/min.
+        egfr = float(row["egfr_ml_min"])
+        egfr_scale = egfr / METFORMIN_REFERENCE["reference_egfr_ml_min"]
         params_list.append(
             build_pbpk_params(
                 weight_kg=float(row["weight_kg"]),
                 age=float(row["age"]),
                 drug=drug,
                 genotype_scale=1.0,  # No CYP metabolism
+                egfr_scale=egfr_scale,
             )
         )
 
@@ -681,11 +740,14 @@ def generate_vvv40_report(
     hepatic = validation_results.get("hepatic_impairment", {})
     formal = validation_results.get("formal_verification", {})
 
-    # Compute per-lemma proof hashes for the audit trail.
+    # Compute per-lemma proof hashes for the audit trail. The digest is the
+    # full 64-hex SHA-256 computed here, at the producer: truncating it to 16
+    # hex (64 bits) for display would leave the audit trail asserting a
+    # collision resistance the value does not carry.
     verified_lemmas = formal.get("verified_lemmas", [])
     proof_hashes: list[dict[str, str]] = []
     for lemma in verified_lemmas:
-        h = hashlib.sha256(lemma.encode()).hexdigest()[:16]
+        h = hashlib.sha256(lemma.encode()).hexdigest()
         proof_hashes.append({"lemma": lemma, "proof_hash": h})
     formal_gate_pass = formal.get("qed_proofs_pass", False)
     formal_n_verified = len(verified_lemmas)
@@ -1069,9 +1131,10 @@ def run_all_validations(
     # JSON, and the validation summary so that external auditors can
     # independently verify the formal proof set.
     verified_lemmas = formal_results.get("verified_lemmas", [])
-    proof_hashes = []
+    proof_hashes: list[dict[str, str]] = []
     for lemma in verified_lemmas:
-        h = hashlib.sha256(lemma.encode()).hexdigest()[:16]
+        # Full 64-hex digest at the producer, matching the report path above.
+        h = hashlib.sha256(lemma.encode()).hexdigest()
         proof_hashes.append({"lemma": lemma, "proof_hash": h})
     formal_results["proof_hashes"] = proof_hashes
 

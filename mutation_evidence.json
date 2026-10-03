@@ -1,0 +1,281 @@
+[
+  {
+    "target": "scripts/export_pbpk_to_qed.py",
+    "suites": [
+      "src/insilico_trial/tests/test_bridge_mutation_fast.py",
+      "src/insilico_trial/tests/test_pbpk.py",
+      "src/insilico_trial/tests/test_pd.py",
+      "src/insilico_trial/tests/test_formal_verification.py",
+      "--deselect",
+      "src/insilico_trial/tests/test_formal_verification.py::test_check_qed_proofs_returns_structured_results",
+      "--deselect",
+      "src/insilico_trial/tests/test_formal_verification.py::test_overall_pass_tied_to_qed_proofs_pass",
+      "--deselect",
+      "src/insilico_trial/tests/test_formal_verification.py::test_report_commits_to_ancestors_of_the_ledger_heads"
+    ],
+    "status": "measured",
+    "generated": 230,
+    "killed": 194,
+    "survived": 36,
+    "kill_rate": 0.8435,
+    "survivors": [
+      {
+        "site": "scripts/export_pbpk_to_qed.py:209:69",
+        "operator": "flip_bool",
+        "source": "def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True,"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:269:20",
+        "operator": "flip_bool",
+        "source": "saturable = False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:285:62",
+        "operator": "flip_bool",
+        "source": "def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:315:4",
+        "operator": "break_return",
+        "source": "return lemmas"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:350:54",
+        "operator": "negate_compare",
+        "source": "if isinstance(node, ast.FunctionDef) and node.name == \"pbpk_ode\"),"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:382:8",
+        "operator": "break_return",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:434:8",
+        "operator": "break_return",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:434:15",
+        "operator": "flip_bool",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:493:54",
+        "operator": "negate_compare",
+        "source": "if isinstance(node, ast.FunctionDef) and node.name == \"pbpk_ode\"),"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:628:11",
+        "operator": "flip_bool",
+        "source": "if not name.startswith(\"dA_\") and name not in defs:"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:661:12",
+        "operator": "break_return",
+        "source": "return text"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:674:37",
+        "operator": "arithmetic",
+        "source": "return _inline(text, depth + 1)"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:691:12",
+        "operator": "break_return",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:691:19",
+        "operator": "flip_bool",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:694:8",
+        "operator": "break_return",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:694:15",
+        "operator": "flip_bool",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:707:12",
+        "operator": "break_return",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:707:19",
+        "operator": "flip_bool",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:711:8",
+        "operator": "break_return",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:711:15",
+        "operator": "flip_bool",
+        "source": "return False"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:782:65",
+        "operator": "flip_bool",
+        "source": "raw_derivs = extract_symbolic_derivatives(model_path, expand=False)"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:783:7",
+        "operator": "flip_bool",
+        "source": "if not verify_symbolic_cancellation(raw_derivs):"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:799:61",
+        "operator": "flip_bool",
+        "source": "derivs = extract_symbolic_derivatives(model_path, expand=True)"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:814:8",
+        "operator": "break_return",
+        "source": "return expr"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:831:4",
+        "operator": "break_return",
+        "source": "return lemmas"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:860:54",
+        "operator": "negate_compare",
+        "source": "if isinstance(node, ast.FunctionDef) and node.name == \"pbpk_ode\"),"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:887:33",
+        "operator": "negate_compare",
+        "source": "\"dA_\" + (\"periph\" if name == \"peripheral\" else name)"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:916:105",
+        "operator": "negate_compare",
+        "source": "return ast.fix_missing_locations(_substitute(env[n.id], {k: v for k, v in env.items() if k != n.id}))"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1071:78",
+        "operator": "negate_compare",
+        "source": "fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == \"make_pbpk_ode\")"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1077:44",
+        "operator": "negate_compare",
+        "source": "if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1079:15",
+        "operator": "flip_bool",
+        "source": "if not t.startswith(\"dA_\"):"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1083:27",
+        "operator": "negate_compare",
+        "source": "if name in rhs and ast.unparse(rhs[name]) == f\"flows[{index}]\" and flux_name in rhs:"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1091:75",
+        "operator": "negate_compare",
+        "source": "f_full = _substitute(f, {**env, **{k: v for k, v in rhs.items() if k != dname}})"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1102:4",
+        "operator": "break_return",
+        "source": "return J"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1279:65",
+        "operator": "flip_bool",
+        "source": "raw_derivs = extract_symbolic_derivatives(model_path, expand=False)"
+      },
+      {
+        "site": "scripts/export_pbpk_to_qed.py:1529:67",
+        "operator": "flip_bool",
+        "source": "parser.add_argument(\"--symbolic\", action=\"store_true\", default=False,"
+      }
+    ],
+    "name": "export",
+    "required_kill_rate": 1.0,
+    "pass": false
+  },
+  {
+    "target": "scripts/verify_formal_gate.py",
+    "suites": [
+      "src/insilico_trial/tests/test_bridge_mutation_fast.py",
+      "src/insilico_trial/tests/test_formal_verification.py",
+      "--deselect",
+      "src/insilico_trial/tests/test_formal_verification.py::test_check_qed_proofs_returns_structured_results",
+      "--deselect",
+      "src/insilico_trial/tests/test_formal_verification.py::test_overall_pass_tied_to_qed_proofs_pass",
+      "--deselect",
+      "src/insilico_trial/tests/test_formal_verification.py::test_report_commits_to_ancestors_of_the_ledger_heads"
+    ],
+    "status": "measured",
+    "generated": 282,
+    "killed": 282,
+    "survived": 0,
+    "kill_rate": 1.0,
+    "survivors": [],
+    "name": "gate",
+    "required_kill_rate": 1.0,
+    "pass": true
+  },
+  {
+    "target": "src/insilico_trial/pbpk/model.py",
+    "suites": [
+      "src/insilico_trial/tests/test_pbpk.py",
+      "src/insilico_trial/tests/test_bridge_mutation_fast.py",
+      "src/insilico_trial/tests/test_population.py",
+      "src/insilico_trial/tests/test_safety.py",
+      "src/insilico_trial/tests/test_solvers.py"
+    ],
+    "status": "measured",
+    "generated": 143,
+    "killed": 143,
+    "survived": 0,
+    "kill_rate": 1.0,
+    "survivors": [],
+    "name": "model",
+    "required_kill_rate": 1.0,
+    "pass": true
+  },
+  {
+    "target": "src/insilico_trial/pd/__init__.py",
+    "suites": [
+      "src/insilico_trial/tests/test_pd.py",
+      "src/insilico_trial/tests/test_safety.py",
+      "src/insilico_trial/tests/test_solvers.py",
+      "src/insilico_trial/tests/test_pbpk.py"
+    ],
+    "status": "measured",
+    "generated": 38,
+    "killed": 38,
+    "survived": 0,
+    "kill_rate": 1.0,
+    "survivors": [],
+    "name": "pd",
+    "required_kill_rate": 1.0,
+    "pass": true
+  },
+  {
+    "target": "scripts/rebuild_qed_oleans.py",
+    "suites": [
+      "src/insilico_trial/tests/test_rebuild_oleans.py"
+    ],
+    "status": "measured",
+    "generated": 36,
+    "killed": 36,
+    "survived": 0,
+    "kill_rate": 1.0,
+    "survivors": [],
+    "name": "rebuild",
+    "required_kill_rate": 1.0,
+    "pass": true
+  }
+]

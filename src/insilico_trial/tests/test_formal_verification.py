@@ -759,3 +759,45 @@ def test_provenance_seals_report_that_has_no_tag_yet(tmp_path: Path) -> None:
         output_path=tmp_path / "p.json", vvv40_path=report, repo_root=tmp_path)
     html = report.read_text(encoding="utf-8")
     assert f'<meta name="merkle-root" content="{prov["merkle_root"]}">' in html
+
+
+def test_lemma_proof_digest_is_full_64_hex_at_the_producer(tmp_path: Path) -> None:
+    """Per-lemma digests are the whole SHA-256, not a truncated display form.
+
+    The audit trail previously truncated to 16 hex (64 bits). A 64-bit digest
+    is not collision resistant enough to be the value a regulator-facing
+    provenance record hangs its integrity claim on, and nothing pinned the
+    width, so the truncation could be reintroduced silently.
+    """
+    import re
+
+    from insilico_trial.validation import generate_vvv40_report
+
+    lemmas = ["a + b - a = b", "Q / (V * Kp) > 0"]
+    results = {
+        "warfarin_pgx": {"overall_pass": True},
+        "moxifloxacin_qtc": {"overall_pass": True},
+        "midazolam_cyp3a4": {"overall_pass": True},
+        "metformin_renal": {"overall_pass": True},
+        "hepatic_impairment": {"overall_pass": True},
+        "formal_verification": {
+            "verified_lemmas": lemmas,
+            "failed_lemmas": [],
+            "qed_proofs_pass": True,
+        },
+    }
+    report = generate_vvv40_report(results, tmp_path / "vvv40.html")
+
+    hashes = report["provenance"]["formal_proof_hashes"]
+    assert len(hashes) == len(lemmas)
+    for entry in hashes:
+        digest = entry["proof_hash"]
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), (
+            f"lemma digest must be 64 lowercase hex chars, got {digest!r} "
+            f"({len(digest)} chars)")
+
+    # The digest must be the real SHA-256 of the lemma text, not merely long.
+    import hashlib
+    for entry in hashes:
+        assert entry["proof_hash"] == hashlib.sha256(
+            entry["lemma"].encode()).hexdigest()

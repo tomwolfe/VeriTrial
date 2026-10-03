@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 SCRIPT = SCRIPTS / "rebuild_qed_oleans.py"
 
@@ -81,3 +83,57 @@ def test_main_rebuilds_oleans_fresh():
         src = qed / f"{name}.lean"
         assert olean.is_file()
         assert olean.stat().st_mtime >= src.stat().st_mtime - 1
+
+
+def test_compile_failure_reports_the_real_compiler_diagnostic(tmp_path, monkeypatch, capsys):
+    """A failed Lean compile must surface the compiler's own output.
+
+    This is the only place `capture_output=True` and `text=True` are
+    load-bearing: the failure branch prints `proc.stdout` / `proc.stderr`. With
+    capture_output flipped off both are None, so the gate would abort while
+    printing the literal text "None" and the actual compiler error -- the one
+    piece of information that says which module and why -- would be lost. With
+    text off they are bytes and the message is printed as a b'' literal.
+
+    The path was untested, so both mutants survived. It is pinned here with a
+    fake compiler that fails with a recognisable message on both streams.
+    """
+    mod = _load()
+
+    (tmp_path / "lakefile.lean").write_text("package QED\n")
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.34.0-rc2\n")
+    (tmp_path / "Broken.lean").write_text("theorem broken : False := by rfl\n")
+
+    class _Failed:
+        returncode = 1
+        stdout = "STDOUT_MARKER: unknown identifier 'nope'"
+        stderr = "STDERR_MARKER: elaboration failed"
+
+    seen: dict[str, object] = {}
+
+    def _run(*a, **k):
+        seen.update(k)
+        return _Failed()
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["--qed-dir", str(tmp_path), "--modules", "Broken"])
+    assert exc.value.code == 1
+
+    err = capsys.readouterr().err
+    assert "LEAN COMPILE FAILED for Broken" in err
+    # Both streams must be present as text -- not None, not bytes reprs.
+    assert "STDOUT_MARKER: unknown identifier 'nope'" in err
+    assert "STDERR_MARKER: elaboration failed" in err
+    assert "None" not in err, "compiler output was replaced by None"
+    assert "b'" not in err, "compiler output was printed as a bytes literal"
+
+    # The flags themselves must be requested, since the diagnostic above is
+    # only real text because of them. A stubbed subprocess cannot observe them
+    # any other way: returning strings regardless of the kwargs would let both
+    # mutants through, which is exactly what happened before this assertion.
+    assert seen.get("capture_output") is True, (
+        "the compiler's stdout/stderr must be captured, not inherited")
+    assert seen.get("text") is True, (
+        "the compiler's output must be decoded to str, not left as bytes")

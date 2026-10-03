@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import ast
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from insilico_trial.pbpk.model import (
     DEFAULT_ORGAN_NETWORK,
@@ -636,14 +637,23 @@ def verify_symbolic_cancellation(derivs: dict[str, str],
     # renaming, not an assumption: it neither adds nor removes terms, and a
     # genuine imbalance still fails to cancel afterwards.
     def _flatten_arrays(text: str) -> str:
+        # The capture group is ``[A-Za-z_]\w*``, so it never contains a
+        # non-word character; the ``\W`` scrub is defence in depth for the
+        # index forms. (It was written ``r'\\W'``, which is a literal
+        # backslash followed by W -- provably equivalent on the captured
+        # domain, but wrong.)
+        def _renamer(prefix: str) -> Callable[[_re.Match[str]], str]:
+            def _rename(m: _re.Match[str]) -> str:
+                return f"{prefix}_{_re.sub(r'\W', '_', m.group(1))}"
+            return _rename
+
         for arr, prefix in (("Q", "Q"), ("V", "V"), ("Kp", "K")):
             text = _re.sub(
                 rf"\b{arr}\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]",
-                lambda m, a=prefix: f"{a}_{_re.sub(r'\\W', '_', m.group(1))}",
-                text)
+                _renamer(prefix), text)
         text = _re.sub(
             r"\by\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]",
-            lambda m: f"A_{_re.sub(r'\\W', '_', m.group(1))}", text)
+            lambda m: f"A_{_re.sub(r'\W', '_', m.group(1))}", text)
         return text
 
     def _inline(text: str, depth: int = 0) -> str:
@@ -676,10 +686,10 @@ def verify_symbolic_cancellation(derivs: dict[str, str],
                        if n.startswith("dA_") and not n.endswith("_flux")]
     terms = []
     for name in state_names:
-        expr = derivs.get("dA_" + name)
-        if expr is None:
+        deriv_expr = derivs.get("dA_" + name)
+        if deriv_expr is None:
             return False
-        terms.append(expr)
+        terms.append(deriv_expr)
     if not terms:
         return False
     symbols = {t: _sp.Symbol(t) for t in
@@ -696,7 +706,7 @@ def verify_symbolic_cancellation(derivs: dict[str, str],
         except Exception:
             return False
     try:
-        return _sp.simplify(total) == 0
+        return bool(_sp.simplify(total) == 0)
     except Exception:
         return False
 
@@ -1014,7 +1024,7 @@ def compute_jacobian(model_path: Path,
     14-state model, and the conservation certificate derived from it would
     certify the wrong system.
     """
-    import sympy as _sp  # type: ignore[import-untyped]
+    import sympy as _sp
     source = model_path.read_text(encoding="utf-8")
     if "def make_pbpk_ode(" in source:
         from insilico_trial.pbpk.model import make_pbpk_ode, organ_indices

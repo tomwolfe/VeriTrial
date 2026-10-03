@@ -268,7 +268,8 @@ def _independent_column_sums(model_path: Path, fin_n: int,
                                expr)
         # Parameter arrays indexed by a state position.
         for arr, prefix in (("Q", "Q"), ("V", "V"), ("Kp", "Kp")):
-            def _sub(m: _re.Match[str], arr=arr, prefix=prefix) -> str:
+            def _sub(m: _re.Match[str], arr: str = arr,
+                     prefix: str = prefix) -> str:
                 index = _resolve_index(m.group(1))
                 return m.group(0) if index is None else _sym(index, prefix)
             expr = _re.sub(rf"\b{arr}\s*\[\s*([A-Za-z_]\w*|\d+)\s*\]", _sub, expr)
@@ -408,7 +409,11 @@ def _independent_column_sums(model_path: Path, fin_n: int,
             if (isinstance(node, _ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], _ast.Name)
                     and node.targets[0].id == "flows"
-                    and isinstance(node.value, _ast.ListComp)):
+                    and isinstance(node.value, _ast.ListComp)
+                    # A comprehension whose target is not a plain Name cannot be
+                    # unrolled by textual substitution; fall through to the
+                    # fail-closed `else` rather than substituting a wrong var.
+                    and isinstance(node.value.generators[0].target, _ast.Name)):
                 var = node.value.generators[0].target.id
                 per_index = [
                     _tok(_ast.unparse(node.value.elt).replace(var, str(k)))
