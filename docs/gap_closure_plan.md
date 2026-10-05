@@ -43,21 +43,50 @@ tool does **not** yet support.
   (Goal C, Phase 4) remains the path forward — it can run on CPU now and on
   Metal once the upstream blocker clears.
 
-### G2. ODE solver diversity
-- **Status**: Only `diffrax.Tsit5` (explicit adaptive) is used. Kvaerno
-  implicit solvers were tried (accurate but ~4× slower) and rejected.
-- **Mitigation**: `PIDController(rtol=1e-4, atol=1e-6)` validated for mass
-  balance.
-- **Gap closure**: Add implicit solver fallback only if stiff systems
-  (e.g., high-dose saturation, non-linear clearance) are introduced.
+### G2. ODE solver diversity (CLOSED for the stiff path)
+- **Status (closed)**: `diffrax.Tsit5` is no longer the only integrator.
+  `pbpk/solvers.py` implements `solve_implicit` / `solve_implicit_batch` on
+  **SDIRK2**, a 2-stage L-stable 2nd-order SDIRK (Hairer–Wanner constants), with
+  an M-matrix stage. Kvaerno was tried earlier (accurate but ~4× slower) and
+  rejected; SDIRK2 replaces it as the implicit fallback.
+- **Remaining gap**: SDIRK2 is a *fixed-step* L-stable method; there is still no
+  adaptive step-size controller on the implicit path.
+- **Evidence**: `test_solvers.py` pins SDIRK2 against the adaptive reference
+  solution and `test_solver_equivalence_warfarin` pins the two paths against
+  each other. The de-clamping property is pinned separately in
+  `test_fixed_step.py` (see G3 note below): concentrations stay non-negative
+  because of the `dt` bound, not because of a `jnp.maximum` clamp.
+- **Stiff-system trigger satisfied**: the gap-closure condition ("add implicit
+  fallback if stiff systems such as high-dose saturation or non-linear
+  clearance are introduced") has been met — the saturable hepatic clearance of
+  G3 introduced exactly such a system.
 
-### G3. PBPK structural simplification
-- **Status**: Three-compartment perfusion-limited model (gut→central→peripheral).
-  No explicit liver/kidney sub-compartments with enzyme kinetics.
-- **Mitigation**: Parameters (`Q_peripheral`, `V_peripheral/V_central`) are
-  calibrated so warfarin and moxifloxacin PK match literature simultaneously.
-- **Gap closure**: Add mechanistic liver compartment with CYP-mediated
-  metabolism when supporting complex DDI or induction/inhibition studies.
+### G3. PBPK structural simplification (CLOSED for liver kinetics; N-scaling partial)
+- **Status (closed for liver metabolism)**: `pbpk/model.py` no longer uses a
+  three-compartment gut→central→peripheral chain. `make_pbpk_ode` is a
+  perfusion-limited N-state network over an explicit organ tuple, with a
+  **saturable hepatic clearance** term `vmax*C_liver/(km + C_liver)` wired into
+  both the liver outflow and the `elim` accumulator when BOTH `vmax_metabolic`
+  and `km_metabolic` are supplied. With neither supplied the term is exactly
+  zero, so the default parameterisation is byte-identical to the linear model —
+  backward compatible.
+- **N-scaling**: `DEFAULT_ORGAN_NETWORK` (gut, liver, central, peripheral,
+  effect, elim) is the validated 6-state fast path used by the demo and by
+  `make validate`; `STANDARD_14_ORGAN_NETWORK` adds kidney, lung, brain, heart,
+  muscle, adipose, bone, skin, spleen and pancreas as perfused tissues and is
+  selected per-protocol via `TrialEngine._organ_network` (`organ_network ==
+  "STANDARD_14"`). Both networks are exercised by the same tests, so the
+  14-state model is scaffolded and certified, not hypothetical.
+- **Evidence**: mass conservation holds on **both** networks —
+  `test_saturable_is_a_transfer_not_a_sink[default|14_organ]` asserts
+  `|d(total)/dt| < 1e-8`, i.e. the metabolic flux is a *transfer* into `elim`,
+  never a sink and never a creation. `test_pbpk.py::test_mass_balance_with_elimination`
+  holds the 1e-7 bound on the default path. The Fin 14 export
+  (`export_pbpk_to_qed.py --fin-n 14 --parametric --saturable`) certifies the
+  14-state parametric identity and its 25-lemma set with no `sorry`.
+- **Remaining gap**: no explicit enzyme-level (CYP isoform) kinetics — the
+  saturable term is Michaelis–Menten, not a mechanistic CYP turnover model.
+  Genotype enters through the `egfr_scale`/activity-score scaling of G6.
 
 ### G4. DILI model is exposure-driven, not mechanistic
 - **Status**: DILI is driven by liver AUC × a drug-level `dili_risk` scalar
@@ -66,6 +95,9 @@ tool does **not** yet support.
   flags severe hepatotoxicity events.
 - **Gap closure**: Integrate a mechanistic mitochondrial-toxicity prior when
   compound-specific in vitro data (e.g., Seahorse stress test) is available.
+  The liver-side *kinetics* are now mechanistic (G3's saturable term feeds the
+  same `elim` accumulator the DILI AUC is computed from); what remains missing
+  is the mitochondrial-stress prior, not the hepatic disposition.
 
 ### G5. No true Bayesian posterior in the trial run (CLOSED)
 - **Status**: `stats.calibrate_pk_1comp` runs a NumPyro NUTS fit, and the
@@ -76,12 +108,22 @@ tool does **not** yet support.
   verifies that Bayesian credible intervals are produced and are at least as
   wide as normal-approx intervals.
 
-### G6. Population: US generalizable, not disease-specific
-- **Status**: Cohorts are drawn from NHANES-style age/weight/BMI/eGFR priors
-  with CYP allele frequencies. No disease-stratified cohorts (hepatic
-  impairment, pediatrics, pregnancy).
-- **Gap closure**: Add disease cohort configs (e.g., moderate hepatic
-  impairment Child-Pugh B) with corresponding `egfr_scale`/CL scaling rules.
+### G6. Population: US generalizable, not disease-specific (PARTIALLY CLOSED)
+- **Status (hepatic impairment closed; pediatrics/pregnancy still open)**:
+  The base cohort is drawn from NHANES-style age/weight/BMI/eGFR priors with
+  CYP allele frequencies, as before. A **disease-stratified cohort now exists**:
+  `configs/population_hepatic_impairment.yaml` encodes Child-Pugh B moderate
+  hepatic impairment with `egfr_scale: 0.6`, and is a first-class validated
+  benchmark rather than a dormant file.
+- **Evidence**: `validation.validate_hepatic_impairment(n_patients=100)` is
+  called from `run_all_validations()` (and therefore from `make validate`), and
+  its verdict is surfaced in the provenance as `hepatic_impairment_pass`.
+  Because `run_all_validations` feeds `build_regulatory_provenance()`, the
+  hepatic cohort participates in the Merkle chain like every other benchmark.
+- **Remaining gap**: pediatrics and pregnancy are still absent — the age
+  distribution is `truncated_normal(mean=40, 18–75)`, so no subject is a
+  child. Closing that needs weight/age-appropriate allometric exponents per
+  organ, not just a re-drawn prior, and is out of scope for this pass.
 
 ### G7. Limited validation set (CLOSED)
 - **Status**: Four benchmarks (warfarin PGx, moxifloxacin QTc, midazolam
