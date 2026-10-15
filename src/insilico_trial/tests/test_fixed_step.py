@@ -1090,9 +1090,25 @@ def test_jacobian_diagonal_falls_back_to_float_for_scalar_parameters() -> None:
 # the tests below observe the GUT trajectory itself.
 
 # Deliberately off-grid dose times, distinct amounts, and an ascending order:
-# an amount pattern that is not constant and a time that does not land on a
-# grid point, so a window that is off by a half step still misfires.
+# an amount pattern that is not constant, so a bolus lookup that is off by one
+# dose or applied twice is visible in the jump sequence.
+#
+# NOTE: with dt = 0.02 these four times happen to be exact multiples of dt
+# (7.3 = 365*0.02, and likewise for the rest), so they land exactly on grid
+# points. That is fine for pinning the *amount* rule but blind to the *window
+# width*, because every widening of the window around an on-grid time still
+# finds the same first grid point. `_OFF_GRID_*` below is the set that actually
+# discriminates the window; see test_multi_dose_window_is_half_a_step_wide.
 _MULTI_DOSE_TIMES = onp.array([7.3, 23.1, 41.7, 60.9])
+
+# Off-grid by exactly a quarter step (0.005 h = dt/4) in the +direction, i.e.
+# the nearest grid point is dt/4 away and its left neighbour is 3*dt/4 away.
+# So:  * the dt/2 window fires at the NEAREST grid point (margin dt/4 = 0.005,
+#        comfortably away from floating-point knife-edge equality), while
+#     * any window of width >= 3*dt/2 (= 0.03) fires one step EARLIER, at the
+#        neighbour that is 3*dt/4 away.
+# That one-step shift is what makes the window width observable at all.
+_OFF_GRID_TIMES = onp.array([7.305, 23.115, 41.715, 60.915])
 _MULTI_DOSE_AMOUNTS = onp.array([10.0, 5.0, 7.5, 2.5])
 _MULTI_DOSE_SPAN = 72.0
 _MULTI_DOSE_DT = 0.02
@@ -1398,3 +1414,219 @@ def test_multi_dose_zero_dose_times_integrates_an_empty_gut() -> None:
     assert c_liver.shape == (2, t_eval.size)
     assert onp.all(onp.asarray(c_p) == 0.0)
     assert onp.all(onp.asarray(c_liver) == 0.0)
+
+
+# --- the boundary WINDOW, pinned on a schedule that can actually see it ----
+#
+# `_MULTI_DOSE_TIMES` are exact multiples of dt, so every grid point sits on a
+# boundary and widening the window is invisible: the first grid point inside a
+# 0.01h window and the first inside a 0.04h window are the same point. The
+# tests below re-run the same three questions against `_OFF_GRID_TIMES`, which
+# are a quarter step off the grid, where a window that is even slightly too
+# wide moves the bolus by exactly one step.
+
+def _off_grid_grid() -> tuple[onp.ndarray, onp.ndarray]:
+    """The internal grid, and the expected firing row index for each dose.
+
+    A bolus fires on the step that STARTS at the first grid point within
+    dt/2 of its scheduled time. `ys_full` is then indexed one past the step
+    start, so the expected row is `argmin(|t - tau|) + 1`.
+    """
+    t_eval = onp.linspace(0.0, _MULTI_DOSE_SPAN, int(_MULTI_DOSE_SPAN / _MULTI_DOSE_DT) + 1)
+    expected = onp.array([int(onp.argmin(onp.abs(t_eval - tau))) + 1
+                          for tau in _OFF_GRID_TIMES])
+    # Sanity: the off-grid set must really be a quarter step off, otherwise
+    # these tests silently degrade into the on-grid ones above.
+    for tau in _OFF_GRID_TIMES:
+        nearest = float(onp.min(onp.abs(t_eval - tau)))
+        # (band edges are loosened by a hair: linspace rounding puts the
+        # exact quarter-step distance a few ulps below dt/4)
+        assert 0.24 * _MULTI_DOSE_DT < nearest < 0.49 * _MULTI_DOSE_DT, (
+            f"off-grid dose {tau} sits {nearest} from the grid, not in the "
+            "quarter-step band these tests are built for")
+    return t_eval, expected
+
+
+def _fired_rows(profile: onp.ndarray) -> onp.ndarray:
+    """Rows of `profile` on which a bolus moved the state."""
+    return onp.flatnonzero(onp.abs(onp.diff(profile)) > 1e-12) + 1
+
+
+def test_multi_dose_window_is_half_a_step_wide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each bolus fires on the step nearest its time -- one step, not two.
+
+    The dt/2 window must select the NEAREST grid point. A window widened to
+    dt (or dt*2) would also swallow the neighbour 3*dt/4 away and fire one
+    step early, which for an absorbing gut is a half-step of drug given
+    before it was prescribed.
+    """
+    from insilico_trial.pbpk.fixed_step import solve_pbpk_multi_dose_fixed_step
+
+    t_eval, expected = _off_grid_grid()
+    params, _drug, _t, _absorbed = _build_warfarin_params()
+    gut = _gut_via_central_index(
+        monkeypatch, solve_pbpk_multi_dose_fixed_step, params["V"],
+        t_eval, _OFF_GRID_TIMES, _MULTI_DOSE_AMOUNTS, params, _MULTI_DOSE_DT,
+    )
+
+    fired = _fired_rows(gut)
+    assert fired.size == _OFF_GRID_TIMES.size, (
+        f"expected {_OFF_GRID_TIMES.size} boluses, got {fired.size}: "
+        f"{fired.tolist()}")
+    assert onp.array_equal(fired, expected), (
+        f"boluses fired on rows {fired.tolist()}, expected {expected.tolist()}; "
+        "the boundary window is wider or narrower than dt/2")
+    for k, (row, tau) in enumerate(zip(fired, _OFF_GRID_TIMES, strict=True)):
+        step_start = t_eval[row - 1]
+        assert abs(step_start - tau) < _MULTI_DOSE_DT / 2.0, (
+            f"dose {k} (t={tau}) fired from t={step_start}")
+    assert onp.allclose(_bolus_jumps(gut), _MULTI_DOSE_AMOUNTS,
+                        rtol=0.0, atol=1e-12)
+
+
+def test_batch_multi_dose_window_is_half_a_step_wide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batch scan fires on the same rows, on the same window.
+
+    `solve_pbpk_batch_multi_dose_fixed_step` carries its own copy of the
+    boundary rule inside `_single`. The amount sequence and the seed are
+    already pinned above; what that pins cannot tell is WHERE the boluses
+    land in time, because each amount is applied exactly once either way.
+    This is the test that makes the batch window observable.
+    """
+    from insilico_trial.pbpk.fixed_step import (
+        solve_pbpk_batch_multi_dose_fixed_step,
+    )
+
+    t_eval, expected = _off_grid_grid()
+    params, _batch, _dose = _warfarin_batch(n_patients=3)
+    n_patients = 3
+    doses = onp.tile(_MULTI_DOSE_AMOUNTS, (n_patients, 1))
+    batch = {
+        "Q": onp.stack([params["Q"]] * n_patients),
+        "V": onp.stack([params["V"]] * n_patients),
+        "Kp": onp.stack([params["Kp"]] * n_patients),
+        "CL": onp.full(n_patients, float(params["CL"])),
+        "ka": onp.full(n_patients, float(params["ka"])),
+    }
+
+    gut, _c_liver = _gut_via_central_index(
+        monkeypatch, solve_pbpk_batch_multi_dose_fixed_step, params["V"],
+        t_eval, _OFF_GRID_TIMES, doses, batch, _MULTI_DOSE_DT,
+    )
+
+    fired = _fired_rows(gut[0])
+    assert fired.size == _OFF_GRID_TIMES.size, (
+        f"expected {_OFF_GRID_TIMES.size} boluses in the batch profile, got "
+        f"{fired.size}: {fired.tolist()}")
+    assert onp.array_equal(fired, expected), (
+        f"batch boluses fired on rows {fired.tolist()}, expected "
+        f"{expected.tolist()}; the batch boundary window is wrong. Note that "
+        "inverting the window comparison also applies every dose exactly "
+        "once -- just all of them in the first few steps -- so the amount "
+        "sequence alone does not catch it")
+    for patient in range(1, n_patients):
+        assert onp.array_equal(_fired_rows(gut[patient]), expected), (
+            f"patient {patient} fired on different rows from patient 0")
+
+
+def test_batch_multi_dose_window_is_not_inverted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No bolus may fire before its scheduled time, whatever the rule says.
+
+    Deliberately weaker than pinning the exact firing row: it only asserts the
+    one-sided fact that a bolus never precedes its dose by more than dt/2.
+    Inverting the window test (`|t - tau| >= dt/2`) keeps every dose applied
+    exactly once and in order -- at the wrong time -- so only a timing
+    assertion can see it.
+    """
+    from insilico_trial.pbpk.fixed_step import (
+        solve_pbpk_batch_multi_dose_fixed_step,
+    )
+
+    t_eval, _expected = _off_grid_grid()
+    params, _batch, _dose = _warfarin_batch(n_patients=2)
+    n_patients = 2
+    doses = onp.tile(_MULTI_DOSE_AMOUNTS, (n_patients, 1))
+    batch = {
+        "Q": onp.stack([params["Q"]] * n_patients),
+        "V": onp.stack([params["V"]] * n_patients),
+        "Kp": onp.stack([params["Kp"]] * n_patients),
+        "CL": onp.full(n_patients, float(params["CL"])),
+        "ka": onp.full(n_patients, float(params["ka"])),
+    }
+
+    profile, _c_liver = _gut_via_central_index(
+        monkeypatch, solve_pbpk_batch_multi_dose_fixed_step, params["V"],
+        t_eval, _OFF_GRID_TIMES, doses, batch, _MULTI_DOSE_DT,
+    )
+
+    for k, tau in enumerate(_OFF_GRID_TIMES):
+        row = int(_fired_rows(profile[0])[k])
+        lead = tau - t_eval[row - 1]
+        assert lead < _MULTI_DOSE_DT / 2.0, (
+            f"dose {k} (t={tau}) was administered at t={t_eval[row - 1]}, "
+            f"{lead:.4f} h early -- the window fired at the wrong side of the "
+            "boundary")
+
+
+def test_batch_multi_dose_c_liver_is_amount_over_liver_volume() -> None:
+    """`c_liver` is the liver amount DIVIDED by the liver volume.
+
+    The batch multi-dose solver returns two concentrations. The gut/central
+    channel is pinned by the boundary tests above; the liver channel is not
+    pinned by anything, because every boundary test either reads the gut
+    through `_CENTRAL_IDX` or runs on an empty schedule where both channels
+    are zero. Repointing `_CENTRAL_IDX` at the liver makes the solver's own
+    first return value the same quantity its second return value claims to
+    be, so the two must agree exactly under real dynamics.
+    """
+    from insilico_trial.pbpk import fixed_step
+    from insilico_trial.pbpk.fixed_step import (
+        solve_pbpk_batch_multi_dose_fixed_step,
+    )
+    from insilico_trial.pbpk.model import _LIVER_IDX
+
+    params, _batch, _dose = _warfarin_batch(n_patients=2)
+    n_patients = 2
+    batch = {
+        "Q": onp.stack([params["Q"]] * n_patients),
+        "V": onp.stack([params["V"]] * n_patients),
+        "Kp": onp.stack([params["Kp"]] * n_patients),
+        "CL": onp.full(n_patients, float(params["CL"])),
+        "ka": onp.full(n_patients, float(params["ka"])),
+    }
+    doses = onp.tile(_MULTI_DOSE_AMOUNTS, (n_patients, 1))
+    t_eval = onp.linspace(0.0, _MULTI_DOSE_SPAN, 361)
+
+    c_p, c_liver = solve_pbpk_batch_multi_dose_fixed_step(
+        t_eval, _MULTI_DOSE_TIMES, doses, batch, _MULTI_DOSE_DT)
+    c_liver = onp.asarray(c_liver)
+    assert onp.all(onp.isfinite(c_liver))
+    assert float(onp.max(c_liver)) > 0.0, "the liver channel is identically zero"
+
+    saved = fixed_step._CENTRAL_IDX
+    fixed_step._CENTRAL_IDX = _LIVER_IDX
+    try:
+        liver_as_central, _ = solve_pbpk_batch_multi_dose_fixed_step(
+            t_eval, _MULTI_DOSE_TIMES, doses, batch, _MULTI_DOSE_DT)
+    finally:
+        fixed_step._CENTRAL_IDX = saved
+    liver_as_central = onp.asarray(liver_as_central)
+
+    liver_volume = float(onp.asarray(params["V"])[_LIVER_IDX])
+    assert liver_volume != 1.0, (
+        "the liver volume is 1.0, which makes `*` and `/` indistinguishable "
+        "and would let this test pass vacuously")
+
+    deviation = float(onp.max(onp.abs(c_liver - liver_as_central)))
+    assert deviation <= 1e-12 * max(1.0, float(onp.max(onp.abs(c_liver)))), (
+        f"the returned liver channel disagrees with liver_amount/V by "
+        f"{deviation:.3e}; it is not the liver amount divided by V={liver_volume}")
+    # And the channel really is a concentration, i.e. it is scaled by the
+    # volume rather than left as a raw amount.
+    assert not onp.allclose(c_liver, c_p, rtol=1e-12, atol=0.0), (
+        "the liver and central channels are identical, so the index being "
+        "read is not the liver")
