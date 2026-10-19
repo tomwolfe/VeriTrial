@@ -40,4 +40,4 @@ adapters:
     # explicitly scoped to. Prompting the model not to reach for the
     # read-only path is mitigation, not enforcement. The safety that `--auto`
     # gives up at the model layer is held by `sandbox_mode: enforce` above.
-    command: ["opencode", "run", "--auto", "-m", "opencode/beam-free", "{prompt}"]
+    command: ["opencode", "run", "--auto", "-m", "opencode/minimax-m3.1-flash-free", "{prompt}"]
