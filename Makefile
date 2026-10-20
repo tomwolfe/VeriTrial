@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test test-cov clean help demo demo-small validate benchmark report check formal-gate mutation
+.PHONY: install lint typecheck test test-cov clean help demo demo-small demo-standard14 validate benchmark compare-organ-networks report check formal-gate mutation
 
 help:
 	@echo "Available targets:"
@@ -9,10 +9,12 @@ help:
 	@echo "  test-cov     - Run tests with coverage"
 	@echo "  demo-small   - Run 100-patient fast validation demo"
 	@echo "  demo         - Run 1000-patient full SAD/MAD simulation"
+	@echo "  demo-standard14 - Run the same 1000-patient SAD benchmark on the 14-organ network"
 	@echo "  validate     - Run benchmark harness (Warfarin + Moxifloxacin + Midazolam + Metformin)"
 	@echo "  formal-gate  - Run QED formal verification gate (portable)"
 	@echo "  mutation     - Mutation kill-rate gate over the baseline targets"
 	@echo "  benchmark    - Hardware acceleration comparison"
+	@echo "  compare-organ-networks - DEFAULT vs STANDARD_14 Cmax delta + throughput"
 	@echo "  report       - Generate HTML/Markdown validation report"
 	@echo "  clean        - Remove build artifacts"
 
@@ -36,6 +38,12 @@ demo-small:
 
 demo:
 	python -m insilico_trial.cli demo --patients 1000 --duration-days 7
+
+demo-standard14:
+	python -m insilico_trial.cli demo --patients 1000 --duration-days 7 --organ-network STANDARD_14
+
+compare-organ-networks:
+	python3 scripts/compare_organ_networks.py --patients 1000 --duration-days 7
 
 validate:
 	python -m insilico_trial.cli validate --warfarin-n 300

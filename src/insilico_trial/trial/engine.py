@@ -567,9 +567,11 @@ class TrialEngine:
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
-            # Mechanistic QSP state: ALT index 8, GSH index 6 (see model._ALT_IDX/_GSH_IDX)
-            self._last_alt_batch = onp.asarray(ys_full[:, :, 8], dtype=onp.float64)
-            self._last_gsh_batch = onp.asarray(ys_full[:, :, 6], dtype=onp.float64)
+            # Mechanistic QSP state: ALT and GSH live after the organ states
+            # (see _qsp_state_indices); on the 6-organ network these are 8 / 6.
+            gsh_idx, alt_idx = self._qsp_state_indices()
+            self._last_alt_batch = onp.asarray(ys_full[:, :, alt_idx], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(ys_full[:, :, gsh_idx], dtype=onp.float64)
         elif effective_solver == "sdirk2":
             # SDIRK2 implicit solver (pure JAX, no lineax): batch-solve
             # via solve_implicit_batch which returns full state trajectories.
@@ -585,15 +587,16 @@ class TrialEngine:
             ys = solve_implicit_batch(_pbpk_ode, y0_batch, t_eval_j, params_jax, dt=_stable_dt_for_batch(params_batch))
             C_batch = onp.asarray(ys[:, :, 2] / params_batch["V"][:, 2:3], dtype=onp.float64)
             C_liver_batch = onp.asarray(ys[:, :, _LI] / params_batch["V"][:, _LI:_LI + 1], dtype=onp.float64)
-            # Mechanistic DILI coupling for SDIRK2: reuse the unified 9-state
-            # solver for ALT (idx 8) / GSH (idx 6) trajectories so CTCAE and
-            # Hy's Law evaluate live solver state, never Emax fallbacks.
+            # Mechanistic DILI coupling for SDIRK2: reuse the unified solver for
+            # the ALT / GSH trajectories so CTCAE and Hy's Law evaluate live
+            # solver state, never Emax fallbacks.
             _C2, _Cl2, _ys2 = solve_pbpk_batch_with_compartments(
                 t_eval_hours, A_gut_0s, params_batch, dt=_stable_dt_for_batch(params_batch),
                 return_full_state=True,
             )
-            self._last_alt_batch = onp.asarray(_ys2[:, :, 8], dtype=onp.float64)
-            self._last_gsh_batch = onp.asarray(_ys2[:, :, 6], dtype=onp.float64)
+            gsh_idx, alt_idx = self._qsp_state_indices()
+            self._last_alt_batch = onp.asarray(_ys2[:, :, alt_idx], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(_ys2[:, :, gsh_idx], dtype=onp.float64)
         else:
             # Legacy solver names map to the unified fixed-step 9-state path.
             C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
@@ -602,8 +605,9 @@ class TrialEngine:
             )
             C_batch = onp.asarray(C_batch, dtype=onp.float64)
             C_liver_batch = onp.asarray(C_liver_batch, dtype=onp.float64)
-            self._last_alt_batch = onp.asarray(ys_full[:, :, 8], dtype=onp.float64)
-            self._last_gsh_batch = onp.asarray(ys_full[:, :, 6], dtype=onp.float64)
+            gsh_idx, alt_idx = self._qsp_state_indices()
+            self._last_alt_batch = onp.asarray(ys_full[:, :, alt_idx], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(ys_full[:, :, gsh_idx], dtype=onp.float64)
         return t_eval_hours, C_batch, C_liver_batch
 
     def _get_dosing_events(self) -> list[DosingEvent]:
@@ -641,6 +645,17 @@ class TrialEngine:
         C_batch : ndarray (n_patients, n_time)   plasma concentrations (mg/L)
         """
         dosing_events = self._get_dosing_events()
+        if len(self._organ_network()) != len(DEFAULT_ORGAN_NETWORK):
+            # The multi-dose solver carries a state vector whose length is
+            # hardcoded to the 6/9-organ layout
+            # (pbpk.fixed_step.solve_pbpk_batch_multi_dose_fixed_step), so
+            # running it against a 14-organ network would integrate a
+            # mis-shaped state rather than fail. Fail closed instead.
+            raise ValueError(
+                "MAD is not supported on the STANDARD_14 organ network: the "
+                "multi-dose solver is dimensionally hardcoded to the 6/9-state "
+                "layout. The SAD benchmark on STANDARD_14 is supported."
+            )
         if not dosing_events:
             # Fall back to single-dose SAD. The cohort solver also returns the
             # liver trace; this API does not carry it, and the MAD entry point
@@ -853,6 +868,23 @@ class TrialEngine:
         if self.protocol.organ_network == "STANDARD_14":
             return STANDARD_14_ORGAN_NETWORK
         return DEFAULT_ORGAN_NETWORK
+
+    def _qsp_state_indices(self) -> tuple[int, int]:
+        """Return ``(gsh_index, alt_index)`` in the unified solver's state vector.
+
+        The unified state vector is ``[organ states..., GSH, S_mito, ALT]`` (see
+        ``pbpk.model.make_pbpk_dili_ode``), so the QSP states sit at
+        ``n_organ`` and ``n_organ + 2``. These indices were hardcoded to 6 and
+        8, which is correct ONLY for the 6-organ network: on STANDARD_14 the
+        same offsets read the *heart* (index 6) and *adipose* (index 8)
+        compartment amounts and fed tissue masses (mg) into the DILI/Hy's-Law
+        path as if they were ALT (U/L) and GSH (dimensionless).
+
+        For DEFAULT this returns exactly (6, 8), so the validated 6-state
+        path is unchanged.
+        """
+        n_organ = len(self._organ_network())
+        return n_organ, n_organ + 2
 
     def _genotype_scale(self, patient: Patient) -> float:
         """Map the drug's metabolizing enzyme activity score to a clearance scale."""

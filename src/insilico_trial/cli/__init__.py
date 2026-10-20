@@ -77,6 +77,7 @@ def _manifest(
     n_enrolled: int,
     versions: dict[str, str],
     cmdline: str,
+    organ_network: str = "DEFAULT",
 ) -> dict[str, Any]:
     """Build a provenance manifest."""
     config_hashes: dict[str, str] = {}
@@ -92,6 +93,7 @@ def _manifest(
         "cmdline": cmdline,
         "random_seeds": seeds,
         "n_enrolled": n_enrolled,
+        "organ_network": organ_network,
         "config_hashes": config_hashes,
         "versions": versions,
     }
@@ -121,6 +123,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
         args.patients, args.seed, args.output_dir,
     )
     engine.protocol.observation_period_days = float(args.duration_days)
+    # The organ network is a per-protocol selection
+    # (TrialEngine._organ_network). DEFAULT is the validated 6-state network
+    # and stays the default; STANDARD_14 is the wider 14-organ network.
+    engine.protocol.organ_network = args.organ_network
 
     rng = onp.random.default_rng(args.seed)
     t0 = datetime.now(UTC)
@@ -151,6 +157,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         n_enrolled=result.n_subjects,
         versions=_versions(),
         cmdline=" ".join(sys.argv),
+        organ_network=args.organ_network,
     )
 
     # Persist machine-readable result + manifest + human reports.
@@ -170,6 +177,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     print(f"InSilico Trial — {drug_name} / {result.protocol_name}")
     print(f"  run id        : {run_id}")
     print(f"  enrolled      : {result.n_subjects} patients, {result.n_cohorts} cohort(s)")
+    print(f"  organ network : {args.organ_network}")
     print(f"  doses         : {[c['dose_mg'] for c in result.cohort_summaries]} mg")
     print(f"  DLTs          : {[c['n_dlt'] for c in result.cohort_summaries]}")
     ps = result.population_summary
@@ -331,6 +339,15 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--patients", type=int, default=1000 if cmd == "demo" else 100)
         p.add_argument("--duration-days", type=int, default=7)
         p.add_argument("--seed", type=int, default=42)
+        p.add_argument(
+            "--organ-network",
+            choices=("DEFAULT", "STANDARD_14"),
+            default="DEFAULT",
+            help=(
+                "PBPK organ network: DEFAULT (validated 6-state, default) or "
+                "STANDARD_14 (14-organ network incl. perfused tissues)"
+            ),
+        )
         p.add_argument("--output-dir", default=DEFAULT_OUT)
         p.set_defaults(func=cmd_demo)
 
