@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test test-cov clean help demo demo-small demo-standard14 validate benchmark compare-organ-networks report check formal-gate mutation
+.PHONY: install lint typecheck test test-cov clean help demo demo-small demo-standard14 validate benchmark compare-organ-networks report check formal-gate formal-spec mutation
 
 help:
 	@echo "Available targets:"
@@ -12,6 +12,7 @@ help:
 	@echo "  demo-standard14 - Run the same 1000-patient SAD benchmark on the 14-organ network"
 	@echo "  validate     - Run benchmark harness (Warfarin + Moxifloxacin + Midazolam + Metformin)"
 	@echo "  formal-gate  - Run QED formal verification gate (portable)"
+	@echo "  formal-spec  - Check formal_specs/*.tex against the PBPK model and prove each theorem"
 	@echo "  mutation     - Mutation kill-rate gate over the baseline targets"
 	@echo "  benchmark    - Hardware acceleration comparison"
 	@echo "  compare-organ-networks - DEFAULT vs STANDARD_14 Cmax delta + throughput"
@@ -56,6 +57,9 @@ mutation:
 formal-gate:
 	python3 scripts/export_pbpk_to_qed.py --out /tmp/pbpk_lemmas.txt --parametric
 	python3 scripts/verify_formal_gate.py /tmp/pbpk_lemmas.txt --fin-n 6 --strict
+
+formal-spec:
+	python3 scripts/verify_formal_spec.py
 
 benchmark:
 	python -m insilico_trial.cli benchmark

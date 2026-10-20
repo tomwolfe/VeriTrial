@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -42,6 +43,12 @@ def _default_model_path() -> Path:
     # scripts/export_pbpk_to_qed.py -> repo root -> src/.../model.py
     here = Path(__file__).resolve().parent
     return here.parent / "src" / "insilico_trial" / "pbpk" / "model.py"
+
+
+def _default_spec_path() -> Path:
+    # scripts/export_pbpk_to_qed.py -> repo root -> formal_specs/...
+    here = Path(__file__).resolve().parent
+    return here.parent / "formal_specs" / "pbpk_mass_conservation.tex"
 
 
 def extract_state_variables(model_path: Path, organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK) -> list[str]:
@@ -193,6 +200,23 @@ def _network_for_fin(n: int) -> tuple[str, ...]:
     raise ValueError(f"unsupported organ network size: {n}")
 
 
+def _perfused_tissues(organ_network: tuple[str, ...]) -> list[tuple[int, str]]:
+    """Return ``(state index, tissue name)`` for every perfused compartment.
+
+    The tissue name is the short form the certificates use throughout
+    (``peripheral`` -> ``periph``), so the emitted lemmas, the formal-spec
+    fragment ids and the model-derived anchors all speak the same name.
+    """
+    from insilico_trial.pbpk.model import organ_indices
+
+    spec = organ_indices(organ_network)
+    return [
+        (index, "periph" if organ_network[index] == "peripheral"
+         else organ_network[index])
+        for index in spec["perfused"]
+    ]
+
+
 def _model_implements_saturable(model_path: Path) -> bool:
     """Does the model CONTAIN the saturable hepatic clearance path at all?
 
@@ -243,14 +267,10 @@ def _dynamic_lemmas(model_path: Path, fin_n: int, parametric: bool = True,
     not of coverage.
     """
     network = _network_for_fin(fin_n)
-    from insilico_trial.pbpk.model import organ_indices
 
-    spec = organ_indices(network)
-    perfused = [str(index) for index in spec["perfused"]]
-    names = {
-        str(index): ("periph" if network[index] == "peripheral" else network[index])
-        for index in spec["perfused"]
-    }
+    perfused_tissues = _perfused_tissues(network)
+    perfused = [str(index) for index, _ in perfused_tissues]
+    names = {str(index): tissue for index, tissue in perfused_tissues}
     lemmas = [
         f"Q_{names[index]} / (V_{names[index]} * Kp_{names[index]}) > 0"
         for index in perfused
@@ -313,6 +333,168 @@ def build_lemmas(model_path: Path, include_ode_lemmas: bool = False,
         lemmas.extend(extract_mass_dissipation_lemma(model_path))
         lemmas.extend(extract_system_matrix_lemmas(model_path))
     return lemmas
+
+
+# ---------------------------------------------------------------------------
+# Formal-spec anchors: the theorems stated in formal_specs/*.tex, re-derived
+# from the PBPK model source.
+#
+# The .tex spec is the human-facing statement of what is certified; the
+# anchors below are the SAME theorems computed from the model. The spec is
+# compared against them (validation/formal_spec.py), so a spec that drifts
+# away from the model -- or that drops or invents a theorem -- is a hard
+# failure instead of a decorative document.
+# ---------------------------------------------------------------------------
+
+# The fragment markers of the machine-checkable block inside the .tex spec.
+SPEC_BLOCK_BEGIN = "%% QED-BEGIN"
+SPEC_BLOCK_END = "%% QED-END"
+SPEC_FRAGMENT_PREFIX = "%% QED"
+
+# QED's parser expands implicit multiplication, so a two-letter rate such as
+# ``ka`` is read as ``k * a``. The spec and the parametric lemma use the
+# underscored spelling instead.
+_QED_SYMBOL_RENAMES = {"ka": "ka_rate"}
+
+# The gut compartment's ODE is ``dA_gut = -<rate> * <amount>``.
+_GUT_ABSORPTION_RE = re.compile(r"^-\s*([A-Za-z_]\w*)\s*\*\s*(A_\w+)$")
+
+# A perfusion-limited uptake term: ``Q[<idx>] * (C_p - C_<tissue> / Kp[<idx>])``.
+_PERFUSION_FLUX_RE = re.compile(
+    r"^Q\[\s*([A-Za-z_]\w*)\s*\]\s*\*\s*\(\s*C_p\s*-\s*C_(\w+)\s*/\s*"
+    r"Kp\[\s*([A-Za-z_]\w*)\s*\]\s*\)$"
+)
+
+
+def build_spec_anchors(model_path: Path, fin_n: int | None = None) -> dict[str, str]:
+    """Derive every formal-spec theorem from the PBPK model source.
+
+    The LaTeX spec in ``formal_specs/`` states the theorems in prose; these
+    anchors are the SAME theorems computed from the model, keyed by the
+    theorem id used in the ``%% QED <id> <statement>`` fragment block. The
+    spec is compared against them by ``validation.formal_spec``, so a spec
+    that drifts from the model -- or that drops or invents a theorem -- is a
+    hard failure rather than a decorative document.
+
+    Everything here is derived from the model source through the same AST
+    helpers the lemma export uses; no theorem text is hand-written.
+    """
+    if fin_n is not None and fin_n != len(DEFAULT_ORGAN_NETWORK):
+        raise ValueError(
+            "formal-spec anchors are derived from the default network's "
+            f"named perfusion fluxes; got fin_n={fin_n}"
+        )
+    network = _network_for_fin(len(DEFAULT_ORGAN_NETWORK))
+    tissues = [tissue for _, tissue in _perfused_tissues(network)]
+    # The gut loss and the perfusion fluxes are read in the form the source
+    # spells them: the anchors must state what the model says, not what an
+    # expansion of it says. (The parametric sum expands on its own, inside
+    # ``build_parametric_sum_lemma``.)
+    derivs = extract_symbolic_derivatives(model_path)
+    anchors: dict[str, str] = {}
+
+    # Lemma 1: the gut compartment is emptied by a first-order loss at a
+    # positive absorption rate.
+    gut = derivs.get("dA_gut")
+    gut_match = _GUT_ABSORPTION_RE.match(gut.strip()) if gut else None
+    if gut_match is None:
+        raise ValueError(
+            "cannot derive the gut-absorption theorem from the model: "
+            f"dA_gut is {gut!r}"
+        )
+    rate = _QED_SYMBOL_RENAMES.get(gut_match.group(1), gut_match.group(1))
+    amount = gut_match.group(2)
+    anchors["Lemma-1"] = f"{rate} * {amount} > 0"
+
+    # Lemma 2: the perfusion-limited uptake term distributes over the
+    # subtraction, one theorem per perfused tissue.
+    for tissue in tissues:
+        flux = derivs.get(f"dA_{tissue}_flux")
+        flux_match = _PERFUSION_FLUX_RE.match(flux.strip()) if flux else None
+        if flux_match is None:
+            raise ValueError(
+                f"cannot derive the perfusion uptake theorem for {tissue}: "
+                f"the model exposes {flux!r}"
+            )
+        flow_index, tissue_c, partition_index = flux_match.groups()
+        if flow_index != partition_index:
+            raise ValueError(
+                f"the {tissue} flux uses different flow and partition indices "
+                f"({flow_index} vs {partition_index})"
+            )
+        anchors[f"Lemma-2-{tissue}"] = (
+            f"Q_{tissue_c} * (C_p - C_{tissue_c} / Kp_{tissue_c}) = "
+            f"Q_{tissue_c} * C_p - Q_{tissue_c} * C_{tissue_c} / Kp_{tissue_c}"
+        )
+
+    # Lemma 3c: the parametric mass-conservation sum; Lemma 3: every nonzero
+    # Jacobian entry in one conservation identity.
+    anchors["Lemma-3c"] = build_parametric_sum_lemma(model_path)
+    anchors["Lemma-3-jacobian"] = build_column_sum_certificate(model_path, fin_n)
+
+    # Lemma 4: boundary inflow positivity, one theorem per perfused tissue.
+    boundary = extract_boundary_flow_lemmas(model_path, network)
+    if len(boundary) != len(tissues):
+        raise ValueError(
+            "the boundary-flow lemmas do not cover the perfused tissues: "
+            f"{len(boundary)} lemmas for {len(tissues)} tissues"
+        )
+    for tissue, lemma in zip(tissues, boundary):
+        anchors[f"Lemma-4-{tissue}"] = lemma
+
+    # Lemma 5: monotonic mass dissipation.
+    dissipation = extract_mass_dissipation_lemma(model_path)
+    if not dissipation:
+        raise ValueError("the model yields no mass-dissipation theorem")
+    anchors["Lemma-5"] = dissipation[0]
+
+    # Metzler off-diagonal positivity, one theorem per perfused tissue.
+    metzler = extract_metzler_lemmas(model_path)
+    if len(metzler) != len(tissues):
+        raise ValueError(
+            "the Metzler lemmas do not cover the perfused tissues: "
+            f"{len(metzler)} lemmas for {len(tissues)} tissues"
+        )
+    for tissue, lemma in zip(tissues, metzler):
+        anchors[f"Metzler-{tissue}"] = lemma
+
+    return anchors
+
+
+def render_spec_fragments(anchors: dict[str, str]) -> list[str]:
+    """Render the ``%% QED <id> <statement>`` fragment block of a spec file."""
+    return [
+        f"{SPEC_FRAGMENT_PREFIX} {theorem_id} {statement}"
+        for theorem_id, statement in anchors.items()
+    ]
+
+
+def sync_spec_file(spec_path: Path, anchors: dict[str, str]) -> bool:
+    """Rewrite the spec's QED fragment block from the model-derived anchors.
+
+    Returns True when the file changed. Fails closed when the block markers
+    are missing: the spec has to declare where its machine-checkable
+    statements live, otherwise the sync would have nowhere to write them.
+    """
+    text = spec_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        begin = lines.index(SPEC_BLOCK_BEGIN)
+        end = lines.index(SPEC_BLOCK_END)
+    except ValueError as e:
+        raise ValueError(
+            f"{spec_path} has no {SPEC_BLOCK_BEGIN} / {SPEC_BLOCK_END} block"
+        ) from e
+    if end < begin:
+        raise ValueError(
+            f"{spec_path}: {SPEC_BLOCK_END} precedes {SPEC_BLOCK_BEGIN}"
+        )
+    new_lines = lines[:begin + 1] + render_spec_fragments(anchors) + lines[end:]
+    new_text = "\n".join(new_lines) + "\n"
+    if new_text == text:
+        return False
+    spec_path.write_text(new_text, encoding="utf-8")
+    return True
 
 
 def check_mass_conservation(model_path: Path) -> bool:
@@ -1547,6 +1729,15 @@ def main(argv: list[str] | None = None) -> int:
              "the model does not implement.")
     parser.add_argument("--lean-out", type=Path, default=None,
                         help="Also emit verified Lean isomorphism file (QED/VeriTrialExport.lean)")
+    parser.add_argument("--spec", type=Path, default=None,
+                        help="Formal spec .tex holding the machine-checkable "
+                             "theorem fragments (default: "
+                             "formal_specs/pbpk_mass_conservation.tex)")
+    parser.add_argument("--spec-sync", action="store_true",
+                        help="Rewrite the spec's QED fragment block from the "
+                             "model-derived anchors. Run this after changing "
+                             "the PBPK ODE source, otherwise the formal gate "
+                             "fails closed on the resulting spec drift.")
     args = parser.parse_args(argv)
 
     # --symbolic is an alias for --ode-lemmas
@@ -1574,6 +1765,23 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"failed to export lemmas: {e}", file=sys.stderr)
         return 1
+
+    if args.spec_sync:
+        spec_path = args.spec or _default_spec_path()
+        if not spec_path.is_file():
+            print(f"formal spec not found: {spec_path}", file=sys.stderr)
+            return 1
+        try:
+            changed = sync_spec_file(spec_path, build_spec_anchors(model_path))
+        except Exception as e:
+            print(f"failed to sync the formal spec: {e}", file=sys.stderr)
+            return 1
+        # stdout stays clean: the enforced gate counts the exported theorems
+        # off the caller's stdout, so this notice goes to stderr.
+        print(
+            f"{'updated' if changed else 'unchanged'}: {spec_path}",
+            file=sys.stderr,
+        )
 
     text = "\n".join(lemmas) + "\n"
     if args.lean_out is not None:

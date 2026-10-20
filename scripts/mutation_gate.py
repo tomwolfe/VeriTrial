@@ -77,6 +77,9 @@ TARGETS: dict[str, tuple[str, list[str], float]] = {
             "src/insilico_trial/tests/test_pbpk.py",
             "src/insilico_trial/tests/test_pd.py",
             "src/insilico_trial/tests/test_formal_verification.py",
+            # The formal-spec anchors are derived by the same bridge, so the
+            # suite that checks them against the model belongs here.
+            "src/insilico_trial/tests/test_formal_spec.py",
             *_LEAN_TESTS,
             *_LEDGER_TEST,
         ],
