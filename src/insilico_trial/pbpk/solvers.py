@@ -12,6 +12,49 @@ SDIRK2 is a 2-stage, L-stable, A-stable method ideal for stiff ODE systems:
 The L-stability ensures damping of fast transients in stiff systems
 like the PBPK DILI QSP model.
 
+Stability function (measured, not asserted)
+-------------------------------------------
+For the tableau used here (``c = (gamma, 1)``, ``A = [[gamma, 0], [a21,
+gamma]]``, ``b = (1 - gamma, gamma)``) the stability function is
+
+    R(z) = (1 + (1 - 2*gamma)*z) / (1 - gamma*z)**2
+
+Measured by stepping the IMPLEMENTED ``_sdirk2_step`` (never by re-deriving
+the formula from the constants):
+
+    R(-0.1)   =  0.90480046   (exact exp(-0.1) = 0.90483742, rel err 4.1e-05)
+    R(-1)     =  0.35044026
+    R(-5)     = -0.17634830
+    R(-25)    = -0.13507333
+    R(-100)   = -0.04405871
+    R(-1000)  = -0.00478405
+    R(-1e+12) = -4.83e-12     -> 0 as z -> -infinity  (L-stability)
+
+``|R(z)| < 1`` for every ``z < 0`` (the supremum is 1 as ``z -> 0-``, where
+``R(0) = 1``), and on the stiff half ``z <= -1`` the maximum is
+``|R(-1)| = 0.35044026`` -- so the method never amplifies a decaying mode
+(A-stability).  These numbers are pinned by ``tests/test_solvers.py`` in
+``test_sdirk2_stability_function_does_not_amplify``,
+``test_sdirk2_is_l_stable_in_the_stiff_limit`` and
+``test_sdirk2_reproduces_exp_in_the_non_stiff_regime``.
+
+Why the coefficients were wrong, and how it was found
+----------------------------------------------------
+``b`` used to be ``(1 - 1/(2*gamma), 1/(2*gamma))``.  With the stage times
+``c = (gamma, 1)`` the second-order condition is ``b1*c1 + b2*c2 = 1/2``, and
+that pair gives **1.5** -- it was not a second-order method at all.  Its
+stability function AMPLIFIED the stiff modes it was supposed to damp
+(``|R(-1000)| = 11.57``) and converged to ``+11.66`` instead of to 0 as
+``z -> -infinity``, so it was not even A-stable, let alone L-stable; it also
+mis-reproduced ``exp(-0.1)`` by ~1%.
+
+The defect survived because the only stability test that existed
+(``test_implicit_stiff_linear_decay``) checked that ONE ``(lambda, dt)`` pair
+did not blow up.  That is far weaker than "|R(z)| <= 1 for every z < 0 and
+R(z) -> 0 as z -> -infinity", and the broken method happened to pass it.  The
+fix is therefore twofold: correct ``b``, and pin the stability FUNCTION itself,
+measured through the implemented step rather than through the constants.
+
 NOTES
 -----
 - The ODE function must match the signature: f(t, y, args) -> dy/dt
@@ -31,11 +74,29 @@ import jax.numpy as jnp
 
 # ---------------------------------------------------------------------------
 # SDIRK2 constants (L-stable 2nd-order SDIRK from Hairer-Wanner)
+#
+# The tableau is  c = (_GAMMA, 1),  A = [[_GAMMA, 0], [_A21, _GAMMA]].
+#
+# ``b`` must satisfy the second-order condition ``b1*c1 + b2*c2 = 1/2``.
+# With ``c2 = 1`` and ``c1 = _GAMMA`` the unique pair that does so is
+# ``b1 = 1 - _GAMMA``, ``b2 = _GAMMA`` (which also gives ``b1 + b2 = 1``, the
+# first-order condition).  These are the coefficients of the classical
+# 2-stage, 2nd-order, L-stable SDIRK with gamma = 1 - 1/sqrt(2), whose
+# stability function is
+#
+#     R(z) = (1 + (1 - 2*_GAMMA)*z) / (1 - _GAMMA*z)**2
+#
+# so R(z) -> 0 as z -> -infinity (L-stability) and R(z) reproduces exp(z) to
+# second order near the origin.  The previous pair ``(1 - 1/(2*_GAMMA),
+# 1/(2*_GAMMA))`` satisfied ``b1*c1 + b2*c2 = 1.5`` instead of 0.5, which made
+# the method neither A-stable nor L-stable: it AMPLIFIED stiff modes
+# (``|R(-1000)| = 11.57``) and had a first-order accuracy error of ~1% on
+# ``exp(-0.1)``.  See the stability-function test in ``tests/test_solvers.py``.
 # ---------------------------------------------------------------------------
 _GAMMA: float = 1.0 - 1.0 / math.sqrt(2.0)
 _A21: float = 1.0 - _GAMMA  # = 1/sqrt(2)
-_B1: float = 1.0 - 1.0 / (2.0 * _GAMMA)
-_B2: float = 1.0 / (2.0 * _GAMMA)
+_B1: float = 1.0 - _GAMMA
+_B2: float = _GAMMA
 
 
 def _sdirk2_step(

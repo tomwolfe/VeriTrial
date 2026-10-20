@@ -60,6 +60,43 @@ tool does **not** yet support.
   fallback if stiff systems such as high-dose saturation or non-linear
   clearance are introduced") has been met — the saturable hepatic clearance of
   G3 introduced exactly such a system.
+- **Correction (2026-10-20) — the L-stability claim was FALSE until now**:
+  the sentence "SDIRK2 is a *fixed-step* L-stable method" above was written
+  against a method that was **not** L-stable. The `b` coefficients in
+  `pbpk/solvers.py` were `(1 - 1/(2*gamma), 1/(2*gamma))`, which with the stage
+  times `c = (gamma, 1)` satisfy `b1*c1 + b2*c2 = 1.5` instead of the
+  second-order value `1/2` — i.e. it was not a second-order method. Its
+  stability function **amplified** the stiff modes it was supposed to damp
+  (`|R(-1000)| = 11.57`) and converged to `+11.66` rather than to 0 as
+  `z -> -infinity`, so it was not even A-stable; it also mis-reproduced
+  `exp(-0.1)` by ~1%.
+  - **How it was found**: the only stability test that existed
+    (`test_implicit_stiff_linear_decay`) asserted that ONE `(lambda, dt)` pair
+    did not blow up. That is much weaker than "|R(z)| <= 1 for every z < 0 and
+    R(z) -> 0 as z -> -infinity", and the broken method passed it. The defect
+    was only visible once the *stability function* itself was pinned.
+  - **Corrected coefficients**: `b1 = 1 - gamma` (= 1/sqrt(2) ~ 0.70710678),
+    `b2 = gamma` (= 1 - 1/sqrt(2) ~ 0.29289322). `_GAMMA`, `_A21`, the stage
+    times and the solve/update structure are unchanged.
+  - **Measured stability function** (measured by stepping the *implemented*
+    `_sdirk2_step`, not by re-deriving the formula from the constants):
+
+    | `z` | `R(z)` | note |
+    |---|---|---|
+    | `-0.1` | `0.90480046` | exact `exp(-0.1) = 0.90483742` (rel. err 4.1e-05) |
+    | `-1` | `0.35044026` | largest `abs(R)` on the stiff half `z <= -1` |
+    | `-5` | `-0.17634830` | |
+    | `-25` | `-0.13507333` | |
+    | `-100` | `-0.04405871` | |
+    | `-1000` | `-0.00478405` | damped |
+    | `-1e+12` | `-4.83e-12` | `-> 0` as `z -> -infinity` (L-stability) |
+
+  - **Pinned by**: `test_solvers.py::test_sdirk2_stability_function_does_not_amplify`,
+    `::test_sdirk2_is_l_stable_in_the_stiff_limit` and
+    `::test_sdirk2_reproduces_exp_in_the_non_stiff_regime`. These fail against
+    the old coefficients (`|R(-5)| = 3.94 > 1`, `|R(-1000)| = 11.57`, and
+    `R(-0.1)` off by 1.04e-02 relative) and pass after the fix. The claim in
+    this section is now true; it was not before.
 
 ### G3. PBPK structural simplification (CLOSED for liver kinetics; N-scaling partial)
 - **Status (closed for liver metabolism)**: `pbpk/model.py` no longer uses a

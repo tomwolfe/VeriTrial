@@ -7,8 +7,10 @@ solver adds over the existing fixed-step RK4 solver.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -132,6 +134,92 @@ def test_implicit_stiff_linear_decay():
     assert float(jnp.min(ys[:, 0])) >= -1e-6, "Solution went negative"
     # Final value must be less than initial (decaying)
     assert float(ys[-1, 0]) < float(ys[0, 0]) * 0.5, "Solution not decaying"
+
+
+# ---------------------------------------------------------------------------
+# Test 2b: the STABILITY FUNCTION of the implemented step
+# ---------------------------------------------------------------------------
+
+
+def _sdirk2_amplification(z: float) -> float:
+    """Amplification factor of the implemented SDIRK2 step on ``y' = z*y``.
+
+    The measurement goes through ``_sdirk2_step`` itself -- the same call
+    ``solve_implicit`` makes -- and the Jacobian is obtained with ``jax.jacfwd``
+    exactly as the production loop does it.  A test that re-derived ``R(z)``
+    from the tableau constants would prove only the constants, not the code
+    that uses them, which is exactly the blind spot this test closes.
+
+    ``dt = 1`` makes the stability argument ``z = lambda*dt`` equal to ``z``
+    itself, so the numbers below are directly comparable with the textbook
+    stability function.
+    """
+    from insilico_trial.pbpk.solvers import _GAMMA, _sdirk2_step
+
+    def f(t: float, y: jnp.ndarray, args: Any) -> jnp.ndarray:
+        return jnp.array([z * y[0]])
+
+    y0 = jnp.array([1.0])
+    dt = 1.0
+    J = jax.jacfwd(lambda yy: f(0.0, yy, None))(y0)
+    y_new = _sdirk2_step(f, 0.0, y0, dt, None, J, _GAMMA * dt)
+    return float(y_new[0])
+
+
+@pytest.mark.parametrize("z", [-1.0, -5.0, -25.0, -100.0, -1000.0])
+def test_sdirk2_stability_function_does_not_amplify(z: float) -> None:
+    """``|R(z)| <= 1`` for every ``z < 0``: the step must not amplify.
+
+    "The trajectory did not blow up at one ``(lambda, dt)``" is a far weaker
+    statement than "the amplification factor never exceeds one".  The defective
+    coefficients amplified a decaying mode by ``|R(-5)| = 3.94`` while a single
+    sampled ``(lambda, dt)`` pair still looked perfectly healthy, which is how
+    the defect survived the original test suite.
+    """
+    r = _sdirk2_amplification(z)
+    assert abs(r) <= 1.0, (
+        f"R({z}) = {r!r} amplifies a decaying mode: the step must not "
+        f"amplify for any z < 0")
+
+
+def test_sdirk2_is_l_stable_in_the_stiff_limit() -> None:
+    """L-stability: ``R(z) -> 0`` as ``z -> -infinity``.
+
+    This is the property that separates L-stability from mere A-stability: an
+    A-stable-but-not-L-stable method keeps ``|R(z)|`` away from zero in the
+    stiff limit and therefore rings on fast transients instead of damping
+    them.  The defective coefficients amplified instead of damping
+    (``|R(-1000)| = 11.6``), so this is the assertion that would have caught
+    the defect.
+    """
+    r_1000 = _sdirk2_amplification(-1000.0)
+    r_huge = _sdirk2_amplification(-1e12)
+
+    assert abs(r_1000) < 0.05, (
+        f"|R(-1000)| = {abs(r_1000)!r} is not damped: the stiff limit must "
+        f"decay toward zero")
+    assert abs(r_huge) < 1e-6, (
+        f"|R(-1e12)| = {abs(r_huge)!r} is not damped: L-stability requires "
+        f"R(z) -> 0 as z -> -infinity")
+
+
+def test_sdirk2_reproduces_exp_in_the_non_stiff_regime() -> None:
+    """Second-order accuracy: ``R(-0.1)`` must match ``exp(-0.1)``.
+
+    The order condition for this tableau is ``b1*c1 + b2*c2 = 1/2`` with
+    ``c = (gamma, 1)``.  The defective ``b`` satisfied ``b1*c1 + b2*c2 = 1.5``,
+    which is not merely a loss of accuracy but a change of the stability
+    function itself, so the non-stiff end has to be pinned too.
+    """
+    r = _sdirk2_amplification(-0.1)
+    exact = math.exp(-0.1)
+    rel_err = abs(r - exact) / exact
+    assert rel_err < 1e-3, (
+        f"R(-0.1) = {r!r} differs from exp(-0.1) = {exact!r} by a relative "
+        f"{rel_err:.3e}; the method must be second order")
+
+    # Consistency anchor: a zero-length step must leave the state untouched.
+    assert _sdirk2_amplification(0.0) == 1.0, "R(0) must be exactly 1"
 
 
 # ---------------------------------------------------------------------------
@@ -307,16 +395,26 @@ def _unpoisoned_final_gain(
 def test_blowup_is_poisoned_even_though_it_is_not_a_positive_gain() -> None:
     """The non-finite arm of the disjunction is not redundant with the gain test.
 
-    ``-(y**2)`` from a state of -1e150 overflows float64 on the first step, so
-    the monitored sum is not a number at all and the gain is NaN -- and NaN
-    compares false against EVERY threshold, including ``1e-6 * dose_scale``.  A
-    monitor that tested the gain alone would pass this trajectory through; only
-    ``~isfinite(final_gain)`` catches it.
+    ``-(y**2)`` from a state of -1e155 overflows float64 on the very first
+    stage evaluation -- ``(1e155)**2 = 1e310`` exceeds the float64 maximum
+    ``1.798e308`` -- so the monitored sum is not a number at all and the gain
+    is NaN -- and NaN compares false against EVERY threshold, including
+    ``1e-6 * dose_scale``.  A monitor that tested the gain alone would pass
+    this trajectory through; only ``~isfinite(final_gain)`` catches it.
+
+    The magnitude is calibrated against the float64 OVERFLOW THRESHOLD rather
+    than against the old coefficients.  The corrected L-stable method *damps*
+    what used to grow, so the old -1e150 no longer overflows at all: it decays
+    to a finite value and the gain comes back as a finite ``1e+150``, which is
+    a gain and therefore trips the *other* arm of the disjunction.  Starting
+    above ``sqrt(float64_max)`` (~1.34e154) makes the square overflow on the
+    first stage no matter how the step damps, so the fixture keeps exercising
+    the non-finite arm it was written for.
     """
     def _blowup(t: float, y: jnp.ndarray, args: Any) -> jnp.ndarray:
         return jnp.array([0.0, -(y[1] ** 2)])
 
-    y0 = jnp.array([10.0, -1e150])
+    y0 = jnp.array([10.0, -1e155])
     dt = 0.01
 
     gain = _unpoisoned_final_gain(_blowup, y0, t_end=2.0, dt=dt)
