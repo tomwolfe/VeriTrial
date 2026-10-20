@@ -49,8 +49,12 @@ tool does **not** yet support.
   **SDIRK2**, a 2-stage L-stable 2nd-order SDIRK (Hairer–Wanner constants), with
   an M-matrix stage. Kvaerno was tried earlier (accurate but ~4× slower) and
   rejected; SDIRK2 replaces it as the implicit fallback.
-- **Remaining gap**: SDIRK2 is a *fixed-step* L-stable method; there is still no
-  adaptive step-size controller on the implicit path.
+- **Remaining gap**: the *default* implicit path is still **fixed-step**; the
+  validated 6-state model runs `solve_implicit_batch` and is not adaptive.
+  An **opt-in** adaptive controller now exists on the implicit path
+  (`solve_implicit_adaptive`), but **no production call site uses it** — see
+  the subsection below for what it does and, more importantly, what it does
+  not do.
 - **Evidence**: `test_solvers.py` pins SDIRK2 against the adaptive reference
   solution and `test_solver_equivalence_warfarin` pins the two paths against
   each other. The de-clamping property is pinned separately in
@@ -97,6 +101,92 @@ tool does **not** yet support.
     the old coefficients (`|R(-5)| = 3.94 > 1`, `|R(-1000)| = 11.57`, and
     `R(-0.1)` off by 1.04e-02 relative) and pass after the fix. The claim in
     this section is now true; it was not before.
+
+#### Adaptive controller on the implicit path (OPT-IN, added 2026-10-20)
+
+`pbpk/solvers.py` also provides `solve_implicit_adaptive` and
+`solve_implicit_adaptive_batch`. `solve_implicit` / `solve_implicit_batch`
+are **unchanged** — same signature, same default `dt`, same outputs, same
+poisoning behaviour — and `trial/engine.py` still calls
+`solve_implicit_batch`, so the validated 6-state model and
+`DEFAULT_ORGAN_NETWORK` are untouched.
+
+- **What it does**: step doubling on the *same* L-stable base step
+  (`_sdirk2_step`). Each accepted step is the two-half-step composite; the
+  error estimate is `y_two - y_full`, normalised by `1/(2^p - 1) = 1/3`; the
+  controller is the elementary rule `h <- h * clip(0.9 * err^(-1/3), 0.1, 5)`
+  (no PI term, no step history). The variable step count is expressed with
+  `jax.lax.while_loop`, because a fixed-length `jax.lax.scan` cannot express
+  one. The accepted trajectory is buffered in an `(max_steps+1, n_state)`
+  array and interpolated onto `t_eval` with a `searchsorted` bracket search
+  (`jnp.interp` cannot be used: the buffer tail is not a valid grid).
+  Pure JAX primitives only — no diffrax/lineax/scipy.
+- **How it preserves L-stability**: it *inherits* it from the base step
+  rather than re-deriving it. The accepted step's stability function is
+  `R(z/2)**2`, and the error estimate is a **difference of two L-stable
+  quantities**, so it vanishes as `z -> -infinity` — which is exactly what
+  stops the controller from having to resolve the stiff mode. Measured
+  through the implemented code: `|Rc(-1)| = 0.36392680`,
+  `|Rc(-1000)| = 8.99e-05`, `|Rc(-1e12)| = 9.33e-23`; the error estimate is
+  `5.05e-02` at `z = -100`, `4.87e-03` at `z = -1000` and `4.83e-06` at
+  `z = -1e6`.
+  - **Why not an embedded pair**: a 2-stage L-stable *embedded* pair does not
+    exist. For a shared-stage pair, `Rhat(z) -> 0` forces the embedded
+    weights to coincide with the main weights, so any genuine lower-order
+    partner has `Rhat(z) -> const != 0`; its error estimate would not vanish
+    in the stiff limit, and the controller would shrink the step until the
+    stiff mode was resolved — silently destroying the very property that
+    makes SDIRK2 an implicit method. That is why the controller is step
+    doubling and **not** step rejection.
+- **What it is pinned against** (`tests/test_solvers.py`):
+  `test_adaptive_matches_diffrax_warfarin_pk` (adaptive SDIRK2 vs
+  `diffrax.Tsit5` on the same Warfarin PK problem; measured max relative
+  error `4.96e-05` against a limit of `1e-02`),
+  `test_adaptive_agrees_with_the_fixed_step_path`,
+  `test_adaptive_composite_never_amplifies` /
+  `test_adaptive_step_doubling_is_l_stable_in_the_stiff_limit` /
+  `test_adaptive_error_estimate_vanishes_in_the_stiff_limit` /
+  `test_adaptive_stiff_decay_is_damped_with_large_steps`,
+  `test_adaptive_controller_actually_varies_the_step_size`,
+  `test_adaptive_batch_matches_the_single_patient_path`,
+  `test_adaptive_batch_uses_a_different_step_count_per_patient`,
+  `test_solve_implicit_entry_points_are_unchanged`,
+  `test_no_production_call_site_uses_the_adaptive_path`, and the
+  fail-closed guards `test_adaptive_mass_gain_poisons_the_entire_trajectory`,
+  `test_adaptive_blowup_is_poisoned`,
+  `test_adaptive_conserving_ode_is_not_poisoned`,
+  `test_adaptive_poison_threshold_is_relative_to_the_dose` and
+  `test_adaptive_step_cap_poisons_the_trajectory`. The L-stability pins
+  **fail** if the base `b` coefficients are reverted to the defective pair
+  (measured), so the adaptive path cannot silently lose the property it
+  inherits from the base step.
+- **What it does NOT do**:
+  - It is **not used by any production call site**. The validated 6-state
+    model still runs the fixed-step path; switching it over would be a
+    re-validation, not a drop-in.
+  - It is **vmap-able** (`solve_implicit_adaptive_batch`, bit-identical to
+    integrating the patients one at a time) and **jit-able**, but with the
+    *same* constraint as `solve_implicit`: `t_eval` must be concrete (a numpy
+    array or a non-traced jnp array), because the integration span
+    determines the static step budget. A traced `t_eval` raises
+    `ConcretizationTypeError` on **both** paths.
+  - It has a **step-count cap**. The default is
+    `max(1024, 8 * ceil(span / dt))` attempts; exhausting it poisons the
+    trajectory (fail-closed) rather than returning a partial one.
+  - It is **not free**: each attempt costs 2 `jacfwd` calls and 6 linear
+    solves (3 steps x 2 solves) against the fixed path's 1 and 2, and it
+    allocates an
+    `(max_steps+1, n_state)` buffer *per patient* (~1.8 MB per patient for
+    the 48 h Warfarin case at the default cap). That memory cost is the
+    main reason it is not on the production path.
+  - The controller is **elementary**: no PI term, no step history, no
+    extrapolation.
+  - The adaptive path introduces **no clamp** and **no mass-conserving
+    correction**. The trajectory-level mass monitor is the same guard with
+    the same `1e-6 * dose_scale` threshold as the fixed path, and it is
+    joined by two adaptive-specific fail-closed conditions (exhausted step
+    budget, or a step floor the controller cannot meet) that poison the
+    trajectory rather than return a truncated one.
 
 ### G3. PBPK structural simplification (CLOSED for liver kinetics; N-scaling partial)
 - **Status (closed for liver metabolism)**: `pbpk/model.py` no longer uses a
