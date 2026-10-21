@@ -35,6 +35,13 @@ not ``cpu`` (i.e. when jax-metal is installed). Consequences, stated plainly:
   observable, and the refusal branch is unverified.
 * Only a **darwin runner with jax-metal installed** exercises the refusal.
 
+The *guard* is a different matter from the *policy* it guards, and the two must
+not be conflated. The premise pins below are platform-independent: they run on
+Linux too, so "a missing precondition produces a skip that says which one" is
+verified everywhere. The policy itself is **not** verified on Linux, because on
+a non-darwin platform the package does not force CPU and does not refuse
+anything -- there is nothing there to verify.
+
 A skip therefore always names the precondition it is missing; "skipped" with no
 reason is the failure mode this module exists to prevent. There is no GitHub
 Actions workflow in this repo yet (see ``docs/gap_closure_plan.md``), so any
@@ -227,6 +234,35 @@ def test_premise_check_skips_with_a_reason_when_default_backend_is_cpu() -> None
         with pytest.raises(pytest.skip.Exception) as excinfo:
             _require_unrecoverable_backend_premise()
         assert expected in str(excinfo.value)
+
+
+def test_darwin_refusal_test_skips_with_a_reason_when_default_backend_is_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The darwin-only test itself must skip, with a reason, on a cpu default.
+
+    This pins the *wiring*, not just the helper. The helper-level test above
+    would still pass if the call to ``_require_unrecoverable_backend_premise()``
+    were deleted from the darwin test -- and then, on a darwin box without
+    jax-metal, that test would measure the wrong branch and fail with a
+    misleading assertion instead of skipping with the missing precondition.
+    With the guard gone, nothing in this file would notice.
+
+    Both the platform and the probed backend are patched, so this pin is
+    meaningful on any runner -- including a Linux CI runner where the darwin
+    test itself is always skipped.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys.modules[__name__], "_default_backend", lambda: "cpu")
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        test_natural_order_refuses_unrecoverable_backend_on_darwin()
+
+    message = str(excinfo.value)
+    assert message == _premise_skip_reason("cpu")
+    assert "cpu" in message
+    assert "jax-metal" in message
+    assert "refuse" in message
 
 
 def test_allow_metal_does_not_trigger_the_refusal() -> None:
