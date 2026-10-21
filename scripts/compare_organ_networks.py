@@ -8,7 +8,10 @@ network, and reports:
 * per-cohort and overall Cmax on both networks, and the relative delta;
 * the same delta over the whole population at every dose level (a sweep, so
   the benchmark delta is not a property of the enrolled subset alone);
-* the solver throughput on each network, because the wider model is not free.
+* the solver throughput on each network, because the wider model is not free;
+* the end-to-end benchmark wall clock, split into the PK solve and the
+  Bayesian calibration, because the solver cost and the benchmark cost are
+  *not* the same number (see ``validation/organ_network.py``).
 
 Usage:
     python3 scripts/compare_organ_networks.py --patients 1000 --duration-days 7
@@ -149,7 +152,25 @@ def main(argv: list[str] | None = None) -> int:
               f"({stats['n_states']} organ states)")
     default_tp = throughput["DEFAULT"]["patients_per_second"]
     wide_tp = throughput["STANDARD_14"]["patients_per_second"]
-    print(f"  STANDARD_14 is {default_tp / wide_tp:.2f}x slower than DEFAULT")
+    print(f"  STANDARD_14 solver is {default_tp / wide_tp:.2f}x slower than DEFAULT")
+    print()
+    print("End-to-end benchmark cost (the full SAD run that produced the Cmax above):")
+    cost = comparison["cost"]
+    for name in ("DEFAULT", "STANDARD_14"):
+        total = comparison["elapsed_seconds"][name]
+        print(f"  {name:>12}: total {total:7.2f} s  "
+              f"PK solver {cost['pk_solver_seconds'][name]:6.3f} s "
+              f"({cost['pk_solver_share'][name]:5.1%})  "
+              f"Bayesian calibration {cost['calibration_seconds'][name]:6.2f} s "
+              f"({cost['calibration_share'][name]:5.1%})")
+    print("  -> the wider network's cost is a SOLVER cost: at the benchmark's "
+          "40-subject")
+    print("     enrollment the solver is a small fraction of the run, so the "
+          "end-to-end")
+    print("     wall clock is dominated by the (stochastic) Bayesian "
+          "calibration and does")
+    print("     not resolve the network cost -- the solver micro-benchmark "
+          "above does.")
     print()
     print(f"wrote {out_path}")
     return 0

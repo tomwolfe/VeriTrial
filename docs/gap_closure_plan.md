@@ -217,15 +217,18 @@ enrolls **40 of the 1000** subjects (4 × 10) — the population is generated at
 full size and the run is not a reduced stand-in. Both networks were run end to
 end through it (4 cohorts, 4 dose levels, 0 DLTs each) and both completed.
 
-**Measured Cmax delta (STANDARD_14 vs DEFAULT)** — median Cmax per cohort:
+**Measured Cmax delta (STANDARD_14 vs DEFAULT)** — median Cmax per cohort,
+with the **mean** Cmax delta alongside it. Both statistics are asserted
+against the same ±25 % band (the median alone would not see a regression
+that moved the population mean out of band while the median stayed put):
 
-| cohort | dose (mg) | DEFAULT Cmax (mg/L) | STANDARD_14 Cmax (mg/L) | relative delta |
-|---|---|---|---|---|
-| 1 | 2 | 0.142630 | 0.109973 | −22.90 % |
-| 2 | 5 | 0.400289 | 0.303012 | −24.30 % |
-| 3 | 10 | 0.754402 | 0.572493 | −24.11 % |
-| 4 | 20 | 1.418413 | 1.081046 | −23.78 % |
-| **overall (pooled median)** | – | **0.511410** | **0.389250** | **−23.89 %** |
+| cohort | dose (mg) | DEFAULT Cmax median (mg/L) | STANDARD_14 Cmax median (mg/L) | delta (median) | delta (mean) |
+|---|---|---|---|---|---|
+| 1 | 2 | 0.142630 | 0.109973 | −22.90 % | −23.77 % |
+| 2 | 5 | 0.400289 | 0.303012 | −24.30 % | −24.76 % |
+| 3 | 10 | 0.754402 | 0.572493 | −24.11 % | −24.33 % |
+| 4 | 20 | 1.418413 | 1.081046 | −23.78 % | −23.66 % |
+| **overall (pooled)** | – | **0.511410** | **0.389250** | **−23.89 %** | **−24.01 %** |
 
 A whole-population sweep (every one of the 1000 subjects, nominal dose, all
 four dose levels) gives **−23.83 %** at 2, 5, 10 and 20 mg: the delta is
@@ -252,8 +255,10 @@ two external references, *not* on the measured number:
 **What the measurement does *not* say** (disclosed rather than hidden behind
 the bound):
 
-- The margin is thin: −23.89 % is inside the band by **1.1 percentage
-  points**.
+- The margin is thin: −23.89 % (median) is inside the band by **1.1 percentage
+  points**, and the *mean* delta on the 5 mg cohort (−24.76 %) is inside it by
+  only **0.24 percentage points**. The band is nearly exhausted, not
+  comfortably cleared.
 - The delta is subject-dependent. On the 70 kg reference adult the same
   comparison gives **−25.33 %** (Cmax 0.984631 → 0.735369 mg/L), i.e.
   marginally *outside* the ±25 % band. The wide network reproduces peak
@@ -288,24 +293,51 @@ uses), 1000 patients, 7-day hourly grid, `dt` at the QED Metzler bound
 
 | network | organ states | batch time | throughput |
 |---|---|---|---|
-| DEFAULT | 6 (+3 QSP) | 1518 ms | 659 patients/s |
-| STANDARD_14 | 14 (+3 QSP) | 2824 ms | 354 patients/s |
+| DEFAULT | 6 (+3 QSP) | 1522 ms | 657 patients/s |
+| STANDARD_14 | 14 (+3 QSP) | 2817 ms | 355 patients/s |
 
-**STANDARD_14 is 1.86× slower than DEFAULT.** (This is the unified 9/17-state
-solver the engine calls; the 6-state-only solver quoted in §G1 is a
-different, faster path and is not affected by the network choice.) The wider
-model buys a distributional refinement it is not calibrated for, at nearly
-double the solver cost; that is the price of the wider network, and it sits
-next to the accuracy delta above because both are properties of the same
-choice.
+**The STANDARD_14 *solver* is 1.85× slower than the DEFAULT solver.** (This is
+the unified 9/17-state solver the engine calls; the 6-state-only solver
+quoted in §G1 is a different, faster path and is not affected by the network
+choice.) The wider model buys a distributional refinement it is not
+calibrated for, at nearly double the solver cost.
+
+**But the benchmark as a whole is *not* 1.85× slower** — and the difference
+between those two statements is the whole cost story. The end-to-end
+40-subject SAD run (the same run that produced the Cmax table above, measured
+in the same session) was instrumented to split its wall clock into the PK
+solve and the per-cohort Bayesian posterior calibration:
+
+| network | end-to-end run | PK solve | share | Bayesian calibration | share |
+|---|---|---|---|---|---|
+| DEFAULT | 11.77 s | 0.737 s | 6.3 % | 4.72 s | 40.1 % |
+| STANDARD_14 | 10.79 s | 1.776 s | 16.5 % | 2.70 s | 25.0 % |
+
+The wider network's solve is **2.4×** the narrower one's (0.737 s → 1.776 s),
+but at this benchmark's enrollment the solve is a small fraction of the run,
+and the run's wall clock is dominated by the per-cohort Bayesian calibration —
+a stochastic MCMC whose cost depends on the data, not on the organ network.
+In the measured run STANDARD_14 came out *faster* end to end (10.79 s vs
+11.77 s) purely because its calibration happened to be quicker. The honest
+statement is therefore: **the wider model costs ≈1.85× per solve, and at the
+40-subject enrollment of this benchmark that cost is not visible in the total
+wall clock.** The solver's *share* of the run (6.3 % → 16.5 %) is the number
+that shows it; the total wall clock is not, because a stochastic MCMC's
+run-to-run variation swamps a 1-second difference. Both numbers are written
+to `output/benchmark/organ_network_comparison.json` under
+`cmax_comparison.cost` and printed by `make compare-organ-networks`.
 
 **Pinned by** `tests/test_organ_network_cmax.py`:
 
 - `test_default_and_standard14_cmax_agree_within_the_physiological_tolerance`
-  — the benchmark above, per cohort and overall, against the ±25 % band; it
-  also asserts the two runs are *paired* (same subjects, same dose per
-  cohort), so the delta is a model difference and not a difference between two
-  different trials.
+  — the benchmark above, per cohort and overall, against the ±25 % band, for
+  the median **and** the mean Cmax; it also asserts the two runs are
+  *paired* (same subjects, same dose per cohort), so the delta is a model
+  difference and not a difference between two different trials.
+- `test_the_wide_network_costs_more_solver_time_but_not_the_whole_benchmark`
+  — the wider network's PK solve is measurably more expensive, and the solve
+  is a minority of the end-to-end run on *both* networks, so the "1.85×"
+  claim can never be read as a benchmark-wide slowdown factor.
 - `test_the_cmax_delta_is_a_property_of_the_model_not_of_the_enrolled_subset`
   — the whole-population sweep, including that the wide network is lower at
   *every* dose level (the delta is systematic, not two networks disagreeing in

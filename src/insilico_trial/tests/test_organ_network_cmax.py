@@ -10,11 +10,16 @@ population (``configs/population_default.yaml``, seed 42), the same protocol
 
 MEASURED relative Cmax delta (STANDARD_14 vs DEFAULT), benchmark population:
 
-    cohort 1 (2 mg)   -22.90 %
-    cohort 2 (5 mg)   -24.30 %
-    cohort 3 (10 mg)  -24.11 %
-    cohort 4 (20 mg)  -23.78 %
-    overall (pooled)  -23.89 %
+    cohort 1 (2 mg)   -22.90 % (median)   -23.77 % (mean)
+    cohort 2 (5 mg)   -24.30 % (median)   -24.76 % (mean)
+    cohort 3 (10 mg)  -24.11 % (median)   -24.33 % (mean)
+    cohort 4 (20 mg)  -23.78 % (median)   -23.66 % (mean)
+    overall (pooled)  -23.89 % (median)   -24.01 % (mean)
+
+Both statistics are asserted against the same +-25 % band: the median is not
+the only summary that has to stay inside it, because a regression that moves
+the *mean* out of band while the median stays put would be a real change in
+the population's peak exposure that the median assertion would not see.
 
 MEASURED relative Cmax delta over the WHOLE 1000-subject population (every
 subject, nominal dose, so the benchmark's 40 enrolled subjects cannot be the
@@ -35,7 +40,9 @@ not on the measured number:
 
 WHAT THE MEASUREMENT DOES *NOT* SAY (disclosed, not hidden)
 ------------------------------------------------------------
-* The margin is thin: -23.89 % is inside the band by 1.1 percentage points.
+* The margin is thin: -23.89 % is inside the band by 1.1 percentage points,
+  and the *mean* delta (-24.76 % on the 5 mg cohort) is inside it by only
+  0.24 percentage points.
 * The delta is subject-dependent. On the 70 kg reference adult the same
   comparison gives -25.33 % (Cmax 0.984631 -> 0.735369 mg/L), i.e. marginally
   *outside* the band. The wide network therefore reproduces peak exposure
@@ -56,6 +63,8 @@ WHAT THE MEASUREMENT DOES *NOT* SAY (disclosed, not hidden)
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import numpy as onp
 import pytest
@@ -118,12 +127,37 @@ def _population(n_subjects: int) -> Population:
         name="population", n_subjects=len(patients), patients=patients)
 
 
-def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance() -> None:
+@pytest.fixture(scope="module")
+def benchmark_comparison() -> dict[str, Any]:
+    """The real benchmark, run once and shared by the assertions on it.
+
+    This is the engine's own ``run_sad_mad`` on the 1000-subject population --
+    the same call the ``demo`` CLI makes, on both organ networks. It is
+    module-scoped so that the agreement test and the cost test observe the
+    *same* run instead of two independent ones: the comparison is a paired
+    measurement, and re-running it would only produce the same numbers again
+    at the price of another 25 s of wall clock.
+    """
+    population, drug, protocol = _benchmark_inputs()
+    return compare_cmax_across_networks(
+        protocol=protocol, drug=drug, population=population, seed=42)
+
+
+def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance(
+    benchmark_comparison: dict[str, Any],
+) -> None:
     """The two organ networks agree on Cmax to within the bioequivalence band.
 
-    MEASURED delta: -22.90 %, -24.30 %, -24.11 %, -23.78 % per cohort and
-    -23.89 % overall, against a tolerance of +-25 % (see the module docstring
-    for the physiological justification of that band).
+    MEASURED delta (median): -22.90 %, -24.30 %, -24.11 %, -23.78 % per cohort
+    and -23.89 % overall, against a tolerance of +-25 % (see the module
+    docstring for the physiological justification of that band).
+
+    MEASURED delta (mean): -23.77 %, -24.76 %, -24.33 %, -23.66 % per cohort
+    and -24.01 % overall -- also asserted against the same band. The mean is
+    checked as well as the median because the mean is what a regulator reads
+    off a population estimate, and because a mean that drifts out of band
+    while the median stays inside it is a real change in peak exposure that a
+    median-only assertion would not catch.
 
     The benchmark is the real one: a 1000-subject population of which the
     protocol enrolls 40 (4 cohorts x 10), run through the engine's own
@@ -131,9 +165,7 @@ def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance() 
     dose per cohort) so the delta is a model difference and not a difference
     between two different trials.
     """
-    population, drug, protocol = _benchmark_inputs()
-    comparison = compare_cmax_across_networks(
-        protocol=protocol, drug=drug, population=population, seed=42)
+    comparison = benchmark_comparison
 
     assert comparison["n_subjects_in_population"] == N_POPULATION
     assert comparison["n_enrolled"] == N_ENROLLED
@@ -144,17 +176,60 @@ def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance() 
     for cohort in comparison["cohorts"]:
         delta = abs(cohort["relative_delta_cmax_median"])
         assert delta <= CMAX_AGREEMENT_TOLERANCE, (
-            f"cohort at {cohort['dose_mg']} mg: STANDARD_14 Cmax differs from "
-            f"DEFAULT by {delta:.2%}, outside the {CMAX_AGREEMENT_TOLERANCE:.0%} "
-            f"bioequivalence band "
+            f"cohort at {cohort['dose_mg']} mg: STANDARD_14 median Cmax "
+            f"differs from DEFAULT by {delta:.2%}, outside the "
+            f"{CMAX_AGREEMENT_TOLERANCE:.0%} bioequivalence band "
             f"({cohort['reference_cmax_median']:.6g} vs "
             f"{cohort['candidate_cmax_median']:.6g} mg/L)")
+        mean_delta = abs(cohort["relative_delta_cmax_mean"])
+        assert mean_delta <= CMAX_AGREEMENT_TOLERANCE, (
+            f"cohort at {cohort['dose_mg']} mg: STANDARD_14 mean Cmax differs "
+            f"from DEFAULT by {mean_delta:.2%}, outside the "
+            f"{CMAX_AGREEMENT_TOLERANCE:.0%} bioequivalence band")
 
     overall = comparison["overall"]
     assert abs(overall["relative_delta_cmax_median"]) <= CMAX_AGREEMENT_TOLERANCE, (
-        f"overall Cmax differs by "
+        f"overall median Cmax differs by "
         f"{overall['relative_delta_cmax_median']:.2%}, outside the "
         f"{CMAX_AGREEMENT_TOLERANCE:.0%} band")
+    overall_mean_delta = abs(overall["relative_delta_cmax_mean"])
+    assert overall_mean_delta <= CMAX_AGREEMENT_TOLERANCE, (
+        f"overall mean Cmax differs by {overall['relative_delta_cmax_mean']:.2%}"
+        f", outside the {CMAX_AGREEMENT_TOLERANCE:.0%} band")
+
+
+def test_the_wide_network_costs_more_solver_time_but_not_the_whole_benchmark(
+    benchmark_comparison: dict[str, Any],
+) -> None:
+    """The wider network's cost is a *solver* cost, and the docs must say so.
+
+    MEASURED on this machine (1000-subject population, 40 enrolled, 7 days):
+    the PK solve takes ~0.8 s on DEFAULT and ~1.8 s on STANDARD_14 -- the
+    17-state ODE is ~2.3x the work of the 9-state one. But the end-to-end
+    benchmark run is dominated by the per-cohort Bayesian calibration, so the
+    solver is a small fraction of the total wall clock on *both* networks.
+
+    That is why the gap-closure plan quotes the solver micro-benchmark
+    (~1.85x) and NOT a benchmark-wide slowdown factor. At the benchmark's
+    40-subject enrollment the solver is not the dominant term, so quoting
+    the micro-benchmark as if it were the run's cost would overstate the
+    price of the wider model -- and quoting only the wall clock would hide
+    the solver cost altogether.
+    """
+    cost = benchmark_comparison["cost"]
+    solver = cost["pk_solver_seconds"]
+    share = cost["pk_solver_share"]
+
+    assert solver["STANDARD_14"] > solver["DEFAULT"], (
+        f"the wide network's PK solve was not measurably more expensive "
+        f"({solver['STANDARD_14']:.3f} s vs {solver['DEFAULT']:.3f} s): the "
+        f"wider model is not free, and the documented cost claim depends on it")
+
+    for name in ("DEFAULT", "STANDARD_14"):
+        assert 0.0 < share[name] < 0.5, (
+            f"{name}: the PK solve is {share[name]:.1%} of the end-to-end "
+            f"benchmark run, so the benchmark wall clock does not isolate the "
+            f"organ network's cost")
 
 
 def test_the_cmax_delta_is_a_property_of_the_model_not_of_the_enrolled_subset() -> None:
