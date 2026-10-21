@@ -473,3 +473,29 @@ numerical solver accuracy or clinical relevance.
 The formal gate closes the **algebraic/structural** gap. The numerical,
 population, and clinical gaps remain covered by the existing simulation
 validation suite (`make validate` + `make test`).
+
+### The formal spec is a contract, not a document
+
+`formal_specs/pbpk_mass_conservation.tex` states the mass-conservation
+theorems as one QED-parseable fragment each. `make formal-spec`
+(`scripts/verify_formal_spec.py`) checks the spec against the model in BOTH
+directions -- a theorem the model implies but the spec omits, a theorem the
+spec states but the model does not imply, and a statement that drifted from
+the model are all drift, and drift fails closed -- then discharges every
+fragment with QED.
+
+The per-theorem verdict lands in `output/validation/traces.json`:
+
+| Field | Meaning |
+|---|---|
+| `success` | `true` only when every theorem was proved without `sorry` and QED's own `source_check` / `compiler_check` / `axioms_check` all reported `passed` |
+| `n_lemmas` / `passed` / `failed` | How many theorems were required, proved, and not proved |
+| `verification` | QED's own checks, aggregated over the proofs it accepted |
+| `theorems` | Per-theorem verdict, keyed by theorem id |
+| `formal_verification.lean_code_sha256` | SHA-256 of each verified proof's Lean source (the source itself stays with QED) |
+
+That trail is the *formal-spec* trail. The *gate* trail
+(`output/validation/qed_traces.json`, per-lemma SHA-256 digests) is a
+separate file and is a Merkle leaf of the regulatory provenance -- the two
+used to share one path, so whichever writer ran last destroyed the other's
+verdict.

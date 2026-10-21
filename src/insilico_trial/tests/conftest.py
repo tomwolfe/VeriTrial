@@ -15,12 +15,15 @@ every proof still verified. That is a false red in a fail-closed test, and it
 is exactly the kind of thing that trains an operator to re-run "until it goes
 green" instead of reading the failure.
 
-``QED_TRACE`` is the redirection hook, and it is honored both by
+``QED_TRACE`` is the redirection hook: it names the SCRATCH DIRECTORY the
+trail writes go to, and it is honored both by
 ``insilico_trial.validation.formal_verification._trace_path()`` and by
-``scripts/verify_formal_gate.py``. Pointing it at a session-scoped temp file
-here means test runs can still exercise the full write path, but into a
-scratch location -- leaving the real artifacts exactly as the last real
-validation left them.
+``scripts/verify_formal_gate.py``. Pointing it at a session-scoped temp
+directory here means test runs can still exercise the full write path, but
+into a scratch location -- leaving the real artifacts exactly as the last
+real validation left them. Each writer keeps its own file name in that
+directory (``qed_traces.json`` for the gate, ``traces.json`` for the formal
+spec), so the two cannot destroy each other's verdict.
 """
 
 from __future__ import annotations

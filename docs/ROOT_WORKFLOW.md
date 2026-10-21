@@ -33,6 +33,22 @@ script, so it works from any working directory.
    fails or contains `sorry`.
 4. **Record pass** into `output/validation/formal_gate_compound.json`.
 
+## The formal spec (theorems, not just lemmas)
+
+The gate above certifies the lemmas the bridge derives from the model. The
+*theorems* stated in `formal_specs/pbpk_mass_conservation.tex` are certified
+by their own entry point:
+
+```bash
+python3 scripts/verify_formal_spec.py     # or: make formal-spec
+```
+
+It checks the spec against the model in both directions (any drift fails
+closed), proves every theorem with QED, and writes the per-theorem verdict
+to `output/validation/traces.json`. The trail's top-level `success` is true
+only when every theorem was proved without `sorry` and QED's own checks
+(`source_check`, `compiler_check`, `axioms_check`) all reported `passed`.
+
 ## Expected output on success
 
 ```
@@ -74,8 +90,17 @@ Each step fails closed with a non-zero exit code and a clear message:
 | File | Meaning |
 |---|---|
 | `output/validation/formal_gate_compound.json` | Pass/fail record from the compound loop |
-| `output/validation/qed_traces.json` | Per-lemma QED audit trail (tactic used, success, sorry check) |
+| `output/validation/qed_traces.json` | Per-lemma QED audit trail of the **gate** (lemma SHA-256 digests). This file is a Merkle leaf of `output/validation/regulatory_provenance.json` |
+| `output/validation/traces.json` | Per-theorem QED audit trail of the **formal spec** (`formal_specs/pbpk_mass_conservation.tex`): the verdict per theorem, QED's own `source_check` / `compiler_check` / `axioms_check`, and a top-level `success` that is true only when every theorem was proved without `sorry` |
 | `output/validation/validation_summary.json` | Aggregate `overall_pass` across all validations |
+
+The two trails are separate files on purpose. They used to share
+`qed_traces.json`, so whichever writer ran last silently destroyed the
+other's verdict -- and since that file is a Merkle leaf of the regulatory
+provenance, the provenance root depended on run order.
+
+`QED_TRACE` redirects both writes into the directory that holds it, so a
+test run cannot overwrite the production artifacts.
 
 ## Tether missions
 

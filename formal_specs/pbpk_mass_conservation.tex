@@ -140,7 +140,8 @@
 %     does not imply FAILS THE GATE (fail-closed).
 %   * Each fragment is discharged by QED as a real Lean 4 proof with no
 %     `sorry`; the per-theorem verdict is written to
-%     output/validation/qed_traces.json.
+%     output/validation/traces.json (the formal-spec trail; the gate's
+%     own trail is output/validation/qed_traces.json).
 %   * After changing the PBPK ODE source, regenerate this block with:
 %       python3 scripts/export_pbpk_to_qed.py --spec-sync
 %% QED-BEGIN

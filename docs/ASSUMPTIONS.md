@@ -161,7 +161,8 @@ closed -- and every fragment is discharged by QED like any other lemma.
 All thirteen theorems (the seven families above, instantiated per perfused
 tissue where the statement is per-tissue) are proved as real Lean 4
 statements with no `sorry`; the per-theorem verdict is written to
-`output/validation/qed_traces.json`.
+`output/validation/traces.json` (the formal-spec trail; the gate's own
+per-lemma trail is `output/validation/qed_traces.json`).
 
 > **Formal Verification Scope**: Only the theorems listed in
 > `formal_specs/pbpk_mass_conservation.tex` and proved by QED are considered

@@ -1261,7 +1261,7 @@ def build_regulatory_provenance(
             for jf in sorted(val_dir.glob("*.json")):
                 if jf.name in ("validation_summary.json", "qed_traces.json",
                                "regulatory_provenance.json", "formal_verification.json",
-                               "formal_gate_compound.json"):
+                               "formal_gate_compound.json", "traces.json"):
                     continue
                 try:
                     payload = json.loads(jf.read_text(encoding="utf-8"))

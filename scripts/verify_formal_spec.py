@@ -77,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     if theorems:
         print(f"spec theorems: {len(result.get('verified_theorems', []))}"
               f"/{len(theorems)} verified by QED (no sorry)")
+    trail_path = result.get("trail_path", "")
+    if trail_path:
+        print(f"QED audit trail: {trail_path}")
 
     if args.json is not None:
         payload = {

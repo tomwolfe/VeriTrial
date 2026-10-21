@@ -20,7 +20,7 @@ Design guarantees (mission requirement C -- FAIL CLOSED):
     or the formal spec drifted from the model, ``qed_proofs_pass`` is
     ``False`` and the lemma is recorded as failed.
   * The audit trail is written to a portable path under the repo
-    (``output/validation/qed_traces.json``), overridable via ``QED_TRACE``.
+    (``output/validation/traces.json``), overridable via ``QED_TRACE``.
 """
 
 from __future__ import annotations
@@ -28,7 +28,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,16 @@ from .formal_spec import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../VeriTrial
+
+#: Name of the formal-spec audit trail inside ``output/validation/``.
+#:
+#: The *gate* trail -- written by ``scripts/verify_formal_gate.py`` -- is
+#: ``qed_traces.json`` and is a Merkle LEAF INPUT of
+#: ``build_regulatory_provenance()``.  This trail used to be written to that
+#: same path, so whichever of the two writers ran last silently destroyed the
+#: other's verdict: two incompatible schemas, one file, and a provenance root
+#: that depended on run order.  The two writers now own separate files.
+TRAIL_NAME = "traces.json"
 
 
 def _qed_dir() -> Path:
@@ -81,10 +93,29 @@ def _load_export_module() -> Any:
 
 
 def _trace_path() -> Path:
+    """Where the formal-spec QED audit trail is written.
+
+    ``QED_TRACE`` redirects the write into the directory that holds it, so a
+    test run (or a scratch CI run) can be pointed away from the production
+    artifacts.  The formal-spec trail keeps its OWN name (``traces.json``)
+    inside that directory: sharing one file with the gate would let the two
+    writers destroy each other's verdict again, scratch area or not.
+
+    The default lives INSIDE the project (``output/validation/traces.json``):
+    a trail written outside the project tree cannot be inspected by anything
+    that only looks at the project -- a reviewer, a CI assertion, or an
+    auditor -- so "QED ran" has to be visible where the model it certifies
+    lives.
+    """
     env = os.environ.get("QED_TRACE")
     if env:
-        return Path(env).resolve()
-    return (REPO_ROOT / "output" / "validation" / "qed_traces.json").resolve()
+        target = Path(env).resolve()
+        # The gate writes ``QED_TRACE`` verbatim, so a redirect that happens
+        # to be NAMED ``traces.json`` would put the two writers back on one
+        # file.  Keep them apart unconditionally.
+        name = TRAIL_NAME if target.name != TRAIL_NAME else f"formal_spec_{TRAIL_NAME}"
+        return target.with_name(name)
+    return (REPO_ROOT / "output" / "validation" / TRAIL_NAME).resolve()
 
 
 def _classify_proof_type(result: dict[str, Any]) -> str:
@@ -153,6 +184,61 @@ def required_lemmas(model_path: Path | None = None,
     return lemmas
 
 
+def _verification_block_ok(block: dict[str, Any] | None) -> bool:
+    """True unless QED's own verification block reports a failed check.
+
+    QED returns ``{"source_check": "passed", "compiler_check": "passed",
+    "axioms_check": "passed"}`` for a proof it accepted.  An EMPTY block
+    means QED reported none (an older or stubbed prover), which is not a
+    contradiction; a block that reports anything other than "passed" IS,
+    and fails the gate closed.
+    """
+    if not block:
+        return True
+    return all(str(value) == "passed" for value in block.values())
+
+
+def _aggregate_verification(attempts: list[dict[str, Any]]) -> dict[str, str]:
+    """QED's own verification block, aggregated over the successful attempts.
+
+    Every check QED reported for every accepted proof is kept; a check the
+    attempts disagree about is recorded as "failed" rather than silently
+    dropped, so the trail cannot report a check that was never uniformly
+    "passed".
+    """
+    blocks = [a.get("verification") or {} for a in attempts if a.get("success")]
+    if not blocks:
+        return {}
+    keys = sorted({str(key) for block in blocks for key in block})
+    aggregate: dict[str, str] = {}
+    for key in keys:
+        values = {str(block.get(key, "")) for block in blocks if key in block}
+        aggregate[key] = values.pop() if len(values) == 1 else "failed"
+    return aggregate
+
+
+def _make_pipeline(pipeline_cls: Any, scratch: Path) -> Any:
+    """Build a QED pipeline whose OWN artifacts stay out of the QED checkout.
+
+    The QED pipeline writes its audit trail (``traces.json``) and its proof
+    artifact (``output.lean``) relative to its working directory.  VeriTrial
+    runs it with the QED checkout as CWD (that is what makes ``lake env
+    lean`` resolve Mathlib), so without an explicit path every VeriTrial
+    formal run OVERWROTE the QED repository's own trail and artifact.  Those
+    files belong to QED: point the pipeline at a scratch directory instead.
+    """
+    try:
+        return pipeline_cls(
+            use_mathlib=True,
+            trace_path=str(scratch / "traces.json"),
+            artifact_path=str(scratch / "output.lean"),
+        )
+    except TypeError:
+        # Older QED builds have no trace_path/artifact_path knobs.  Fall back
+        # to the default constructor rather than failing every lemma.
+        return pipeline_cls(use_mathlib=True)
+
+
 def _verify_statements(
     statements: list[str],
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
@@ -186,17 +272,22 @@ def _verify_statements(
     # CWD to find lakefile.lean.  We must temporarily set CWD to the QED
     # directory so that `lake env lean` resolves Mathlib imports correctly.
     saved_cwd = os.getcwd()
+    scratch = Path(tempfile.mkdtemp(prefix="veritrial-qed-pipeline-"))
     try:
         os.chdir(str(_qed_dir()))
         for statement in statements:
             try:
-                pipeline = LeanAgenticPipeline(use_mathlib=True)
+                pipeline = _make_pipeline(LeanAgenticPipeline, scratch)
                 result = pipeline.run(statement)
 
                 has_sorry = not result.get("success", False) or bool(
                     "sorry" in result.get("lean_code", "")
                     or "sorryAx" in result.get("lean_code", "")
                 )
+                # QED's OWN verdict on the proof it just compiled.  Carried
+                # verbatim into the trail: "verified" is not a word this
+                # module gets to define, it is QED's.
+                verification = result.get("verification") or {}
                 attempt = {
                     "lemma": statement,
                     "expression": statement,
@@ -204,6 +295,10 @@ def _verify_statements(
                     "tactic": result.get("tactic"),
                     "has_sorry": has_sorry,
                     "proof_type": _classify_proof_type(result),
+                    "verification": {
+                        str(key): str(value)
+                        for key, value in dict(verification).items()
+                    },
                     # Hash the prover's Lean output HERE, at the boundary where
                     # `result` still holds it, and store only the digest.
                     #
@@ -240,6 +335,7 @@ def _verify_statements(
                 })
     finally:
         os.chdir(saved_cwd)
+        shutil.rmtree(scratch, ignore_errors=True)
     return verified, failed, attempts
 
 
@@ -295,6 +391,7 @@ def check_qed_proofs(
         - 'spec_theorems': list of dict (per-theorem outcome of the .tex spec)
         - 'verified_theorems' / 'failed_theorems': list of theorem ids
         - 'spec_drift': list of str (empty when the spec matches the model)
+        - 'trail_path': str (where the QED audit trail was written)
     """
     results: dict[str, Any] = {
         "qed_proofs_pass": False,
@@ -306,6 +403,7 @@ def check_qed_proofs(
         "verified_theorems": [],
         "failed_theorems": [],
         "spec_drift": [],
+        "trail_path": "",
     }
 
     # --- Locate QED and the lemma set (fail closed on any error) -------------
@@ -373,6 +471,8 @@ def check_qed_proofs(
     pass_count = len(verified)
     all_pass = pass_count == total and not any(
         a.get("has_sorry") for a in attempts
+    ) and all(
+        _verification_block_ok(a.get("verification")) for a in attempts
     )
 
     results["qed_proofs_pass"] = all_pass
@@ -400,7 +500,20 @@ def check_qed_proofs(
         t["theorem_id"] for t in theorems if t["status"] == "failed"
     ]
 
-    _write_trail(results, lemmas=lemmas, attempts=attempts, spec=theorems)
+    trail_written = _write_trail(
+        results, lemmas=lemmas, attempts=attempts, spec=theorems
+    )
+    if not trail_written:
+        # Fail closed: a verification nobody can read is not a certification.
+        # The proofs may all have passed, but the record of them is the
+        # deliverable, and a missing record is a missing deliverable.
+        results["qed_proofs_pass"] = False
+        results["overall_pass"] = False
+        results["trail_summary"] += (
+            " FORMAL GATE FAILED (fail-closed): the QED audit trail could not "
+            "be written; a verification without a readable record of it is "
+            "not a certification."
+        )
     return results
 
 
@@ -409,12 +522,23 @@ def _write_trail(
     lemmas: list[str],
     attempts: list[dict[str, Any]] | None = None,
     spec: list[dict[str, Any]] | None = None,
-) -> None:
+) -> bool:
     """Write the audit trail to a portable path (never a machine-specific one).
+
+    The trail is the *record* of the run, so it states the verdict in QED's
+    own words: ``success`` is true only when every required statement was
+    proved without ``sorry`` and QED's own checks (``source_check``,
+    ``compiler_check``, ``axioms_check``) all reported "passed".  A run that
+    failed, was skipped, or drifted writes ``success: false`` -- the trail
+    may never claim a certification that did not happen.
 
     Includes SHA-256 hashes of verified Lean proof source code for
     tamper-evident certification under ASME V&V 40, and the per-theorem
     outcome of the LaTeX formal spec.
+
+    Returns ``True`` when the trail was written, ``False`` when it could not
+    be -- a verification nobody can read is not a certification, so the
+    caller fails closed.
     """
     trail_path = _trace_path()
     try:
@@ -439,23 +563,59 @@ def _write_trail(
             for a in (attempts or [])
         ]
 
+        verified = list(results.get("verified_lemmas", []))
+        failed = list(results.get("failed_lemmas", []))
+        n_lemmas = len(lemmas)
+        sorry_free = not any(a.get("has_sorry") for a in safe_attempts)
+        checks_ok = all(
+            _verification_block_ok(a.get("verification")) for a in safe_attempts
+        )
+        success = (
+            n_lemmas > 0
+            and len(verified) == n_lemmas
+            and not failed
+            and sorry_free
+            and checks_ok
+        )
+
         trail_data = {
+            # The verdict, in the shape a CI check can read without
+            # knowing anything about this repo's internals.
+            "success": success,
+            "n_lemmas": n_lemmas,
+            "passed": len(verified),
+            "failed": len(failed),
+            "n_attempts": len(safe_attempts),
+            "qed_dir": str(_qed_dir()),
+            # QED's own checks, aggregated over the proofs it accepted.
+            "verification": _aggregate_verification(safe_attempts),
+            # Per-theorem verdict of the LaTeX formal spec, by theorem id.
+            "theorems": {
+                str(theorem.get("theorem_id", "")): str(theorem.get("status", "unknown"))
+                for theorem in (spec or [])
+            },
+            "spec_drift": results.get("spec_drift", []),
             "formal_verification": {
+                "success": success,
                 "qed_dir": str(_qed_dir()),
                 "lemmas": lemmas,
-                "verified": results.get("verified_lemmas", []),
-                "failed": results.get("failed_lemmas", []),
+                "verified": verified,
+                "failed": failed,
                 "attempts": safe_attempts,
                 "lean_code_sha256": lean_hashes,
                 "spec_theorems": spec if spec is not None else [],
                 "spec_drift": results.get("spec_drift", []),
                 "trail_summary": results.get("trail_summary", ""),
-            }
+            },
         }
         trail_path.write_text(json.dumps(trail_data, indent=2))
     except Exception as e:
-        # A broken audit trail must surface, not vanish; but never flip the gate.
+        # A broken audit trail must surface, not vanish; but never flip the
+        # gate here -- the caller decides what an unwritable trail means.
         results.setdefault("trail_warning", f"could not write trail: {e}")
+        return False
+    results["trail_path"] = str(trail_path)
+    return True
 
 
 def run_formal_verification(

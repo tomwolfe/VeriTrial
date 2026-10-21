@@ -12,7 +12,7 @@ help:
 	@echo "  demo-standard14 - Run the same 1000-patient SAD benchmark on the 14-organ network"
 	@echo "  validate     - Run benchmark harness (Warfarin + Moxifloxacin + Midazolam + Metformin)"
 	@echo "  formal-gate  - Run QED formal verification gate (portable)"
-	@echo "  formal-spec  - Check formal_specs/*.tex against the PBPK model and prove each theorem"
+	@echo "  formal-spec  - Check formal_specs/*.tex against the PBPK model, prove each theorem, write output/validation/traces.json"
 	@echo "  mutation     - Mutation kill-rate gate over the baseline targets"
 	@echo "  benchmark    - Hardware acceleration comparison"
 	@echo "  compare-organ-networks - DEFAULT vs STANDARD_14 Cmax delta + throughput"
