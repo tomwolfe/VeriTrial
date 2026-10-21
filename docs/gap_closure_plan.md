@@ -416,6 +416,57 @@ model byte-identical):
   eGFR≈90 within ±30% of 35 L/h and eGFR–CL/F correlation > 0.5. Both are
   called in `run_all_validations()` and emitted by `make validate`.
 
+### G8. The 14-organ theorem-fidelity check is only green because a parser bug is masked (OPEN)
+
+**Status: OPEN.** Found 2026-10-21 while reconciling the `veritrial-formal-gate`
+mission. The Fin 14 export path is certified end to end (25 lemmas, no sorry),
+but the *fidelity* check that stands behind it is not measuring what it claims
+to measure.
+
+**What the fidelity check is for.** `verify_formal_gate.py` refuses any
+exported theorem that QED's parser reads as being about variables the
+statement never names -- because QED's parser splits a bare `ka` into the
+implicit product `k * a`, so the prover would certify a theorem about
+parameters the model never had. That is a real hazard, and the check is right
+to exist.
+
+**The masked bug.** QED's parser also collapses a digit-suffixed identifier
+onto its stem:
+
+    parse_equation("(-ka_rate) + (ka_rate) + (-Ql/(Kpl*Vl)) = 0")
+      -> free vars ['Kpl', 'Ql', 'Vl', 'ka_rate']      (correct)
+    parse_equation("(-ka) + (ka) + (-Ql/(Kpl*Vl)) = 0")
+      -> free vars ['Kpl', 'Ql', 'Vl', 'a', 'k']       (ka split into k * a)
+    parse_equation("(Q3/Vc) + (Q4/Vc) = 0")
+      -> free vars ['Q', 'Vc']                        (Q3 AND Q4 BOTH become Q)
+
+So `Q3`, `Q4`, ..., `Q12` and `V3`, ..., `V12` all parse to `Q` and `V`. Every
+14-organ statement names ten such variables, and the fidelity check's own
+error message for the failing case is exactly this: *"is parsed by QED as
+involving ['Q', 'V'], which the statement never names"*.
+
+**Why the gate is green anyway.** The six-organ Jacobian identity is exported
+with the bare `ka`, which QED splits into `k` and `a`. That split puts `k` and
+`a` into the parsed-name set, and the set then happens to agree with the
+statement's names, so the check passes -- while the `Q3`/`V3` collapse is
+present in the same file and is not independently detected. The Fin 14
+export only becomes visible to the check when the export stops using the bare
+`ka` (a change that renames it `ka_rate`); with that change applied, the Fin
+14 gate FAILS on exactly this.
+
+**Consequence for the claims.** The Fin 14 formal gate certifies that the
+lemmas PROVE (no sorry, 25 of them). It does not currently certify that each
+lemma is a theorem about the variables it appears to name. Those are different
+claims, and only the first is established.
+
+**What is NOT done here, and why.** A `veritrial-formal-gate` mission
+produced a change that renames the exported Jacobian parameter to `ka_rate`
+and updates the spec to match. That change was measured and it BREAKS the
+Fin 14 gate, so it is not in the tree: an unverified change that breaks a
+passing gate is worse than the gap it was meant to close. The underlying
+defect -- QED's parser collapsing digit-suffixed identifiers -- is in QED, and
+fixing it is a QED change with its own mission, not a VeriTrial one.
+
 ## Credibility argument mapping (ASME V&V 40)
 
 | V&V 40 concept | VeriTrial realization |
