@@ -1169,7 +1169,7 @@ def _lean_param(expr: str) -> str:
     expr = _re.sub(r"args\s*\[\s*['\"]V['\"]\s*\]\s*\[\s*_EFFECT_SITE_IDX\s*\]", 'Ve', expr)
     expr = _re.sub(r"args\s*\[\s*['\"]V['\"]\s*\]\s*\[\s*_CENTRAL_IDX\s*\]", 'Vc', expr)
     expr = _re.sub(r"args\s*\[\s*['\"]CL['\"]\s*\]", 'CL', expr)
-    expr = _re.sub(r"args\s*\[\s*['\"]ka['\"]\s*\]", 'ka', expr)
+    expr = _re.sub(r"args\s*\[\s*['\"]ka['\"]\s*\]", 'ka_rate', expr)
     expr = _re.sub(r'Q\s*\[\s*_LIVER_IDX\s*\]', 'Ql', expr)
     expr = _re.sub(r'Q\s*\[\s*_PERIPHERAL_IDX\s*\]', 'Qp', expr)
     expr = _re.sub(r'Q\s*\[\s*_EFFECT_SITE_IDX\s*\]', 'Qe', expr)
@@ -1182,7 +1182,7 @@ def _lean_param(expr: str) -> str:
     expr = _re.sub(r'V\s*\[\s*_PERIPHERAL_IDX\s*\]', 'Vp', expr)
     expr = _re.sub(r'V\s*\[\s*_EFFECT_SITE_IDX\s*\]', 'Ve', expr)
     expr = _re.sub(r'V\s*\[\s*_CENTRAL_IDX\s*\]', 'Vc', expr)
-    expr = _re.sub(r'\bka\b', 'ka', expr)
+    expr = _re.sub(r'\bka\b', 'ka_rate', expr)
     return expr
 
 
@@ -1217,8 +1217,8 @@ def compute_jacobian(model_path: Path,
         elim = int(spec["elim"])
         perfused = [int(index) for index in spec["perfused"]]
         result: dict[tuple[int, int], str] = {}
-        result[(gut, gut)] = "-ka"
-        result[(central, gut)] = "ka"
+        result[(gut, gut)] = "-ka_rate"
+        result[(central, gut)] = "ka_rate"
         # Symbol naming follows the MODEL's own convention, keyed by organ NAME:
         # the liver, the peripheral tissue and the effect site are the three
         # organs the perfusion algebra names symbolically (``Q[_LIVER_IDX]`` is

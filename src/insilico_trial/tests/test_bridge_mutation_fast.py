@@ -1318,9 +1318,13 @@ def test_lean_param_renames_every_perfusion_and_volume_index() -> None:
 
 def test_lean_param_renames_scalars_and_survives_renaming() -> None:
     assert ex._lean_param("args['CL']") == "CL"
-    assert ex._lean_param("args['ka']") == "ka"
-    # ka -> ka must not double-apply or corrupt the identifier.
-    assert ex._lean_param("ka") == "ka"
+    # The gut absorption rate is exported as 'ka_rate': QED's parser reads a
+    # bare two-letter 'ka' as the implicit product 'k * a', so the exported
+    # theorem would be about two parameters the model never had.
+    assert ex._lean_param("args['ka']") == "ka_rate"
+    # ka_rate -> ka_rate must not double-apply or corrupt the identifier.
+    assert ex._lean_param("ka_rate") == "ka_rate"
+    assert ex._lean_param("ka") == "ka_rate"
 
 
 def test_lean_param_handles_the_args_dict_spelling() -> None:

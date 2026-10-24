@@ -150,7 +150,7 @@
 %% QED Lemma-2-periph Q_periph * (C_p - C_periph / Kp_periph) = Q_periph * C_p - Q_periph * C_periph / Kp_periph
 %% QED Lemma-2-effect Q_effect * (C_p - C_effect / Kp_effect) = Q_effect * C_p - Q_effect * C_effect / Kp_effect
 %% QED Lemma-3c -ka_rate * A_gut + (Q_liver * (C_p - C_liver / Kp_liver)) - liver_metabolic + ka_rate * A_gut - (Q_liver * (C_p - C_liver / Kp_liver)) - (Q_periph * (C_p - C_periph / Kp_periph)) - (Q_effect * (C_p - C_effect / Kp_effect)) - CL * C_p + (Q_periph * (C_p - C_periph / Kp_periph)) + (Q_effect * (C_p - C_effect / Kp_effect)) + CL * C_p + liver_metabolic = 0
-%% QED Lemma-3-jacobian (-ka) + (ka) + (-Ql/(Kpl*Vl)) + (Ql/(Kpl*Vl)) + (Ql/Vc) + (-(CL + Ql + Qp + Qe)/Vc) + (Qp/Vc) + (Qe/Vc) + (CL/Vc) + (Qp/(Kpp*Vp)) + (-Qp/(Kpp*Vp)) + (Qe/(Kpe*Ve)) + (-Qe/(Kpe*Ve)) = 0
+%% QED Lemma-3-jacobian (-ka_rate) + (ka_rate) + (-Ql/(Kpl*Vl)) + (Ql/(Kpl*Vl)) + (Ql/Vc) + (-(CL + Ql + Qp + Qe)/Vc) + (Qp/Vc) + (Qe/Vc) + (CL/Vc) + (Qp/(Kpp*Vp)) + (-Qp/(Kpp*Vp)) + (Qe/(Kpe*Ve)) + (-Qe/(Kpe*Ve)) = 0
 %% QED Lemma-4-liver (Q_liver / (V_central * Kp_liver)) * A_central >= 0
 %% QED Lemma-4-periph (Q_periph / (V_central * Kp_periph)) * A_central >= 0
 %% QED Lemma-4-effect (Q_effect / (V_central * Kp_effect)) * A_central >= 0
