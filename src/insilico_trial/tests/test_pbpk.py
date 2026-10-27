@@ -3,6 +3,7 @@
 import numpy as onp
 
 from insilico_trial.pbpk.model import (
+    get_concentration_interpolator,
     rodgers_rowland_kp,
     run_pbpk,
 )
@@ -80,3 +81,30 @@ def test_mass_balance_with_elimination():
     mb_error = result["mass_balance"]
     # With elimination, error should still be very small
     assert mb_error < 1e-7, f"Mass balance error {mb_error} >= 1e-7"
+
+
+def test_concentration_interpolator_matches_samples_and_units():
+    """C(t) interpolates the mg/L profile and clamps outside the window."""
+    times = onp.array([0.0, 1.0, 2.0, 4.0])
+    concs = onp.array([0.0, 2.0, 1.5, 0.5])
+    interp = get_concentration_interpolator(times, concs)
+
+    onp.testing.assert_allclose(
+        onp.asarray(interp(times)), concs, rtol=0, atol=1e-12)
+    # Midpoint linear interpolation and endpoint clamping.
+    assert abs(float(interp(1.5)) - 1.75) < 1e-12
+    assert float(interp(-5.0)) == 0.0
+    assert float(interp(99.0)) == 0.5
+
+
+def test_concentration_interpolator_rejects_bad_inputs():
+    import pytest
+
+    with pytest.raises(ValueError):
+        get_concentration_interpolator([], [])
+    with pytest.raises(ValueError):
+        get_concentration_interpolator([0.0], [1.0])
+    with pytest.raises(ValueError):
+        get_concentration_interpolator([1.0, 1.0], [1.0, 2.0])
+    with pytest.raises(ValueError):
+        get_concentration_interpolator([0.0, 1.0], [1.0, float("nan")])

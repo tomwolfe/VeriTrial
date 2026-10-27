@@ -450,3 +450,28 @@ def test_boin_safety_stopping_rule():
     dec, nxt, stop = eng.boin_decision(3, 3, 1)
     assert stop is True
     assert dec == "stop"
+
+
+def test_to_drift_input_exports_dense_mg_per_l_profile():
+    """The engine hands DRIFT a dense C(t), not a scalar."""
+    drug = _make_drug()
+    protocol = _make_protocol(n_cohorts=1, cohort_size=3)
+    population = _make_population(3, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+    engine.run_sad_mad(onp.random.default_rng(7))
+
+    payload = engine.to_drift_input("p0")
+    t = onp.asarray(payload["t_eval"])
+    c = onp.asarray(payload["C_p"])
+    assert payload["unit"] == "mg/L"
+    assert t.ndim == c.ndim == 1
+    assert t.size == c.size >= 10
+    assert onp.all(onp.diff(t) > 0)
+    assert onp.all(c >= 0)
+    assert callable(payload["interpolator"])
+    assert float(payload["interpolator"](float(t[0]))) == float(c[0])
+
+    import pytest
+
+    with pytest.raises(KeyError):
+        engine.to_drift_input("not-a-patient")

@@ -26,6 +26,7 @@ from insilico_trial.pbpk.model import (
     DEFAULT_ORGAN_NETWORK,
     STANDARD_14_ORGAN_NETWORK,
     build_pbpk_params,
+    get_concentration_interpolator,
     solve_pbpk_single,
 )
 from insilico_trial.pd import cardiac_apd_effect
@@ -260,6 +261,56 @@ class TrialEngine:
         self.posterior_samples = posterior_samples
         self.current_dose_level_index = 0
         self.cohort_histories: list[dict[str, Any]] = []
+        # Full PK profiles keyed by patient id, populated by run_sad_mad so
+        # downstream engines (DRIFT) can consume C(t) instead of a scalar.
+        self._patient_profiles: dict[str, dict[str, Any]] = {}
+
+    def to_drift_input(
+        self,
+        patient_id: str,
+        *,
+        unit: str = "mg/L",
+    ) -> dict[str, Any]:
+        """Export one patient's C(t) profile as a DRIFT input.
+
+        Must be called after :meth:`run_sad_mad`; the profile is the full
+        dense solver output (not just the sparse observation visits).
+
+        Parameters
+        ----------
+        patient_id : str
+            Identifier of a patient enrolled in the last run.
+        unit : str
+            Concentration unit label; the engine stores plasma in mg/L.
+
+        Returns
+        -------
+        dict
+            ``{"patient_id", "t_eval", "C_p", "interpolator", "unit"}``
+            where ``t_eval`` is hours and ``C_p`` is mg/L.  ``interpolator``
+            is a JAX-traceable ``C(t) -> mg/L`` callable.
+
+        Raises
+        ------
+        KeyError
+            If *patient_id* has no profile (run first, or unknown id).
+        """
+        try:
+            profile = self._patient_profiles[patient_id]
+        except KeyError as exc:
+            raise KeyError(
+                f"no PK profile for patient {patient_id!r}; run_sad_mad() "
+                "must complete before to_drift_input()"
+            ) from exc
+        times = onp.asarray(profile["t_eval"], dtype=onp.float64)
+        concs = onp.asarray(profile["C_p"], dtype=onp.float64)
+        return {
+            "patient_id": patient_id,
+            "t_eval": times,
+            "C_p": concs,
+            "interpolator": get_concentration_interpolator(times, concs),
+            "unit": unit,
+        }
 
     def run_sad_mad(self, rng: onp.random.Generator) -> TrialResult:
         """Run a complete SAD/MAD trial simulation."""
@@ -311,6 +362,14 @@ class TrialEngine:
                     cohort_patients, absorbed_doses,
                     solver=self.protocol.solver,
                 )
+
+            # Persist the dense plasma profile per patient so to_drift_input()
+            # can hand a real C(t) to DRIFT after the run.
+            for pi, patient in enumerate(cohort_patients):
+                self._patient_profiles[patient.id] = {
+                    "t_eval": onp.asarray(t_eval_hours, dtype=onp.float64),
+                    "C_p": onp.asarray(C_batch[pi], dtype=onp.float64),
+                }
 
             cohort_dlt_count = 0
 

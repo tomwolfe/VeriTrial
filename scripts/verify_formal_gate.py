@@ -1243,6 +1243,10 @@ def main(argv: list[str] | None = None) -> int:
               "certify against possibly-stale compiled modules.",
               file=sys.stderr)
         return 1
+    # Axiom set actually certified for the compiled export (recorded below in
+    # qed_traces.json so a downstream gate can assert on it without scraping
+    # the console). Stays None if the axiom check did not run.
+    certified_axioms: list[str] | None = None
     lean_export = qed / "VeriTrialExport.lean"
     if lean_export.is_file():
         # The rebuild above already compiled the module; checking the export
@@ -1313,6 +1317,7 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            certified_axioms = sorted(ax_set)
             required = ["extracted_offDiag_nonneg",
                         "extracted_colSum_eq_zero",
                         "veritrial_compartmental",
@@ -1392,6 +1397,7 @@ def main(argv: list[str] | None = None) -> int:
         "n_lemmas": len(file_lemmas),
         "verified": True,
         "strict": strict,
+        "axioms": certified_axioms,
         "traces": lemma_hashes,
     }
     traces_path.write_text(json.dumps(traces, indent=2) + "\n", encoding="utf-8")

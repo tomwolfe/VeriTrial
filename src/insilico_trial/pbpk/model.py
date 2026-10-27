@@ -549,6 +549,60 @@ def predict_pbpk_plasma_linear(
     return states[:, central] / V[central]
 
 
+def get_concentration_interpolator(
+    times: Any,
+    concs: Any,
+) -> Callable[[Any], Array]:
+    """Build a continuous C(t) interpolator from a discrete PK profile.
+
+    The returned callable evaluates the central-compartment plasma
+    concentration in **mg/L** at any (scalar or array) time in hours, using
+    linear interpolation (``jnp.interp``).  Queries outside the sampled
+    window clamp to the first/last sample, matching ``jnp.interp`` and the
+    convention used by the DRIFT bridge.
+
+    Parameters
+    ----------
+    times : array-like
+        Sample times in hours, strictly increasing.
+    concs : array-like
+        Plasma concentrations in mg/L, same shape as *times*.
+
+    Returns
+    -------
+    Callable[[Any], Array]
+        A JAX-traceable function ``C(t) -> mg/L``.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are empty, have different shapes, contain non-finite
+        values, or *times* is not strictly increasing.
+    """
+    t = jnp.asarray(times, dtype=jnp.float64)
+    c = jnp.asarray(concs, dtype=jnp.float64)
+    if t.ndim != 1 or c.ndim != 1:
+        raise ValueError(
+            f"times and concs must be 1-D, got {t.ndim}-D and {c.ndim}-D")
+    if t.shape != c.shape:
+        raise ValueError(
+            f"times and concs must have the same shape, got {t.shape} and {c.shape}")
+    if t.shape[0] < 2:
+        raise ValueError(
+            f"at least two samples are required, got {t.shape[0]}")
+    if not bool(jnp.all(jnp.isfinite(t))) or not bool(jnp.all(jnp.isfinite(c))):
+        raise ValueError("times and concs must be finite")
+    if not bool(jnp.all(jnp.diff(t) > 0)):
+        raise ValueError("times must be strictly increasing")
+
+    def interpolator(query_time: Any) -> Array:
+        """Return plasma concentration (mg/L) at *query_time* hours."""
+        return jnp.interp(
+            jnp.asarray(query_time, dtype=jnp.float64), t, c)
+
+    return interpolator
+
+
 def compute_mass_balance(y_initial: Any, y_final: Any) -> float:
     initial = float(jnp.sum(y_initial))
     final = float(jnp.sum(y_final))
