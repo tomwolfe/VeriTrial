@@ -1181,15 +1181,15 @@ def build_regulatory_provenance(
     vvv40_path: str | Path = "output/vvv40_report.html",
     repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Merkle-provenance aggregator tying tether + QED + VeriTrial.
+    """Merkle-provenance aggregator tying tether + QED + VeriTrial + DRIFT.
 
     Reads Tether report.json, QED traces.json, and validation_summary.json,
     builds a unified Merkle tree (sorted-leaf SHA-256 chain), writes
     regulatory_provenance.json, and embeds the root into the V&V40 HTML header.
 
     The record additionally captures:
-      * git commit SHAs of the sibling ``tether``, ``QED`` and ``VeriTrial``
-        checkouts (tri-repo workspace layout);
+      * git commit SHAs of the sibling ``tether``, ``QED``, ``VeriTrial``
+        and ``DRIFT`` checkouts (quad-repo workspace layout);
       * SHA-256 digests of ``QED/Compartmental.lean`` and
         ``QED/VeriTrialExport.lean``;
       * per-benchmark ASME V&V 40 pass/fail metrics extracted from the
@@ -1231,12 +1231,12 @@ def build_regulatory_provenance(
                 {"note": "qed traces unavailable"})
     bench = _load(validation_summary or (root / "output" / "validation" / "validation_summary.json"),
                   {"note": "benchmarks unavailable"})
-    # Tri-repo workspace root: VeriTrial/..  (tether, QED, VeriTrial siblings).
+    # Quad-repo workspace root: VeriTrial/..  (tether, QED, VeriTrial, DRIFT siblings).
     veritrial_root = Path(__file__).resolve().parents[3]
     workspace = veritrial_root.parent
     git_shas = {
         name: _git_sha(workspace / name)
-        for name in ("tether", "QED", "VeriTrial")
+        for name in ("tether", "QED", "VeriTrial", "DRIFT")
     }
     lean_digests = {
         "QED/Compartmental.lean": _sha256_file(workspace / "QED" / "Compartmental.lean"),

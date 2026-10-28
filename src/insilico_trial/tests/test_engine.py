@@ -416,6 +416,26 @@ def test_mad_no_concentration_reset_at_dose_boundaries():
             )
 
 
+def test_mad_without_dosing_events_falls_back_to_sad():
+    """MAD with n_doses=None yields no dosing events: _solve_mad_batch must
+    fall back to the single-dose SAD cohort solver and return (t_grid, C_batch)."""
+    drug = _make_drug()
+    d = _make_mad_protocol().model_dump()
+    d["n_doses"] = None
+    protocol = Protocol.model_validate(d)
+    population = _make_population(5, _EM_GT)
+    engine = TrialEngine(protocol=protocol, drug=drug, population=population)
+    assert engine._get_dosing_events() == []
+    cohort_patients = population.patients[:5]
+    administered_doses = onp.array([10.0] * 5, dtype=onp.float64)
+    t_grid, c_batch = engine._solve_mad_batch(
+        cohort_patients, administered_doses, solver="fixed_step")
+    assert t_grid.ndim == 1 and len(t_grid) > 0
+    assert c_batch.shape == (5, len(t_grid))
+    assert onp.all(c_batch >= 0)
+    assert onp.max(c_batch) > 0, "SAD fallback must produce nonzero exposure"
+
+
 
 def _make_boin_engine() -> TrialEngine:
     drug = _make_drug()

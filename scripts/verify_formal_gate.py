@@ -468,15 +468,18 @@ def _independent_column_sums(model_path: Path, fin_n: int,
                 f"fin_n={fin_n} branch of make_pbpk_ode (fail-closed)")
 
     def _expand(expr: str) -> str:
+        # Fixpoint iteration: repeat substitution until the string stops
+        # changing (aliases may reference other aliases, requiring several
+        # passes). Comparing successive strings avoids a boolean flag, so a
+        # single-pass truncation cannot silently pass as fully expanded.
         for _ in range(20):
-            changed = False
+            new = expr
             for name, val in list(aliases.items()) + list(rhs.items()):
                 pat = r"\b" + _re.escape(name) + r"\b"
-                if _re.search(pat, expr):
-                    expr = _re.sub(pat, f"({val})", expr)
-                    changed = True
-            if not changed:
+                new = _re.sub(pat, f"({val})", new)
+            if new == expr:
                 break
+            expr = new
         return expr
 
     cols = []
