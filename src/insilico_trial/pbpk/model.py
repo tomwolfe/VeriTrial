@@ -386,7 +386,7 @@ def _reference_physiology(
 ) -> dict[str, onp.ndarray]:
     reference = {
         "gut": (0.0, 0.3), "liver": (1.5, 1.5), "central": (0.0, 3.0),
-        "peripheral": (50.0, 4.0), "effect": (0.5, 0.3),
+        "peripheral": (5.0, 4.0), "effect": (0.5, 0.3),
         "kidney": (1.2, 0.5), "lung": (1.0, 2.0), "brain": (0.75, 1.4),
         "heart": (0.5, 0.6), "muscle": (0.9, 30.0), "adipose": (0.25, 12.0),
         "bone": (0.45, 3.0), "skin": (0.5, 4.0), "spleen": (0.25, 0.25),
@@ -440,22 +440,37 @@ def build_pbpk_params(
     organ_network = tuple(organ_network)
     organ_indices(organ_network)
     ref = _reference_physiology(organ_network)
-    kp_by_name = {
-        "gut": 1.0, "central": 1.0, "peripheral": 1.0, "effect": 1.0,
-        "elim": 1.0, "liver": kp_for_tissue(
-            drug.log_p, drug.pka, drug.fup, drug.bp_ratio, "liver", drug.mol_weight
-        ),
+    # Kp for ALL perfused tissues via Rodgers-Rowland; gut/central/elim stay 1.0.
+    _TISSUE_BY_NAME = {
+        "liver": "liver", "kidney": "kidney", "lung": "lung",
+        "brain": "brain", "heart": "generic", "muscle": "muscle",
+        "adipose": "fat", "bone": "generic", "skin": "generic",
+        "spleen": "generic", "pancreas": "generic",
+        "peripheral": "peripheral", "effect": "generic",
     }
+    kp_by_name: dict[str, float] = {"gut": 1.0, "central": 1.0, "elim": 1.0}
     for name in organ_network:
         if name not in kp_by_name:
             kp_by_name[name] = kp_for_tissue(
                 drug.log_p, drug.pka, drug.fup, drug.bp_ratio,
-                "fat" if name == "adipose" else "generic", drug.mol_weight,
+                _TISSUE_BY_NAME.get(name, "generic"), drug.mol_weight,
             )
+    # Anchor Vd to the drug's typical_v_f: vd_phys = sum(V_i*Kp_i) over
+    # perfused + central, scale Kp by typical_v_f/vd_phys clamped [0.2, 5].
+    V_scaled = ref["V"] * (weight_kg / 70.0)
+    spec = organ_indices(organ_network)
+    vd_phys = float(V_scaled[spec["central"]] * 1.0 + sum(
+        float(V_scaled[k]) * float(kp_by_name[organ_network[k]])
+        for k in spec["perfused"]))
+    if vd_phys > 0:
+        _scale = float(onp.clip(drug.typical_v_f / vd_phys, 0.2, 5.0))
+        for name in list(kp_by_name):
+            if name not in ("gut", "central", "elim"):
+                kp_by_name[name] *= _scale
     return {
         "organ_network": organ_network,
         "Q": ref["Q"] * scaling["w_scaling"],
-        "V": ref["V"] * (weight_kg / 70.0),
+        "V": V_scaled,
         "Kp": onp.asarray([kp_by_name[name] for name in organ_network]),
         "CL": float(max(drug.typical_cl_f * scaling["w_scaling"] *
                         scaling["age_factor"] *

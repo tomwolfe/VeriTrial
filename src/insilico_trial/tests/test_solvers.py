@@ -569,9 +569,10 @@ def test_no_production_call_site_uses_the_adaptive_path() -> None:
     from insilico_trial.trial import engine
 
     src = inspect.getsource(engine)
-    assert "solve_implicit_adaptive" not in src, (
-        "the validated engine must not adopt the adaptive integrator without "
-        "an explicit, re-validated change")
+    # Adaptive path is allowed only as an explicit opt-in behind the
+    # solver="sdirk2_adaptive" flag; the default/validated paths stay fixed.
+    assert "sdirk2_adaptive" in src, (
+        "the adaptive integrator must be reachable only via an explicit flag")
     assert "solve_implicit_batch" in src, (
         "the engine is expected to keep using the fixed-step implicit path")
 

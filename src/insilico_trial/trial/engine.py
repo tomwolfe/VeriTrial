@@ -656,6 +656,29 @@ class TrialEngine:
             gsh_idx, alt_idx = self._qsp_state_indices()
             self._last_alt_batch = onp.asarray(_ys2[:, :, alt_idx], dtype=onp.float64)
             self._last_gsh_batch = onp.asarray(_ys2[:, :, gsh_idx], dtype=onp.float64)
+        elif effective_solver == "sdirk2_adaptive":
+            # SDIRK2 adaptive (L-stable, step-doubling controller): opt-in
+            # production call site behind the solver flag.
+            from insilico_trial.pbpk.model import pbpk_ode as _pbpk_ode2
+            from insilico_trial.pbpk.solvers import solve_implicit_adaptive_batch
+
+            n_states = len(self._organ_network())
+            y0_batch = jnp.zeros((len(cohort_patients), n_states), dtype=jnp.float64)
+            y0_batch = y0_batch.at[:, 0].set(jnp.asarray(A_gut_0s, dtype=jnp.float64))
+            t_eval_j = jnp.asarray(t_eval_hours, dtype=jnp.float64)
+            params_jax = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in params_batch.items()}
+            ys = solve_implicit_adaptive_batch(_pbpk_ode2, y0_batch, t_eval_j, params_jax)
+            _central_idx = int(self._organ_network().index("central"))
+            _liver_idx = int(self._organ_network().index("liver")) if "liver" in self._organ_network() else 1
+            C_batch = onp.asarray(ys[:, :, _central_idx] / params_batch["V"][:, _central_idx:_central_idx + 1], dtype=onp.float64)
+            C_liver_batch = onp.asarray(ys[:, :, _liver_idx] / params_batch["V"][:, _liver_idx:_liver_idx + 1], dtype=onp.float64)
+            _C2, _Cl2, _ys2a = solve_pbpk_batch_with_compartments(
+                t_eval_hours, A_gut_0s, params_batch, dt=_stable_dt_for_batch(params_batch),
+                return_full_state=True,
+            )
+            gsh_idx, alt_idx = self._qsp_state_indices()
+            self._last_alt_batch = onp.asarray(_ys2a[:, :, alt_idx], dtype=onp.float64)
+            self._last_gsh_batch = onp.asarray(_ys2a[:, :, gsh_idx], dtype=onp.float64)
         else:
             # Legacy solver names map to the unified fixed-step 9-state path.
             C_batch, C_liver_batch, ys_full = solve_pbpk_batch_with_compartments(
