@@ -13,28 +13,20 @@ regulator would compare, and how much it costs to run.
 This module measures that: it runs the same SAD benchmark on both networks and
 reports the Cmax delta, the per-cohort breakdown, and the solver throughput.
 
-THE TOLERANCE IS PHYSIOLOGICAL, NOT FITTED
-------------------------------------------
-``CMAX_AGREEMENT_TOLERANCE`` is 25%, and it is anchored on two external
-physiological/regulatory references rather than on the measured number:
+THE TOLERANCES ARE PINNED (OLD 25% BAND DELETED)
+-----------------------------------------------
+Fin14 SAD benchmark pins three cross-network Cmax deltas (STANDARD_14 vs
+DEFAULT, same seed, drug_warfarin):
 
-1. **The bioequivalence band for Cmax.** FDA/EMA guidance accepts two
-   formulations of the same drug as bioequivalent when the 90% confidence
-   interval of the geometric mean ratio for Cmax (and AUC) lies inside
-   80-125%. A 25% band is therefore the accepted tolerance for "no
-   clinically meaningful difference in peak exposure" between two
-   presentations of the same drug in the same population. A model that
-   predicts Cmax further than 25% away from the reference model does not
-   "reproduce" it.
-2. **This repository's own acceptance band for a physiological PK parameter.**
-   ``validation.WARFARIN_REFERENCE["half_life_tolerance_pct"]`` is 25% -- the
-   tolerance the benchmark harness already applies to a warfarin half-life.
+* overall Cmax median delta within +/-15% (``CMAX_MEDIAN_TOLERANCE``);
+* overall Cmax mean delta within +/-10% (``CMAX_MEAN_TOLERANCE``);
+* 70 kg reference-adult Cmax delta within +/-20%
+  (``REF70_CMAX_TOLERANCE``).
 
-The stricter band this repo applies to *clearance*
-(``WARFARIN_REFERENCE["cl_tolerance_pct"]`` = 20%) is **not** met by the
-measured delta; the measured value is quoted explicitly in the test docstring
-and in ``docs/gap_closure_plan.md`` so the margin is visible rather than
-hidden behind a loose bound.
+The old ``CMAX_AGREEMENT_TOLERANCE = 0.25`` band is DELETED: a -23.9% median
+delta passing by 1.1pp under the old band is NOT a pass under the pinned
+``+/-15% / +/-10% / +/-20%`` gate. The 25% bioequivalence discussion is
+retained here only as history, not as an acceptance bound.
 
 A Cmax agreement is *not* a validation of the wider model: the two networks
 also differ enormously in terminal half-life (see the docs). The agreement
@@ -84,9 +76,11 @@ from insilico_trial.trial.engine import TrialEngine, _stable_dt_for_batch
 
 OrganNetworkName = Literal["DEFAULT", "STANDARD_14"]
 
-#: Relative Cmax tolerance for "the two organ networks agree".
-#: See the module docstring for the physiological justification.
-CMAX_AGREEMENT_TOLERANCE: float = 0.25
+#: Pinned Fin14 SAD benchmark tolerances (STANDARD_14 vs DEFAULT).
+#: Old +/-25% bound is DELETED; -23.9% median is NOT a pass.
+CMAX_MEDIAN_TOLERANCE: float = 0.15
+CMAX_MEAN_TOLERANCE: float = 0.10
+REF70_CMAX_TOLERANCE: float = 0.20
 
 _NETWORKS: dict[OrganNetworkName, tuple[str, ...]] = {
     "DEFAULT": DEFAULT_ORGAN_NETWORK,
@@ -258,7 +252,11 @@ def compare_cmax_across_networks(
     return {
         "reference_network": reference_name,
         "candidate_network": candidate_name,
-        "tolerance": CMAX_AGREEMENT_TOLERANCE,
+        "tolerances": {
+            "median": CMAX_MEDIAN_TOLERANCE,
+            "mean": CMAX_MEAN_TOLERANCE,
+            "ref70": REF70_CMAX_TOLERANCE,
+        },
         "n_subjects_in_population": len(population.patients),
         "n_enrolled": per_network[reference_name]["n_enrolled"],
         "n_cohorts": len(cohorts),
@@ -440,7 +438,9 @@ def measure_network_throughput(
 
 
 __all__ = [
-    "CMAX_AGREEMENT_TOLERANCE",
+    "CMAX_MEDIAN_TOLERANCE",
+    "CMAX_MEAN_TOLERANCE",
+    "REF70_CMAX_TOLERANCE",
     "OrganNetworkName",
     "compare_cmax_across_networks",
     "measure_network_throughput",

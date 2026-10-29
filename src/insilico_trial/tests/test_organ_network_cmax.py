@@ -16,33 +16,30 @@ MEASURED relative Cmax delta (STANDARD_14 vs DEFAULT), benchmark population:
     cohort 4 (20 mg)  -7.33 % (median)   -7.37 % (mean)
     overall (pooled)  -7.32 % (median)   -7.45 % (mean)
 
-Both statistics are asserted against the same +-25 % band: the median is not
+Both statistics are asserted against the pinned Fin14 gate (median +-15 %,
+mean +-10 %): the median is not
 the only summary that has to stay inside it, because a regression that moves
 the *mean* out of band while the median stays put would be a real change in
 the population's peak exposure that the median assertion would not see.
+The old +/-25% bound is DELETED; a -23.9% median delta is NOT a pass.
 
 MEASURED relative Cmax delta over the WHOLE 1000-subject population (every
 subject, nominal dose, so the benchmark's 40 enrolled subjects cannot be the
 cause): -7.46 % at 2, 5, 10 and 20 mg -- dose-independent to 4 decimal
 places, i.e. a structural property of the model, not sampling noise.
 
-THE TOLERANCE IS 25 %, AND IT IS PHYSIOLOGICAL
-----------------------------------------------
-``CMAX_AGREEMENT_TOLERANCE = 0.25`` is anchored on two external references,
-not on the measured number:
-
-1. The FDA/EMA bioequivalence band for Cmax: two presentations of the same
-   drug are bioequivalent when the 90 % CI of the geometric mean ratio for
-   Cmax lies inside 80-125 %. +-25 % is therefore the accepted tolerance for
-   "no clinically meaningful difference in peak exposure".
-2. This repository's own acceptance band for a physiological PK parameter:
-   ``WARFARIN_REFERENCE["half_life_tolerance_pct"]`` is 25 %.
+THE TOLERANCES ARE PINNED (OLD 25% DELETED)
+-------------------------------------------
+``CMAX_MEDIAN_TOLERANCE = 0.15`` (median), ``CMAX_MEAN_TOLERANCE = 0.10``
+(mean), ``REF70_CMAX_TOLERANCE = 0.20`` (70 kg reference adult). The old
+``CMAX_AGREEMENT_TOLERANCE = 0.25`` bioequivalence band is deleted as an
+acceptance bound: -23.9% median passed it by 1.1pp and must NOT pass.
 
 WHAT THE MEASUREMENT DOES *NOT* SAY (disclosed, not hidden)
 ------------------------------------------------------------
-* The margin is comfortable: -7.32 % is inside the band by over 17 percentage
-  points, and the *mean* delta (-7.67 % on the 5 mg cohort) by a similar
-  margin.
+* The margin is comfortable: -7.32 % is inside the pinned median band (15%)
+  by over 7 percentage points, and the *mean* delta (-7.67 % worst cohort)
+  inside the pinned mean band (10%) by over 2 points.
 * The delta is subject-dependent. On the 70 kg reference adult the same
   comparison gives -7.87 % (Cmax 0.965752 -> 0.889777 mg/L), i.e. inside the
   band, consistent with the population benchmark.
@@ -91,7 +88,9 @@ from insilico_trial.schemas import (
 )
 from insilico_trial.trial.engine import compute_nca
 from insilico_trial.validation.organ_network import (
-    CMAX_AGREEMENT_TOLERANCE,
+    CMAX_MEAN_TOLERANCE,
+    CMAX_MEDIAN_TOLERANCE,
+    REF70_CMAX_TOLERANCE,
     compare_cmax_across_networks,
     population_cmax_sweep,
 )
@@ -146,18 +145,15 @@ def benchmark_comparison() -> dict[str, Any]:
 def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance(
     benchmark_comparison: dict[str, Any],
 ) -> None:
-    """The two organ networks agree on Cmax to within the bioequivalence band.
+    """The two organ networks agree on Cmax within the pinned Fin14 gate.
 
     MEASURED delta (median): -7.16 %, -7.59 %, -7.68 %, -7.33 % per cohort
-    and -7.32 % overall, against a tolerance of +-25 % (see the module
-    docstring for the physiological justification of that band).
+    and -7.32 % overall, against the pinned median tolerance of +-15 %.
 
     MEASURED delta (mean): -7.41 %, -7.67 %, -7.50 %, -7.37 % per cohort
-    and -7.45 % overall -- also asserted against the same band. The mean is
-    checked as well as the median because the mean is what a regulator reads
-    off a population estimate, and because a mean that drifts out of band
-    while the median stays inside it is a real change in peak exposure that a
-    median-only assertion would not catch.
+    and -7.45 % overall -- asserted against the pinned mean tolerance of
+    +-10 %. The old +/-25% bound is DELETED: a -23.9% median delta is NOT a
+    pass.
 
     The benchmark is the real one: a 1000-subject population of which the
     protocol enrolls 40 (4 cohorts x 10), run through the engine's own
@@ -175,27 +171,27 @@ def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance(
 
     for cohort in comparison["cohorts"]:
         delta = abs(cohort["relative_delta_cmax_median"])
-        assert delta <= CMAX_AGREEMENT_TOLERANCE, (
+        assert delta <= CMAX_MEDIAN_TOLERANCE, (
             f"cohort at {cohort['dose_mg']} mg: STANDARD_14 median Cmax "
             f"differs from DEFAULT by {delta:.2%}, outside the "
-            f"{CMAX_AGREEMENT_TOLERANCE:.0%} bioequivalence band "
+            f"{CMAX_MEDIAN_TOLERANCE:.0%} pinned band "
             f"({cohort['reference_cmax_median']:.6g} vs "
             f"{cohort['candidate_cmax_median']:.6g} mg/L)")
         mean_delta = abs(cohort["relative_delta_cmax_mean"])
-        assert mean_delta <= CMAX_AGREEMENT_TOLERANCE, (
+        assert mean_delta <= CMAX_MEAN_TOLERANCE, (
             f"cohort at {cohort['dose_mg']} mg: STANDARD_14 mean Cmax differs "
             f"from DEFAULT by {mean_delta:.2%}, outside the "
-            f"{CMAX_AGREEMENT_TOLERANCE:.0%} bioequivalence band")
+            f"{CMAX_MEAN_TOLERANCE:.0%} pinned band")
 
     overall = comparison["overall"]
-    assert abs(overall["relative_delta_cmax_median"]) <= CMAX_AGREEMENT_TOLERANCE, (
+    assert abs(overall["relative_delta_cmax_median"]) <= CMAX_MEDIAN_TOLERANCE, (
         f"overall median Cmax differs by "
         f"{overall['relative_delta_cmax_median']:.2%}, outside the "
-        f"{CMAX_AGREEMENT_TOLERANCE:.0%} band")
+        f"{CMAX_MEDIAN_TOLERANCE:.0%} band")
     overall_mean_delta = abs(overall["relative_delta_cmax_mean"])
-    assert overall_mean_delta <= CMAX_AGREEMENT_TOLERANCE, (
+    assert overall_mean_delta <= CMAX_MEAN_TOLERANCE, (
         f"overall mean Cmax differs by {overall['relative_delta_cmax_mean']:.2%}"
-        f", outside the {CMAX_AGREEMENT_TOLERANCE:.0%} band")
+        f", outside the {CMAX_MEAN_TOLERANCE:.0%} band")
 
 
 def test_the_wide_network_costs_more_solver_time_but_not_the_whole_benchmark(
@@ -256,10 +252,10 @@ def test_the_cmax_delta_is_a_property_of_the_model_not_of_the_enrolled_subset() 
         assert level["relative_delta_cmax_median"] < 0.0, (
             f"STANDARD_14 Cmax was not lower than DEFAULT at "
             f"{level['dose_mg']} mg: the delta is not systematic")
-        assert abs(level["relative_delta_cmax_median"]) <= CMAX_AGREEMENT_TOLERANCE, (
+        assert abs(level["relative_delta_cmax_median"]) <= CMAX_MEDIAN_TOLERANCE, (
             f"whole-population Cmax at {level['dose_mg']} mg differs by "
             f"{level['relative_delta_cmax_median']:.2%}, outside the "
-            f"{CMAX_AGREEMENT_TOLERANCE:.0%} band")
+            f"{CMAX_MEDIAN_TOLERANCE:.0%} pinned median band")
 
     spread = max(deltas) - min(deltas)
     assert spread < 0.01, (
@@ -278,8 +274,8 @@ def test_standard14_reproduces_terminal_kinetics_for_the_reference_adult() -> No
     on DEFAULT (inside the repo's 28.5-47.5 h band for the 38 h literature
     value) and 46.26 h on STANDARD_14 -- both inside the 20-80 h credibility
     band, with Vz/F at 1.10x / 1.19x of typical_v_f. The same subject's Cmax
-    delta is -7.87 %, i.e. inside the +-25 % band that the population
-    benchmark sits inside.
+    delta is -7.87 %, i.e. inside the pinned +/-20% reference-adult band
+    (old +/-25% DELETED).
     """
     drug = load_drug_config(DRUG_CONFIG)
     t_eval = onp.linspace(0.0, 24.0 * 30, 24 * 30 + 1)
@@ -323,13 +319,12 @@ def test_standard14_reproduces_terminal_kinetics_for_the_reference_adult() -> No
         assert 0.5 <= vz_f[name] / drug.typical_v_f <= 2.0, (
             f"{name}: Vz/F {vz_f[name]:.2f} L outside 0.5x-2x of typical_v_f")
 
-    # On the reference adult the Cmax delta sits inside the band the
-    # population benchmark sits inside.
+    # On the reference adult the Cmax delta sits inside the pinned ref70 band.
     reference_delta = (cmax["STANDARD_14"] - cmax["DEFAULT"]) / cmax["DEFAULT"]
     assert reference_delta < 0.0
-    assert abs(reference_delta) <= CMAX_AGREEMENT_TOLERANCE, (
+    assert abs(reference_delta) <= REF70_CMAX_TOLERANCE, (
         f"reference-adult Cmax delta {reference_delta:.2%} is outside the "
-        f"{CMAX_AGREEMENT_TOLERANCE:.0%} band")
+        f"{REF70_CMAX_TOLERANCE:.0%} pinned ref70 band")
 
 
 def test_the_cli_can_select_the_wide_network_without_moving_the_default() -> None:

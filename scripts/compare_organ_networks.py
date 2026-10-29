@@ -42,7 +42,9 @@ from insilico_trial.schemas import (  # noqa: E402
     load_protocol_config,
 )
 from insilico_trial.validation.organ_network import (  # noqa: E402
-    CMAX_AGREEMENT_TOLERANCE,
+    CMAX_MEAN_TOLERANCE,
+    CMAX_MEDIAN_TOLERANCE,
+    REF70_CMAX_TOLERANCE,
     compare_cmax_across_networks,
     measure_network_throughput,
     population_cmax_sweep,
@@ -109,7 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         "cmax_comparison": comparison,
         "population_sweep": sweep,
         "throughput": throughput,
-        "tolerance": CMAX_AGREEMENT_TOLERANCE,
+        "tolerances": {
+            "median": CMAX_MEDIAN_TOLERANCE,
+            "mean": CMAX_MEAN_TOLERANCE,
+            "ref70": REF70_CMAX_TOLERANCE,
+        },
     }
 
     out_dir = Path(args.output_dir)
@@ -136,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{overall['reference_cmax_median']:>16.6g} "
           f"{overall['candidate_cmax_median']:>16.6g} "
           f"{overall['relative_delta_cmax_median']:>10.2%}")
-    print(f"tolerance: {CMAX_AGREEMENT_TOLERANCE:.0%} (bioequivalence band)")
+    print(f"tolerances: median {CMAX_MEDIAN_TOLERANCE:.0%}, mean {CMAX_MEAN_TOLERANCE:.0%}, ref70 {REF70_CMAX_TOLERANCE:.0%} (old 25% DELETED)")
     print()
     print("Whole-population sweep (every subject, nominal dose):")
     for level in sweep["levels"]:
