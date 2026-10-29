@@ -1217,8 +1217,8 @@ def compute_jacobian(model_path: Path,
         elim = int(spec["elim"])
         perfused = [int(index) for index in spec["perfused"]]
         result: dict[tuple[int, int], str] = {}
-        result[(gut, gut)] = "-ka"
-        result[(central, gut)] = "ka"
+        result[(gut, gut)] = "-ka_rate"
+        result[(central, gut)] = "ka_rate"
         # Symbol naming follows the MODEL's own convention, keyed by organ NAME:
         # the liver, the peripheral tissue and the effect site are the three
         # organs the perfusion algebra names symbolically (``Q[_LIVER_IDX]`` is

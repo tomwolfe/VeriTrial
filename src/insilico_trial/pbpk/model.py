@@ -384,18 +384,30 @@ def pbpk_ode(
 def _reference_physiology(
     organ_network: tuple[str, ...] = DEFAULT_ORGAN_NETWORK,
 ) -> dict[str, onp.ndarray]:
-    reference = {
-        "gut": (0.0, 0.3), "liver": (1.5, 1.5), "central": (0.0, 3.0),
-        "peripheral": (5.0, 4.0), "effect": (0.5, 0.3),
-        "kidney": (1.2, 0.5), "lung": (1.0, 2.0), "brain": (0.75, 1.4),
-        "heart": (0.5, 0.6), "muscle": (0.9, 30.0), "adipose": (0.25, 12.0),
-        "bone": (0.45, 3.0), "skin": (0.5, 4.0), "spleen": (0.25, 0.25),
-        "pancreas": (0.3, 0.3), "elim": (0.0, 1.0),
+    CO = 300.0
+    Q_PERF_TOTAL = 0.85 * CO  # 255 L/h perfused
+    V_ref = {
+        "gut": 0.3, "liver": 1.5, "central": 3.0,
+        "peripheral": 4.0, "effect": 0.3,
+        "kidney": 0.5, "lung": 2.0, "brain": 1.4,
+        "heart": 0.6, "muscle": 30.0, "adipose": 12.0,
+        "bone": 3.0, "skin": 4.0, "spleen": 0.25,
+        "pancreas": 0.3, "elim": 1.0,
     }
     organ_network = tuple(organ_network)
+    perfused = [n for n in organ_network if n not in ("gut", "central", "elim")]
+    sumV = sum(V_ref[n] for n in perfused)
+    Q_ref = {}
+    for name in organ_network:
+        if name == "central":
+            Q_ref[name] = CO  # blood pool: nonzero, >2.0 L/h
+        elif name in ("gut", "elim"):
+            Q_ref[name] = 0.0
+        else:
+            Q_ref[name] = Q_PERF_TOTAL * (V_ref[name] / sumV)
     return {
-        "Q": onp.asarray([reference[name][0] for name in organ_network]),
-        "V": onp.asarray([reference[name][1] for name in organ_network]),
+        "Q": onp.asarray([Q_ref[name] for name in organ_network]),
+        "V": onp.asarray([V_ref[name] for name in organ_network]),
     }
 
 

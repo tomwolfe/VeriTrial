@@ -281,7 +281,7 @@ def _independent_column_sums(model_path: Path, fin_n: int,
         expr = _re.sub(r"args\s*\[\s*['\"](\w+)['\"]\s*\]", r"\1", expr)
         expr = _re.sub(r"args\s*\[\s*['\"]vmax_metabolic['\"]\s*\]", "Vmax", expr)
         expr = _re.sub(r"args\s*\[\s*['\"]km_metabolic['\"]\s*\]", "Km", expr)
-        expr = _re.sub(r"\bka\b", "ka", expr)
+        expr = _re.sub(r"\bka\b", "ka_rate", expr)
         return expr
 
     tree = _ast.parse(model_path.read_text(encoding="utf-8"))
@@ -721,7 +721,7 @@ def run_negative_controls(model_path: Path, fin_n: int,
     if not _is_numeric_shortcut("(0) + (0) = 0"):
         failures.append("zero-only sum missed by strict filter")
     # 5. ...and NEITHER may flag genuine parametric content.
-    genuine = "(-ka) + (ka) + (Ql/Vc) + ((-CL - Qe - Ql - Qp)/Vc) = 0"
+    genuine = "(-ka_rate) + (ka_rate) + (Ql/Vc) + ((-CL - Qe - Ql - Qp)/Vc) = 0"
     if _is_trivial_lemma(genuine):
         failures.append("genuine column sum rejected by trivial filter")
     if _is_numeric_shortcut(genuine):

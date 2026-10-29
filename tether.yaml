@@ -40,4 +40,4 @@ adapters:
     # explicitly scoped to. Prompting the model not to reach for the
     # read-only path is mitigation, not enforcement. The safety that `--auto`
     # gives up at the model layer is held by `sandbox_mode: enforce` above.
-    command: ["opencode", "run", "--auto", "-m", "opencode-go/muse-spark-1.3-contributor", "{prompt}"]
+    command: ["python3", "scripts/opencode_tty.py", "opencode-go/muse-spark-1.3-contributor", "{prompt}"]

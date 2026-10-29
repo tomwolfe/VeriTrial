@@ -617,6 +617,9 @@ class TrialEngine:
         effective_solver = solver
         if effective_solver == "diffrax":
             effective_solver = "fixed_step"
+        import os as _os
+        if _os.environ.get("VERITRIAL_USE_ADAPTIVE") == "1":
+            effective_solver = "sdirk2_adaptive"
 
         if effective_solver == "fixed_step":
             # Fixed-step RK4: return plasma, liver + full 9-state (ALT idx 8)
