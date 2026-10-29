@@ -51,8 +51,14 @@ def _reference_adult_pk(network: tuple[str, ...]) -> dict[str, float]:
         weight_kg=70.0, age=40.0, drug=drug, genotype_scale=1.0,
         organ_network=network,
     )
+    # ONE dose variable feeds both the gut seed and the NCA dose: NCA
+    # half-life is shape-invariant and Vz/F = Dose/(AUC*lambda_z) is
+    # dose-proportional, so a consistent rescaling of both is exactly
+    # unobservable -- and a mutant that touches only one of two copies would
+    # be testing copy-paste rather than pharmacokinetics.
+    dose = 10.0 * drug.bioavailability
     t_eval = onp.linspace(0.0, 24.0 * 30, 24 * 30 + 1)
-    ys = solve_pbpk_full(t_eval, 10.0 * drug.bioavailability, params)
+    ys = solve_pbpk_full(t_eval, dose, params)
     central = network.index("central")
     concentrations = onp.asarray(ys[:, central] / params["V"][central])
     observations = [
@@ -60,7 +66,7 @@ def _reference_adult_pk(network: tuple[str, ...]) -> dict[str, float]:
                     concentration=float(c))
         for t, c in zip(t_eval, concentrations, strict=True)
     ]
-    pk = compute_nca(observations, dose=10.0 * drug.bioavailability)
+    pk = compute_nca(observations, dose=dose)
     assert pk["half_life"] is not None
     assert pk["vz_f"] is not None
     return {"half_life": float(pk["half_life"]), "vz_f": float(pk["vz_f"])}
@@ -140,3 +146,89 @@ def test_kp_anchoring_scale_is_interior_on_both_networks() -> None:
             f"{label} Kp anchoring scale {scale:.4f} outside "
             f"[{KP_SCALE_MIN}, {KP_SCALE_MAX}]: the raw physiology is more "
             f"than 5x from typical_v_f, so the anchor is clamped")
+
+
+def test_age_factor_boundary_at_40() -> None:
+    """The 40-year age boundary is exact: 40 -> 1.0, above -> 0.9."""
+    from insilico_trial.pbpk.model import scale_physiological
+
+    assert scale_physiological(70.0, 40.0)["age_factor"] == 1.0
+    assert scale_physiological(70.0, 40.0001)["age_factor"] == 0.9
+    assert scale_physiological(70.0, 65.0)["age_factor"] == 0.9
+
+
+def test_batch_solver_caps_dt_at_the_metzler_margin() -> None:
+    """solve_pbpk_batch honours the 0.9x Metzler cap even when asked for more."""
+    import numpy as _onp
+
+    from insilico_trial.pbpk.model import build_pbpk_params, solve_pbpk_batch
+
+    drug = load_drug_config(DRUG_CONFIG)
+    params = build_pbpk_params(
+        weight_kg=70.0, age=40.0, drug=drug, genotype_scale=1.0,
+        organ_network=DEFAULT_ORGAN_NETWORK,
+    )
+    batch = {k: _onp.stack([_onp.asarray(params[k])]) for k in ("Q", "V", "Kp")}
+    batch["CL"] = _onp.asarray([params["CL"]])
+    batch["ka"] = _onp.asarray([params["ka"]])
+    t_eval = _onp.linspace(0.0, 24.0, 25)
+    out = _onp.asarray(solve_pbpk_batch(t_eval, _onp.asarray([10.0]), batch, dt=1.0))
+    assert _onp.all(_onp.isfinite(out)), "batch solve at dt=1.0 is not finite"
+    assert float(_onp.max(out)) > 0.0, "batch solve at dt=1.0 produced no exposure"
+
+
+def test_linear_predictor_agrees_with_grid_solver() -> None:
+    """predict_pbpk_plasma_linear tracks solve_pbpk_full on warfarin/Fin6."""
+    import numpy as _onp
+
+    from insilico_trial.pbpk.model import (
+        build_pbpk_params,
+        predict_pbpk_plasma_linear,
+        solve_pbpk_full,
+    )
+
+    drug = load_drug_config(DRUG_CONFIG)
+    params = build_pbpk_params(
+        weight_kg=70.0, age=40.0, drug=drug, genotype_scale=1.0,
+        organ_network=DEFAULT_ORGAN_NETWORK,
+    )
+    t_eval = _onp.linspace(0.0, 48.0, 49)
+    dose = 10.0 * drug.bioavailability
+    ys = _onp.asarray(solve_pbpk_full(t_eval, dose, params))
+    central = DEFAULT_ORGAN_NETWORK.index("central")
+    ref = ys[:, central] / params["V"][central]
+    got = _onp.asarray(predict_pbpk_plasma_linear(t_eval, dose, params))
+    assert _onp.all(_onp.isfinite(got))
+    denom = _onp.maximum(_onp.abs(ref), 1e-6)
+    assert float(_onp.max(_onp.abs(got - ref) / denom)) < 0.05, (
+        "linear predictor disagrees with the grid solver by more than 5%")
+
+
+def test_kp_lipid_exponent_pinned_for_warfarin() -> None:
+    """Rodgers-Rowland Kp values for warfarin are pinned exactly.
+
+    kp_for_tissue is a pure function, so these pins are exact (rtol 1e-9),
+    not tolerance gates: any change to the lipid exponent, the logP
+    coefficient, or the tissue adjustments trips them. In particular the
+    ``0.4 * log_p`` lipid term cannot become ``0.4 / log_p`` (a 7x uniform
+    Kp shift the Vd anchor and the 20-80h t1/2 window would absorb).
+    """
+    import numpy as _onp
+
+    from insilico_trial.pbpk.model import kp_for_tissue
+
+    drug = load_drug_config(DRUG_CONFIG)
+    expected = {
+        "liver": 1.216779264869242,
+        "kidney": 0.7604870405432761,
+        "muscle": 0.2281461121629828,
+        "brain": 0.2281461121629828,
+        "lung": 0.608389632434621,
+        "fat": 0.15209740810865524,
+    }
+    for tissue, want in expected.items():
+        got = kp_for_tissue(
+            drug.log_p, drug.pka, drug.fup, drug.bp_ratio,
+            tissue, drug.mol_weight)
+        assert _onp.isclose(got, want, rtol=1e-9), (
+            f"Kp[{tissue}] {got!r} != pinned {want!r}")
