@@ -488,6 +488,11 @@ def test_saturable_forward_euler_preserves_nonnegativity(network_name: str) -> N
 
 def test_saturable_step_is_no_smaller_than_the_linear_one() -> None:
     # Monotonicity sanity: adding a drain can only tighten the admissible step.
+    # Non-strict: under CO-scale reference flows (CO=300 L/h, perfused sum
+    # 255 L/h) the binding diagonal is the CENTRAL one, not the liver, so a
+    # stronger hepatic drain tightens the liver diagonal without moving the
+    # minimum. Strict `<` held only while the liver bound; `<=` is the actual
+    # theorem (a decreased set element cannot raise the min).
     from insilico_trial.pbpk.fixed_step import calculate_max_stable_dt
     from insilico_trial.pbpk.model import DEFAULT_ORGAN_NETWORK
 
@@ -496,7 +501,14 @@ def test_saturable_step_is_no_smaller_than_the_linear_one() -> None:
         dict(linear, vmax_metabolic=0.5, km_metabolic=1.0), DEFAULT_ORGAN_NETWORK)
     large = calculate_max_stable_dt(
         dict(linear, vmax_metabolic=50.0, km_metabolic=1.0), DEFAULT_ORGAN_NETWORK)
-    assert large < small
+    assert large <= small
+    # And the liver diagonal itself still tightens strictly.
+    from insilico_trial.pbpk.fixed_step import _jacobian_diagonal
+    from insilico_trial.pbpk.model import organ_indices
+    spec = organ_indices(DEFAULT_ORGAN_NETWORK)
+    liver = int(spec["liver"])
+    assert (_jacobian_diagonal(dict(linear, vmax_metabolic=50.0, km_metabolic=1.0), spec)[liver]
+            < _jacobian_diagonal(dict(linear, vmax_metabolic=0.5, km_metabolic=1.0), spec)[liver])
 
 
 # --- step-count derivation and grid interpolation --------------------------
@@ -596,69 +608,73 @@ def _all_finite(out: Any) -> bool:
 @pytest.mark.parametrize("entry_point", _STEP_COUNT_ENTRY_POINTS)
 def test_step_count_over_an_integral_span(monkeypatch: pytest.MonkeyPatch,
                                           entry_point: str) -> None:
-    # (2.5 - 0.5) / 0.03125 == 64.0 exactly, so the truncating int() keeps all
-    # 64 intervals and the scan runs 64 times.  dt is a power of two so the
-    # quotient is exact rather than 63.99999999999999, and t0 is non-zero so a
-    # (t1 + t0) slip cannot produce the same quotient.
-    assert (2.5 - 0.5) / 0.03125 == 64.0
+    # (2.5 - 0.5) / 0.00390625 == 512.0 exactly, so the truncating int() keeps
+    # all 512 intervals and the scan runs 512 times. dt is a power of two so
+    # the quotient is exact rather than 511.99999999999994, and t0 is non-zero
+    # so a (t1 + t0) slip cannot produce the same quotient. dt sits under the
+    # ~0.0118 h Metzler bound under CO-scale reference flows.
+    assert (2.5 - 0.5) / 0.00390625 == 512.0
     lengths = _record_scan_lengths(monkeypatch)
     params, batch, dose = _warfarin_batch()
 
-    out = _solve_via(entry_point, onp.linspace(0.5, 2.5, 5), dose, params, batch, 0.03125)
+    out = _solve_via(entry_point, onp.linspace(0.5, 2.5, 5), dose, params, batch, 0.00390625)
 
-    assert lengths == [64], (
-        f"{entry_point} took {lengths} scan steps for an exactly integral 64-step span")
+    assert lengths == [512], (
+        f"{entry_point} took {lengths} scan steps for an exactly integral 512-step span")
     assert _all_finite(out)
 
 
 @pytest.mark.parametrize("entry_point", _STEP_COUNT_ENTRY_POINTS)
 def test_step_count_drops_the_partial_span(monkeypatch: pytest.MonkeyPatch,
                                           entry_point: str) -> None:
-    # (3.0 - 0.5) / 0.04 == 62.5, and int() truncates rather than rounding, so
-    # the scan runs 62 times: the last whole step lands at 2.98 h and the
-    # remaining 0.02 h of the requested span is never integrated.
-    assert (3.0 - 0.5) / 0.04 == 62.5
+    # (3.001953125 - 0.5) / 0.00390625 == 640.5, and int() truncates rather than
+    # rounding, so the scan runs 640 times: the last whole step lands at 3.0 h
+    # and the remaining 0.001953125 h of the requested span is never
+    # integrated. dt is a power of two and 640.5 is exactly representable, so
+    # the quotient is exact; dt sits under the ~0.0118 h Metzler bound.
+    assert (3.001953125 - 0.5) / 0.00390625 == 640.5
     lengths = _record_scan_lengths(monkeypatch)
     params, batch, dose = _warfarin_batch()
 
-    out = _solve_via(entry_point, onp.linspace(0.5, 3.0, 5), dose, params, batch, 0.04)
+    out = _solve_via(entry_point, onp.linspace(0.5, 3.001953125, 5), dose, params, batch, 0.00390625)
 
-    assert lengths == [62], (
-        f"{entry_point} took {lengths} scan steps; int() must truncate 62.5 to 62")
+    assert lengths == [640], (
+        f"{entry_point} took {lengths} scan steps; int() must truncate 640.5 to 640")
     assert _all_finite(out)
 
 
 def test_truncated_step_count_shows_up_in_the_trajectory(monkeypatch: pytest.MonkeyPatch) -> None:
     # The same arithmetic read off the OUTPUT instead of a spy: with the RK4
     # stage replaced by "add dt", the state after i steps is exactly y0 + i*dt,
-    # so a step count of 62 prints 8.0 + 2.48 in the last row and a count of 63
-    # would print 8.0 + 2.52.
+    # so a step count of 640 prints 8.0 + 2.5 in the last row and a count of
+    # 641 would print 8.0 + 2.50390625.
     from insilico_trial.pbpk import fixed_step
 
     _params, batch, _dose = _warfarin_batch()
     monkeypatch.setattr(fixed_step, "_rk4_step", lambda t, y, dt, args: y + dt)
 
     out = onp.asarray(fixed_step.solve_pbpk_batch_9state(
-        onp.linspace(0.5, 3.0, 3), onp.full(2, 8.0), batch, dt=0.04))
+        onp.linspace(0.5, 3.001953125, 3), onp.full(2, 8.0), batch, dt=0.00390625))
 
     assert out.shape == (2, 3, 9)
     # t0 row is the untouched initial state: 8.0 in the gut, nothing integrated
     assert out[0, 0, 0] == 8.0
-    # the last t_eval sample is past the last integrated state (2.98 h), so
-    # jnp.interp clamps and returns the final state of 62 steps
-    assert onp.allclose(out[0, -1, 0], 8.0 + 62 * 0.04)
-    assert not onp.allclose(out[0, -1, 0], 8.0 + 63 * 0.04)
+    # the last t_eval sample is past the last integrated state (3.0 h), so
+    # jnp.interp clamps and returns the final state of 640 steps
+    assert onp.allclose(out[0, -1, 0], 8.0 + 640 * 0.00390625)
+    assert not onp.allclose(out[0, -1, 0], 8.0 + 641 * 0.00390625)
 
 
 # --- grid interpolation boundaries ----------------------------------------
 
 
-def _grid_setup(n_steps: int = 65, t0: float = 0.5, t1: float = 2.5) -> Any:
+def _grid_setup(n_steps: int = 257, t0: float = 0.5, t1: float = 2.5) -> Any:
     """``(solver, args, y0, dt, t_internal)`` for a direct grid-interpolation call.
 
-    65 states over a 2 h span is dt = 0.03125 h, comfortably under the 0.0575 h
-    Metzler bound, so the trajectory stays well conditioned and can be compared
-    against a reference stepped outside the solver.
+    257 states over a 2 h span is dt = 0.0078125 h, comfortably under the
+    ~0.0118 h Metzler bound under CO-scale reference flows, so the trajectory
+    stays well conditioned and can be compared against a reference stepped
+    outside the solver.
     """
     import jax.numpy as jnp
 
@@ -1093,25 +1109,27 @@ def test_jacobian_diagonal_falls_back_to_float_for_scalar_parameters() -> None:
 # an amount pattern that is not constant, so a bolus lookup that is off by one
 # dose or applied twice is visible in the jump sequence.
 #
-# NOTE: with dt = 0.02 these four times happen to be exact multiples of dt
-# (7.3 = 365*0.02, and likewise for the rest), so they land exactly on grid
+# NOTE: with dt = 0.01 these four times happen to be exact multiples of dt
+# (7.3 = 730*0.01, and likewise for the rest), so they land exactly on grid
 # points. That is fine for pinning the *amount* rule but blind to the *window
 # width*, because every widening of the window around an on-grid time still
 # finds the same first grid point. `_OFF_GRID_*` below is the set that actually
 # discriminates the window; see test_multi_dose_window_is_half_a_step_wide.
 _MULTI_DOSE_TIMES = onp.array([7.3, 23.1, 41.7, 60.9])
 
-# Off-grid by exactly a quarter step (0.005 h = dt/4) in the +direction, i.e.
+# Off-grid by exactly a quarter step (0.0025 h = dt/4) in the +direction, i.e.
 # the nearest grid point is dt/4 away and its left neighbour is 3*dt/4 away.
-# So:  * the dt/2 window fires at the NEAREST grid point (margin dt/4 = 0.005,
+# So:  * the dt/2 window fires at the NEAREST grid point (margin dt/4 = 0.0025,
 #        comfortably away from floating-point knife-edge equality), while
-#     * any window of width >= 3*dt/2 (= 0.03) fires one step EARLIER, at the
+#     * any window of width >= 3*dt/2 (= 0.015) fires one step EARLIER, at the
 #        neighbour that is 3*dt/4 away.
 # That one-step shift is what makes the window width observable at all.
-_OFF_GRID_TIMES = onp.array([7.305, 23.115, 41.715, 60.915])
+_OFF_GRID_TIMES = onp.array([7.3025, 23.1025, 41.7025, 60.9025])
 _MULTI_DOSE_AMOUNTS = onp.array([10.0, 5.0, 7.5, 2.5])
 _MULTI_DOSE_SPAN = 72.0
-_MULTI_DOSE_DT = 0.02
+# dt sits under the ~0.0118 h Metzler bound under CO-scale reference flows
+# (CO=300 L/h); the fail-closed assert_dt_stable refuses anything above it.
+_MULTI_DOSE_DT = 0.01
 
 
 def _identity_rk4(t: float, y: Any, dt: float, args: dict[str, Any]) -> Any:
