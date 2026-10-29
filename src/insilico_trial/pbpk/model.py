@@ -310,16 +310,35 @@ def rodgers_rowland_kp(
     return float(kp)
 
 
-# Tissue-specific Kp adjustment factors (multiplicative relative to generic Kp)
+# Tissue-specific Kp adjustment factors (multiplicative relative to generic Kp).
+#
+# PHYSIOLOGY NOTE (Fin14 credibility): the generic-base Kp for a highly
+# protein-bound acid such as warfarin (fu ~0.008) is O(1), so assigning it
+# unchanged to every STANDARD_14 tissue gives a raw distribution volume of
+# ~110 L -- 13x the drug's typical_v_f. The Vd anchor (see
+# ``build_pbpk_params``) then clamps at its 0.2 floor, leaving an anchored Vss
+# of ~24 L and a terminal t1/2 of several hundred hours. Real
+# Rodgers-Rowland acid partitioning puts lean-tissue Kp well below 1 (tissue
+# albumin tracks plasma albumin) and adipose Kp lower still for acids, so the
+# STANDARD_14-only tissues carry binding-corrected factors here:
+# lean viscera ~0.4-0.5, muscle/bone ~0.15 (large volumes, low binding),
+# brain ~0.15 (BBB restricts acids further), skin ~0.2, adipose ~0.1.
+# The ``generic``/``liver``/``peripheral`` factors are the validated 6-state
+# path's and are NOT retuned here.
 _TISSUE_KP_ADJUSTMENTS: dict[str, float] = {
     "generic": 1.0,
     "liver": 0.8,
-    "kidney": 0.9,
-    "brain": 1.2,
-    "fat": 3.0,
-    "muscle": 0.7,
-    "lung": 0.9,
+    "kidney": 0.5,
+    "brain": 0.15,
+    "fat": 0.1,
+    "muscle": 0.15,
+    "lung": 0.4,
     "peripheral": 1.0,
+    "heart": 0.4,
+    "bone": 0.15,
+    "skin": 0.2,
+    "spleen": 0.5,
+    "pancreas": 0.5,
 }
 
 
@@ -453,11 +472,17 @@ def build_pbpk_params(
     organ_indices(organ_network)
     ref = _reference_physiology(organ_network)
     # Kp for ALL perfused tissues via Rodgers-Rowland; gut/central/elim stay 1.0.
+    # Organs lumped as "generic" here share the validated 6-state factor 1.0;
+    # the STANDARD_14-only viscera use the binding-corrected factors from
+    # _TISSUE_KP_ADJUSTMENTS (heart/bone/skin/spleen/pancreas are NOT generic
+    # lean tissue for a highly-bound acid -- see the table note). The 6-state
+    # network only ever looks up liver/peripheral/effect, so this mapping is
+    # Fin6-neutral by construction.
     _TISSUE_BY_NAME = {
         "liver": "liver", "kidney": "kidney", "lung": "lung",
-        "brain": "brain", "heart": "generic", "muscle": "muscle",
-        "adipose": "fat", "bone": "generic", "skin": "generic",
-        "spleen": "generic", "pancreas": "generic",
+        "brain": "brain", "heart": "heart", "muscle": "muscle",
+        "adipose": "fat", "bone": "bone", "skin": "skin",
+        "spleen": "spleen", "pancreas": "pancreas",
         "peripheral": "peripheral", "effect": "generic",
     }
     kp_by_name: dict[str, float] = {"gut": 1.0, "central": 1.0, "elim": 1.0}

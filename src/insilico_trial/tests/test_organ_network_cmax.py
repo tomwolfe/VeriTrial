@@ -10,11 +10,11 @@ population (``configs/population_default.yaml``, seed 42), the same protocol
 
 MEASURED relative Cmax delta (STANDARD_14 vs DEFAULT), benchmark population:
 
-    cohort 1 (2 mg)   -22.90 % (median)   -23.77 % (mean)
-    cohort 2 (5 mg)   -24.30 % (median)   -24.76 % (mean)
-    cohort 3 (10 mg)  -24.11 % (median)   -24.33 % (mean)
-    cohort 4 (20 mg)  -23.78 % (median)   -23.66 % (mean)
-    overall (pooled)  -23.89 % (median)   -24.01 % (mean)
+    cohort 1 (2 mg)   -7.16 % (median)   -7.41 % (mean)
+    cohort 2 (5 mg)   -7.59 % (median)   -7.67 % (mean)
+    cohort 3 (10 mg)  -7.68 % (median)   -7.50 % (mean)
+    cohort 4 (20 mg)  -7.33 % (median)   -7.37 % (mean)
+    overall (pooled)  -7.32 % (median)   -7.45 % (mean)
 
 Both statistics are asserted against the same +-25 % band: the median is not
 the only summary that has to stay inside it, because a regression that moves
@@ -23,7 +23,7 @@ the population's peak exposure that the median assertion would not see.
 
 MEASURED relative Cmax delta over the WHOLE 1000-subject population (every
 subject, nominal dose, so the benchmark's 40 enrolled subjects cannot be the
-cause): -23.83 % at 2, 5, 10 and 20 mg -- dose-independent to 4 decimal
+cause): -7.46 % at 2, 5, 10 and 20 mg -- dose-independent to 4 decimal
 places, i.e. a structural property of the model, not sampling noise.
 
 THE TOLERANCE IS 25 %, AND IT IS PHYSIOLOGICAL
@@ -40,26 +40,26 @@ not on the measured number:
 
 WHAT THE MEASUREMENT DOES *NOT* SAY (disclosed, not hidden)
 ------------------------------------------------------------
-* The margin is thin: -23.89 % is inside the band by 1.1 percentage points,
-  and the *mean* delta (-24.76 % on the 5 mg cohort) is inside it by only
-  0.24 percentage points.
+* The margin is comfortable: -7.32 % is inside the band by over 17 percentage
+  points, and the *mean* delta (-7.67 % on the 5 mg cohort) by a similar
+  margin.
 * The delta is subject-dependent. On the 70 kg reference adult the same
-  comparison gives -25.33 % (Cmax 0.984631 -> 0.735369 mg/L), i.e. marginally
-  *outside* the band. The wide network therefore reproduces peak exposure
-  only approximately; the +-25 % tolerance is not a blanket guarantee.
+  comparison gives -7.87 % (Cmax 0.965752 -> 0.889777 mg/L), i.e. inside the
+  band, consistent with the population benchmark.
 * The delta is a *distribution* effect, not an exposure effect: on the
-  reference adult AUC-inf is 63.2014 -> 62.3988 mg*h/L (-1.26 %) and CL/F
-  0.1503 -> 0.1522 L/h, because clearance and bioavailability are shared with
+  reference adult AUC-inf is 63.2416 -> 63.2447 mg*h/L (+0.00 %) and CL/F
+  0.1502 -> 0.1502 L/h, because clearance and bioavailability are shared with
   the 6-state model. What the wider network changes is where the drug sits
-  (the peak, -25 %, and the terminal phase, 15x), not how much is exposed.
-* This repo's stricter clearance band (``cl_tolerance_pct`` = 20 %) is NOT
-  met by the same comparison.
-* Cmax agreement is not model validation. The two networks differ enormously
-  in terminal half-life (benchmark population: 55.15 h vs 351.40 h; 70 kg
-  reference adult: 42.38 h vs 637.79 h, against a literature warfarin t1/2 of
-  38 h). The wide network's perfused block is not calibrated to the drug's
-  volume of distribution, so it is NOT a drop-in replacement for the validated
-  6-state model and must not be promoted to the default.
+  (the peak, -8 %), not how much is exposed.
+* Benchmark-population mean half-life is 49.65 h on DEFAULT vs 53.86 h on
+  STANDARD_14 -- both inside the 20-80 h credibility band.
+* Cmax agreement is not model validation on its own. The two networks'
+  terminal kinetics are compared explicitly in
+  ``test_standard14_reproduces_terminal_kinetics_for_the_reference_adult``
+  (reference adult: 42.44 h vs 46.26 h, against a literature warfarin t1/2 of
+  38 h). The 6-state model remains the validated default: MAD is not
+  supported on STANDARD_14 (it fails closed) and the wide network is not
+  promoted to the default.
 """
 
 from __future__ import annotations
@@ -148,12 +148,12 @@ def test_default_and_standard14_cmax_agree_within_the_physiological_tolerance(
 ) -> None:
     """The two organ networks agree on Cmax to within the bioequivalence band.
 
-    MEASURED delta (median): -22.90 %, -24.30 %, -24.11 %, -23.78 % per cohort
-    and -23.89 % overall, against a tolerance of +-25 % (see the module
+    MEASURED delta (median): -7.16 %, -7.59 %, -7.68 %, -7.33 % per cohort
+    and -7.32 % overall, against a tolerance of +-25 % (see the module
     docstring for the physiological justification of that band).
 
-    MEASURED delta (mean): -23.77 %, -24.76 %, -24.33 %, -23.66 % per cohort
-    and -24.01 % overall -- also asserted against the same band. The mean is
+    MEASURED delta (mean): -7.41 %, -7.67 %, -7.50 %, -7.37 % per cohort
+    and -7.45 % overall -- also asserted against the same band. The mean is
     checked as well as the median because the mean is what a regulator reads
     off a population estimate, and because a mean that drifts out of band
     while the median stays inside it is a real change in peak exposure that a
@@ -237,7 +237,7 @@ def test_the_cmax_delta_is_a_property_of_the_model_not_of_the_enrolled_subset() 
 
     The SAD benchmark enrolls 40 of the 1000 subjects, so the benchmark delta
     could in principle be a property of those 40. MEASURED: solving the whole
-    population at nominal dose gives -23.83 % at 2, 5, 10 and 20 mg -- the
+    population at nominal dose gives -7.46 % at 2, 5, 10 and 20 mg -- the
     delta is dose-independent (spread < 0.1 percentage points), because the
     wide network changes *distribution*, not the exposure/response slope.
 
@@ -267,22 +267,26 @@ def test_the_cmax_delta_is_a_property_of_the_model_not_of_the_enrolled_subset() 
         f"is not a structural property of the wider network")
 
 
-def test_standard14_is_not_a_drop_in_replacement_for_the_default_network() -> None:
-    """Cmax agreement must not be mistaken for model equivalence.
+def test_standard14_reproduces_terminal_kinetics_for_the_reference_adult() -> None:
+    """Terminal agreement must accompany Cmax agreement.
 
-    MEASURED: on the 70 kg reference adult the terminal half-life is 42.38 h
+    The wide network's perfused block is now calibrated to the drug's volume
+    of distribution (binding-corrected tissue Kp, Vd-anchored), so it
+    reproduces terminal kinetics instead of the historical ~638 h tail.
+
+    MEASURED: on the 70 kg reference adult the terminal half-life is 42.44 h
     on DEFAULT (inside the repo's 28.5-47.5 h band for the 38 h literature
-    value) and 637.79 h on STANDARD_14 -- 15x the literature value. The same
-    subject's Cmax delta is -25.33 %, i.e. marginally OUTSIDE the +-25 % band
-    that the population benchmark sits inside. The wide network reproduces
-    peak exposure approximately and reproduces terminal kinetics not at all,
-    so it cannot be promoted to the default.
+    value) and 46.26 h on STANDARD_14 -- both inside the 20-80 h credibility
+    band, with Vz/F at 1.10x / 1.19x of typical_v_f. The same subject's Cmax
+    delta is -7.87 %, i.e. inside the +-25 % band that the population
+    benchmark sits inside.
     """
     drug = load_drug_config(DRUG_CONFIG)
     t_eval = onp.linspace(0.0, 24.0 * 30, 24 * 30 + 1)
 
     half_lives: dict[str, float] = {}
     cmax: dict[str, float] = {}
+    vz_f: dict[str, float] = {}
     for name, network in (
         ("DEFAULT", DEFAULT_ORGAN_NETWORK),
         ("STANDARD_14", STANDARD_14_ORGAN_NETWORK),
@@ -304,29 +308,28 @@ def test_standard14_is_not_a_drop_in_replacement_for_the_default_network() -> No
         peak = pk["cmax"]
         assert half_life is not None
         assert peak is not None
+        assert pk["vz_f"] is not None
         half_lives[name] = float(half_life)
         cmax[name] = float(peak)
+        vz_f[name] = float(pk["vz_f"])
 
     # The 6-state model reproduces the literature half-life for warfarin.
-    assert half_lives["DEFAULT"] == pytest.approx(42.38, rel=0.02)
-    # The 14-state model does not: it is an order of magnitude longer.
-    assert half_lives["STANDARD_14"] > 10.0 * half_lives["DEFAULT"], (
-        f"the wide network's half-life ({half_lives['STANDARD_14']:.1f} h) is "
-        f"not the order of magnitude it should be if it were equivalent to the "
-        f"validated model ({half_lives['DEFAULT']:.1f} h)")
+    assert half_lives["DEFAULT"] == pytest.approx(42.44, rel=0.02)
+    # The 14-state model does too: calibrated, not an order of magnitude long.
+    assert half_lives["STANDARD_14"] == pytest.approx(46.26, rel=0.05)
+    for name in ("DEFAULT", "STANDARD_14"):
+        assert 20.0 <= half_lives[name] <= 80.0, (
+            f"{name}: half-life {half_lives[name]:.1f} h outside 20-80 h")
+        assert 0.5 <= vz_f[name] / drug.typical_v_f <= 2.0, (
+            f"{name}: Vz/F {vz_f[name]:.2f} L outside 0.5x-2x of typical_v_f")
 
-    # On the reference adult the Cmax delta is marginally outside the band the
-    # population benchmark sits inside -- the tolerance is not a guarantee.
+    # On the reference adult the Cmax delta sits inside the band the
+    # population benchmark sits inside.
     reference_delta = (cmax["STANDARD_14"] - cmax["DEFAULT"]) / cmax["DEFAULT"]
     assert reference_delta < 0.0
-    assert abs(reference_delta) <= 0.30, (
-        f"reference-adult Cmax delta {reference_delta:.2%} is far outside the "
+    assert abs(reference_delta) <= CMAX_AGREEMENT_TOLERANCE, (
+        f"reference-adult Cmax delta {reference_delta:.2%} is outside the "
         f"{CMAX_AGREEMENT_TOLERANCE:.0%} band")
-    assert abs(reference_delta) > CMAX_AGREEMENT_TOLERANCE, (
-        f"reference-adult Cmax delta {reference_delta:.2%} is now inside the "
-        f"{CMAX_AGREEMENT_TOLERANCE:.0%} band; if the wide network was "
-        f"recalibrated, the tolerance and the documented deltas must be "
-        f"re-derived together")
 
 
 def test_the_cli_can_select_the_wide_network_without_moving_the_default() -> None:
